@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photoarchive"
+version = "0.0.1"
+description = "Family photo archive desktop app (ingest, triage, dedupe, cleanup, faces, sync)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "PySide6",
+  "Pillow",
+  "pillow-heif",
+  "imagehash",
+  "psycopg[binary]",
+  "pydantic",
+  "pydantic-settings",
+  "exifread",
+  "piexif",
+  "numpy",
+  "opencv-python-headless",
+  "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

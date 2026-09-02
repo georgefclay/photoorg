@@ -1,0 +1,28 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Personal notes
+GC.md
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+*.egg-info/
+
+# Working directories (should not exist inside repo, but guard anyway)
+working/
+quarantine/
+manual-fix/
+thumbs/
+
+# Logs
+*.log
+
+# Claude local settings
+.claude/settings.local.json
