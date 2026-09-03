@@ -54,7 +54,7 @@ export const up = (pgm) => {
 
   pgm.createTable('person_name_variants', {
     id:        { type: 'bigserial', primaryKey: true },
-    person_id: { type: 'bigint', notNull: true, references: 'people', onDelete: 'CASCADE' },
+    person_id: { type: 'bigint', notNull: true, references: 'people', onDelete: 'RESTRICT' },
     variant:   { type: 'text', notNull: true },
     kind:      { type: 'name_variant_kind', notNull: true },
     created_at:{ type: 'timestamptz', notNull: true, default: pgm.func('now()') },
@@ -70,8 +70,8 @@ export const up = (pgm) => {
 
   pgm.createTable('relationships', {
     id:          { type: 'bigserial', primaryKey: true },
-    person_a_id: { type: 'bigint', notNull: true, references: 'people', onDelete: 'CASCADE' },
-    person_b_id: { type: 'bigint', notNull: true, references: 'people', onDelete: 'CASCADE' },
+    person_a_id: { type: 'bigint', notNull: true, references: 'people', onDelete: 'RESTRICT' },
+    person_b_id: { type: 'bigint', notNull: true, references: 'people', onDelete: 'RESTRICT' },
     type:        { type: 'relationship_type', notNull: true },
     confirmed:   { type: 'boolean', notNull: true, default: false },
     created_by:  { type: 'bigint' },

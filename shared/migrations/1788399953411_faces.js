@@ -3,8 +3,8 @@ export const shorthands = undefined;
 export const up = (pgm) => {
   pgm.createTable('faces', {
     id:              { type: 'bigserial', primaryKey: true },
-    photo_id:        { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
-    person_id:       { type: 'bigint', references: 'people', onDelete: 'SET NULL' },
+    photo_id:        { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
+    person_id:       { type: 'bigint', references: 'people', onDelete: 'RESTRICT' },
     bbox:            { type: 'jsonb', notNull: true },
     embedding:       { type: 'real[]' },
     embedding_model: { type: 'text' },

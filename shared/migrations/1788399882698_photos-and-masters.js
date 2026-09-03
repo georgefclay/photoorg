@@ -69,7 +69,7 @@ export const up = (pgm) => {
 
   pgm.createTable('photo_masters', {
     id:           { type: 'bigserial', primaryKey: true },
-    photo_id:     { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
+    photo_id:     { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
     master_path:  { type: 'text', notNull: true, unique: true },
     sha256:       { type: 'text', notNull: true, unique: true },
     width:        { type: 'int' },
@@ -94,7 +94,7 @@ export const up = (pgm) => {
 
   pgm.createTable('photo_backs', {
     id:                        { type: 'bigserial', primaryKey: true },
-    photo_id:                  { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
+    photo_id:                  { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
     master_path:               { type: 'text', notNull: true, unique: true },
     sha256:                    { type: 'text', notNull: true, unique: true },
     working_path:              { type: 'text' },

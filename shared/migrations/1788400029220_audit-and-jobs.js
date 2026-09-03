@@ -28,8 +28,8 @@ export const up = (pgm) => {
   pgm.createIndex('job_runs', 'status');
 
   pgm.createTable('job_items', {
-    job_run_id: { type: 'bigint', notNull: true, references: 'job_runs', onDelete: 'CASCADE' },
-    photo_id:   { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
+    job_run_id: { type: 'bigint', notNull: true, references: 'job_runs', onDelete: 'RESTRICT' },
+    photo_id:   { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
     status:     { type: 'text', notNull: true },
     error:      { type: 'text' },
     updated_at: { type: 'timestamptz', notNull: true, default: pgm.func('now()') },
@@ -42,7 +42,7 @@ export const up = (pgm) => {
   // Per-photo, per-job status so "re-run describe for everything after a model
   // upgrade" is a single update to model/status.
   pgm.createTable('photo_job_status', {
-    photo_id:     { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
+    photo_id:     { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
     job_name:     { type: 'text', notNull: true },
     model:        { type: 'text' },
     status:       { type: 'text', notNull: true },

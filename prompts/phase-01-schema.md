@@ -109,3 +109,19 @@ Report back with the migration list, the smoke test output, and any place you de
 6. **session table.** Match connect-pg-simple exactly, with the comment.
 7. **TSV trigger on photos.** Yes, add it.
 8. **Suggestion check constraint.** Leave it soft. App code enforces; note the rule in `SCHEMA.md`.
+
+---
+
+## Phase 1 follow-up (after the first report)
+
+Two changes, one new migration, then re-run the smoke test.
+
+A. **No cascading deletes.** The project rule is "no real deletes, ever". `onDelete: 'CASCADE'` on `comments.photo_id`, `likes.*`, `suggestions.photo_id`, and anywhere else it appears (`album_photos`, `photo_places`, `faces.photo_id`, `photo_masters`, `photo_backs`, `job_items`, `person_name_variants`, `relationships`, `magic_links`, …) would silently destroy history if a parent row were ever hard-deleted. Change every FK to `RESTRICT` (or the default `NO ACTION`). `SET NULL` on `*_by` user references is fine and stays. Do this by editing the existing migrations (nothing is deployed yet), not by a new migration.
+
+B. **Late foreign keys.** Add migration 11 `late-foreign-keys` that adds the FKs that were skipped because `users` did not exist yet: `faces.disputed_by`, `faces.created_by`, `relationships.created_by`, `albums.created_by`, all `references users on delete set null`. Down drops them. Keep `audit_log.entity_id` as a bare bigint — it is polymorphic on purpose.
+
+C. Update `SCHEMA.md` with one line under the rules: "All parent/child FKs are RESTRICT; rows are soft-deleted, never removed."
+
+D. George runs `createdb -U postgres -O photo_user photoorg_test`, then you run `npm test` and paste the output. Verify `migrate down 0` still reaches zero with the new migration, and up again.
+
+Commit: `Phase 1 follow-up: RESTRICT FKs, late user FKs`.

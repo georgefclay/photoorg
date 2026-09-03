@@ -3,8 +3,8 @@ export const shorthands = undefined;
 export const up = (pgm) => {
   pgm.createTable('comments', {
     id:         { type: 'bigserial', primaryKey: true },
-    photo_id:   { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
-    user_id:    { type: 'bigint', notNull: true, references: 'users', onDelete: 'CASCADE' },
+    photo_id:   { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
+    user_id:    { type: 'bigint', notNull: true, references: 'users', onDelete: 'RESTRICT' },
     body:       { type: 'text', notNull: true },
     is_hidden:  { type: 'boolean', notNull: true, default: false },
     hidden_by:  { type: 'bigint', references: 'users', onDelete: 'SET NULL' },
@@ -20,8 +20,8 @@ export const up = (pgm) => {
   `);
 
   pgm.createTable('likes', {
-    user_id:    { type: 'bigint', notNull: true, references: 'users', onDelete: 'CASCADE' },
-    photo_id:   { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
+    user_id:    { type: 'bigint', notNull: true, references: 'users', onDelete: 'RESTRICT' },
+    photo_id:   { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
     created_at: { type: 'timestamptz', notNull: true, default: pgm.func('now()') },
   });
   pgm.addConstraint('likes', 'likes_pk', { primaryKey: ['user_id', 'photo_id'] });
@@ -29,7 +29,7 @@ export const up = (pgm) => {
 
   pgm.createTable('suggestions', {
     id:              { type: 'bigserial', primaryKey: true },
-    photo_id:        { type: 'bigint', references: 'photos', onDelete: 'CASCADE' },
+    photo_id:        { type: 'bigint', references: 'photos', onDelete: 'RESTRICT' },
     user_id:         { type: 'bigint', references: 'users', onDelete: 'SET NULL' },
     kind:            { type: 'suggestion_kind', notNull: true },
     payload:         { type: 'jsonb', notNull: true },

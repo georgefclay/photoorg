@@ -18,8 +18,8 @@ export const up = (pgm) => {
   `);
 
   pgm.createTable('photo_places', {
-    photo_id:  { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
-    place_id:  { type: 'bigint', notNull: true, references: 'places', onDelete: 'CASCADE' },
+    photo_id:  { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
+    place_id:  { type: 'bigint', notNull: true, references: 'places', onDelete: 'RESTRICT' },
     confirmed: { type: 'boolean', notNull: true, default: false },
     created_at:{ type: 'timestamptz', notNull: true, default: pgm.func('now()') },
   });
@@ -47,8 +47,8 @@ export const up = (pgm) => {
   `);
 
   pgm.createTable('album_photos', {
-    album_id:  { type: 'bigint', notNull: true, references: 'albums', onDelete: 'CASCADE' },
-    photo_id:  { type: 'bigint', notNull: true, references: 'photos', onDelete: 'CASCADE' },
+    album_id:  { type: 'bigint', notNull: true, references: 'albums', onDelete: 'RESTRICT' },
+    photo_id:  { type: 'bigint', notNull: true, references: 'photos', onDelete: 'RESTRICT' },
     position:  { type: 'int' },
     created_at:{ type: 'timestamptz', notNull: true, default: pgm.func('now()') },
   });

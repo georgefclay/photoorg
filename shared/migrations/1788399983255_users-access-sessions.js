@@ -43,7 +43,7 @@ export const up = (pgm) => {
   //   insert into magic_links (..., expires_at) values (..., now() + interval '15 minutes')
   pgm.createTable('magic_links', {
     id:         { type: 'bigserial', primaryKey: true },
-    user_id:    { type: 'bigint', notNull: true, references: 'users', onDelete: 'CASCADE' },
+    user_id:    { type: 'bigint', notNull: true, references: 'users', onDelete: 'RESTRICT' },
     token_hash: { type: 'text', notNull: true, unique: true },
     expires_at: { type: 'timestamptz', notNull: true },
     used_at:    { type: 'timestamptz' },

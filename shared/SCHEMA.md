@@ -10,6 +10,7 @@ The rule that governs the whole schema:
 - **Suggestions** — from AI, family contributors, or the import step — live in `suggestions` with `status = 'pending'`. An admin promotes a suggestion by copying its payload into the facts row and setting `resolved_at`, `resolved_by`, `status`.
 - Nothing else writes AI output straight into a fact column.
 - Deletes are soft: `is_deleted` and `deleted_at` on every entity that carries them; quarantined files sit at `quarantine_path`.
+- All parent/child FKs are `RESTRICT`; rows are soft-deleted, never removed. `SET NULL` is used only on user references (`*_by`, actor `user_id`) so a suspended user's contributions retain a null attribution.
 - Every state change writes an `audit_log` row with `previous_value` and `new_value` (JSONB), never in image metadata.
 
 ## Tables
