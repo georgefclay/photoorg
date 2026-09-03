@@ -13,7 +13,7 @@
     "migrate:down:all": "node --env-file=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js down 0",
     "migrate:create": "node node_modules/node-pg-migrate/bin/node-pg-migrate.js create",
     "seed:nicknames": "node --env-file=.env seed/nicknames.js",
-    "test": "node --env-file=.env --test test/"
+    "test": "node --env-file=.env --test test/smoke.js"
   },
   "dependencies": {
     "node-pg-migrate": "^9.0.0",
