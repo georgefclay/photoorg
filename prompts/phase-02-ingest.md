@@ -121,3 +121,36 @@ Do not review the proposals yourself — George does that in the grid. Report ba
 
 Note on the guard vs. adding new batches: George will periodically write new scans into a master root. The workflow is: `icacls … /remove:d` → add files → `icacls … /deny` → run ingest. Put a "Masters are currently writable" warning (not a refusal) in the status bar at app start so it's obvious when the deny is off; ingest itself still refuses.
 
+
+---
+
+## Phase 2 fix-up 1 — back detector is wrong
+
+Observed in the review grid on `Batch 00001`:
+- Proposal "#19 → #20": left is a handwritten back (#19), right is a studio portrait (#20). The portrait was scored as a back (0.61) and paired with the handwriting as its "front".
+- Proposal "#21 → #22": two portraits, right one scored 0.61 as a back.
+- Nearly every proposal seen scores 0.61. A constant score means at least one component returns a fixed value and dominates.
+- 914 proposals out of 5,279 scans is far too many; George scanned backs only when there was writing.
+
+Do this, in order:
+
+1. **Diagnose before changing anything.** Add `tools/backscore.py <root-label> <batch>` that prints, per file in the batch: sequence, filename, every component of the score (light-pixel fraction, mean saturation, ink-stroke fraction, face count, aspect-ratio match) and the final score. Run it on `Batch 00001` and paste the table for #17–#23 in your report. Identify which component is broken (likely: saturation computed on a greyscale thumbnail, lightness threshold inverted, face cascade never loading so "no faces" is always true, aspect-ratio term always 1).
+
+2. **Fix the scorer.** Requirements on Batch 00001: #19 (handwriting on white) scores >= 0.8; the studio portraits (#20, #21, #22) score <= 0.2. A dark-background photo must never look like a back. Components: fraction of pixels with L > 0.85 (expect > 0.6 for a back), mean saturation (expect < 0.08), ink fraction (dark strokes 0.5-15 % of pixels), face count = 0. Combine multiplicatively or with a hard veto when any component fails - not by averaging; averaging is how a portrait gets 0.61.
+
+3. **Fix the pairing direction.** A back's front is the **preceding** file in scan sequence. The grid shows the front on the left and the back on the right, labelled `Batch 00001 #18 (front) <- #19 (back)`. If the preceding file is itself a probable back or does not exist, propose nothing for that file.
+
+4. **Rebuild proposals.** Add an Ingest action "Rebuild back proposals" that re-scores **every** file under a scan-kind root, not just the pending ones — real backs like #19 were never proposed and are already committed as photos.
+   - Pending `ingest_pairings` rows: re-score; drop those that no longer qualify (held file becomes an ordinary photo through the normal path); keep those that still qualify with the new score and corrected front.
+   - Committed `photos` rows (scan roots, not already a front of an accepted pairing, not deleted): if the new score qualifies, create a pending `ingest_pairings` row whose back is the existing photo (add nullable `back_photo_id` to the table; `back_master_path` stays for held files). Accepting such a proposal creates the `photo_backs` row, moves the working file and thumb to the back's location, and marks the old `photos` row `is_deleted=true` with `physical_ref_note='converted to back of photo <id>'` — no real delete. Rejecting leaves the photo as it is and records the rejection so it is never proposed again.
+   - Never touch accepted/rejected rows. Rescan proposals are untouched.
+   Run it. Report the new count and a score histogram (0.1 buckets).
+
+5. **Review grid usability.** Add a Swap key (S) that re-pairs the back with the *following* file instead, for the rare reversed scan; a score filter so George can view only >= 0.9 first; show both thumbnails at full height, uncropped.
+
+6. **Tests.** Regression tests with synthetic fixtures: white image with dark scribbles -> >= 0.8; dark image with a face-sized light oval -> <= 0.2; grey mid-tone image -> <= 0.3.
+
+7. Add `run-desktop.bat` at the repo root that launches `desktop\.venv\Scripts\python -m photoarchive`.
+
+Commit: `Phase 2 fix-up 1: back detector, pairing direction, rebuild`.
+Report: the diagnostic table, root cause, new proposal count and histogram.

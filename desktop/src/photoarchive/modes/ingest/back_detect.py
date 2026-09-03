@@ -1,14 +1,19 @@
 """Score the probability that a scanned image is the back of a print.
 
-Signals (higher score → more back-like):
-  - mostly light background (mean value high)
-  - low saturation (near-grayscale)
-  - some ink-like dark strokes covering a small fraction (not zero, not much)
-  - no face-like regions (cheap Haar cascade)
-  - aspect ratio close to the previous file's (paired scans)
+Combine components multiplicatively with hard vetoes; do NOT average.
+Averaging is how a portrait's dark-clothing "ink fraction" plus flesh-tone
+"low saturation" combine into a false-positive 0.61 score.
 
-The scorer returns 0..1. A file is a *proposed back* when its score is >= 0.6
-AND the previous file in the same folder is not itself a proposed back.
+A back has all of:
+  - light background (fraction of pixels with HLS L > 0.85 is high)
+  - near-grayscale (mean HLS S is very low)
+  - sparse ink strokes (dark-pixel fraction in the ~0.5 %..15 % band)
+  - no faces (Haar cascade)
+
+Any failure zeros the score. All passing → score → 1.
+
+The scorer works on a 512-px thumbnail; aspect_ratio is kept for the pairing
+step (aspect_close), not for the score itself.
 """
 from __future__ import annotations
 
@@ -20,6 +25,13 @@ import numpy as np
 from PIL import Image, ImageOps
 
 log = logging.getLogger(__name__)
+
+
+LIGHT_L_THRESHOLD = 0.85
+MIN_LIGHT_FRAC = 0.60
+MAX_MEAN_SATURATION = 0.08
+INK_LO = 0.005
+INK_HI = 0.15
 
 _HAAR: cv2.CascadeClassifier | None = None
 
@@ -35,62 +47,80 @@ def _haar() -> cv2.CascadeClassifier:
 @dataclass(frozen=True)
 class BackFeatures:
     score: float
-    mean_v: float
-    mean_s: float
+    light_pixel_fraction: float
+    mean_saturation: float
     ink_fraction: float
     face_count: int
     aspect_ratio: float
 
 
 def analyse(image: Image.Image) -> BackFeatures:
-    """Feature extraction only; caller does the score-vs-threshold decision."""
+    """Feature extraction only; caller decides score vs. threshold and pairing."""
     img = ImageOps.exif_transpose(image).convert("RGB")
-    # Downscale for speed; features are all intensity-based.
     img.thumbnail((512, 512), Image.LANCZOS)
     arr = np.asarray(img)
     h, w = arr.shape[:2]
     aspect = w / max(h, 1)
 
-    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
-    mean_v = float(hsv[..., 2].mean()) / 255.0
-    mean_s = float(hsv[..., 1].mean()) / 255.0
+    # HLS: L is lightness (0..1 after divide), S is saturation (0..1).
+    hls = cv2.cvtColor(arr, cv2.COLOR_RGB2HLS).astype(np.float32) / 255.0
+    L = hls[..., 1]
+    S = hls[..., 2]
+    light_pixel_fraction = float((L > LIGHT_L_THRESHOLD).mean())
+    mean_saturation = float(S.mean())
 
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-    # Adaptive threshold catches pen/pencil strokes even when the paper isn't
-    # perfectly uniform; ink pixels become the minority.
     thr = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 10,
     )
     ink_fraction = float((thr > 0).mean())
 
+    face_count = 0
     try:
         faces = _haar().detectMultiScale(
             gray, scaleFactor=1.2, minNeighbors=4, minSize=(40, 40)
         )
-        face_count = 0 if faces is None else len(faces)
+        if faces is not None:
+            face_count = len(faces)
     except cv2.error:
-        face_count = 0
+        pass
 
-    score = _score(mean_v, mean_s, ink_fraction, face_count)
-    return BackFeatures(score=score, mean_v=mean_v, mean_s=mean_s,
-                        ink_fraction=ink_fraction, face_count=face_count,
-                        aspect_ratio=aspect)
+    score = _score(light_pixel_fraction, mean_saturation, ink_fraction, face_count)
+    return BackFeatures(
+        score=score,
+        light_pixel_fraction=light_pixel_fraction,
+        mean_saturation=mean_saturation,
+        ink_fraction=ink_fraction,
+        face_count=face_count,
+        aspect_ratio=aspect,
+    )
 
 
-def _score(mean_v: float, mean_s: float,
+def _score(light_pixel_fraction: float, mean_saturation: float,
            ink_fraction: float, face_count: int) -> float:
-    # Each component 0..1. Ink is weighted heavily so a truly blank sheet
-    # (no writing) is NOT scored as a back — the whole point of the pass is
-    # to catch scanned backs of prints that have writing on them.
-    light_bg = _bump(mean_v, 0.75, 1.00)
-    low_sat = 1.0 - _bump(mean_s, 0.20, 0.60)
-    good_ink = _band(ink_fraction, 0.005, 0.02, 0.12, 0.30)
-    no_faces = 0.0 if face_count > 0 else 1.0
-    raw = 0.20 * light_bg + 0.15 * low_sat + 0.50 * good_ink + 0.15 * no_faces
-    return float(max(0.0, min(1.0, raw)))
+    # Hard veto: any human face → not a back.
+    if face_count > 0:
+        return 0.0
+    # Hard veto: no light background at all → not a back.
+    if light_pixel_fraction < MIN_LIGHT_FRAC / 2:
+        return 0.0
+    # Hard veto: too saturated to be paper.
+    if mean_saturation > 2 * MAX_MEAN_SATURATION:
+        return 0.0
+    # Hard veto: outside the ink band (blank paper OR densely dark).
+    if ink_fraction < INK_LO or ink_fraction > INK_HI:
+        return 0.0
+    # Otherwise combine multiplicatively. Each factor peaks at 1.0 in its
+    # ideal region, ramps to 0 at the veto boundary.
+    light_factor = _ramp_up(light_pixel_fraction, MIN_LIGHT_FRAC / 2, MIN_LIGHT_FRAC)
+    sat_factor = _ramp_down(mean_saturation, MAX_MEAN_SATURATION, 2 * MAX_MEAN_SATURATION)
+    # Ink: 1 across the plateau [INK_LO, 0.12], falling off at 0.005 and
+    # again above 0.12 to the hard veto at INK_HI. Spec: 0.5-15 % is a back.
+    ink_factor = _plateau(ink_fraction, INK_LO * 0.5, INK_LO, 0.12, INK_HI)
+    return float(max(0.0, min(1.0, light_factor * sat_factor * ink_factor)))
 
 
-def _bump(x: float, lo: float, hi: float) -> float:
+def _ramp_up(x: float, lo: float, hi: float) -> float:
     if x <= lo:
         return 0.0
     if x >= hi:
@@ -98,8 +128,15 @@ def _bump(x: float, lo: float, hi: float) -> float:
     return (x - lo) / (hi - lo)
 
 
-def _band(x: float, lo1: float, lo2: float, hi1: float, hi2: float) -> float:
-    """Trapezoid: 0 below lo1, 1 in [lo2..hi1], 0 above hi2."""
+def _ramp_down(x: float, lo: float, hi: float) -> float:
+    if x <= lo:
+        return 1.0
+    if x >= hi:
+        return 0.0
+    return (hi - x) / (hi - lo)
+
+
+def _plateau(x: float, lo1: float, lo2: float, hi1: float, hi2: float) -> float:
     if x <= lo1 or x >= hi2:
         return 0.0
     if lo2 <= x <= hi1:

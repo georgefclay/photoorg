@@ -17,7 +17,18 @@ log = logging.getLogger(__name__)
 # ---------- Pairing ----------
 
 def accept_pairing(settings: Settings, pairing_id: int) -> None:
-    """Promote a staged back to a photo_backs row and rename staging → final."""
+    """Promote a proposed back to a photo_backs row.
+
+    Two shapes of proposal:
+      - **held back** (back_photo_id is null): the file has been sitting in
+        `WORKING_DIR/_staging/` since ingest. Move staging → back working
+        name, insert photo_backs.
+      - **photo-as-back** (back_photo_id set): rebuild proposed an
+        already-committed photo as the back of another. The file already
+        lives at photos.working_path; move it to the back working name,
+        insert photo_backs, then mark the demoted photos row is_deleted with
+        `physical_ref_note='converted to back of photo <front_id>'`.
+    """
     with db.connection() as conn:
         conn.autocommit = False
         try:
@@ -25,7 +36,8 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
                 """
                 select front_photo_id, back_master_path, back_sha256,
                        back_source_folder, back_source_filename, back_scan_sequence,
-                       back_score, staging_working_path, staging_thumb_path, status
+                       back_score, staging_working_path, staging_thumb_path, status,
+                       back_photo_id
                 from ingest_pairings where id = %s
                 for update
                 """,
@@ -34,7 +46,7 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
             if row is None:
                 raise ValueError(f"pairing {pairing_id} not found")
             (front_id, back_path, sha, folder, name, seq,
-             score, staging_wpath, staging_tpath, status) = row
+             score, staging_wpath, staging_tpath, status, back_pid) = row
             if status != "pending":
                 raise ValueError(f"pairing {pairing_id} is {status}, not pending")
 
@@ -50,7 +62,6 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
             ).fetchone()
             back_id = new_row[0]
 
-            # Rename staging → final working path for the back.
             final_wpath = _final_back_working_path(settings, back_id, sha, staging_wpath)
             _move(Path(staging_wpath), final_wpath)
             conn.execute(
@@ -61,6 +72,23 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
                 dest_thumb = settings.THUMBS_DIR / f"back_{back_id:08d}.jpg"
                 _move(Path(staging_tpath), dest_thumb)
 
+            audit_new: dict = {"status": "accepted", "photo_back_id": back_id,
+                               "front_photo_id": front_id}
+
+            if back_pid is not None:
+                # Photo-as-back: demote the old photos row.
+                conn.execute(
+                    """
+                    update photos
+                    set is_deleted = true,
+                        deleted_at = now(),
+                        physical_ref_note = %s
+                    where id = %s
+                    """,
+                    (f"converted to back of photo {front_id}", back_pid),
+                )
+                audit_new["demoted_photo_id"] = back_pid
+
             conn.execute(
                 "update ingest_pairings set status = 'accepted', decided_at = now() where id = %s",
                 (pairing_id,),
@@ -68,8 +96,7 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
             db.audit(conn, actor="desktop", action="pairing.accept",
                      entity_type="ingest_pairing", entity_id=pairing_id,
                      previous_value={"status": "pending"},
-                     new_value={"status": "accepted", "photo_back_id": back_id,
-                                "front_photo_id": front_id})
+                     new_value=audit_new)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -78,9 +105,16 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
 
 def reject_pairing(
     settings: Settings, pairing_id: int, *, job_run_id: int | None = None,
-) -> int:
-    """Reject a staged back → insert it as a normal new photo.
-    Returns the new photo_id."""
+) -> int | None:
+    """Reject a proposal.
+
+    Held back (back_photo_id null): insert the staged file as a normal photo
+    and return the new photo_id.
+
+    Photo-as-back (back_photo_id set): just mark status='rejected'; the
+    photo remains as it is. Rebuild uses the presence of a rejected pairing
+    on that photo as the "never propose again" flag. Returns None.
+    """
     with db.connection() as conn:
         conn.autocommit = False
         try:
@@ -88,7 +122,8 @@ def reject_pairing(
                 """
                 select back_master_path, back_sha256, back_source_folder,
                        back_source_filename, back_scan_sequence,
-                       staging_working_path, staging_thumb_path, status
+                       staging_working_path, staging_thumb_path, status,
+                       back_photo_id
                 from ingest_pairings where id = %s
                 for update
                 """,
@@ -97,9 +132,23 @@ def reject_pairing(
             if row is None:
                 raise ValueError(f"pairing {pairing_id} not found")
             (back_path, sha, folder, name, seq,
-             staging_wpath, staging_tpath, status) = row
+             staging_wpath, staging_tpath, status, back_pid) = row
             if status != "pending":
                 raise ValueError(f"pairing {pairing_id} is {status}, not pending")
+
+            if back_pid is not None:
+                # Photo-as-back reject: leave photo alone, record decision.
+                conn.execute(
+                    "update ingest_pairings set status = 'rejected', decided_at = now() where id = %s",
+                    (pairing_id,),
+                )
+                db.audit(conn, actor="desktop", action="pairing.reject",
+                         entity_type="ingest_pairing", entity_id=pairing_id,
+                         previous_value={"status": "pending"},
+                         new_value={"status": "rejected", "back_photo_id": back_pid,
+                                    "note": "photo preserved"})
+                conn.commit()
+                return None
 
             # Insert as a plain scan photo — we already have sha and metadata.
             # Read master details fresh (dimensions) via Pillow on the staging

@@ -55,11 +55,14 @@ class IngestPanel(QWidget):
         self._cancel = QPushButton("Cancel")
         self._cancel.setEnabled(False)
         self._cancel.clicked.connect(self._on_cancel)
+        self._rebuild = QPushButton("Rebuild back proposals…")
+        self._rebuild.clicked.connect(self._on_rebuild)
         self._review = QPushButton("Review proposals…")
         self._review.clicked.connect(self._open_review)
         controls.addWidget(self._start)
         controls.addWidget(self._cancel)
         controls.addStretch(1)
+        controls.addWidget(self._rebuild)
         controls.addWidget(self._review)
         outer.addLayout(controls)
 
@@ -122,6 +125,61 @@ class IngestPanel(QWidget):
             self._cancel.setEnabled(False)
             self._counts.setText("cancelling — will stop after current file…")
             self._job.cancel()
+
+    def _on_rebuild(self) -> None:
+        roots = self._selected_roots()
+        if not any(r.kind == "scan" for r in roots):
+            QMessageBox.warning(
+                self, "Rebuild",
+                "Select at least one scan-kind root.",
+            )
+            return
+        reply = QMessageBox.question(
+            self, "Rebuild back proposals",
+            "Re-score every scan file and refresh the pending pairing set.\n\n"
+            "Existing accepted/rejected proposals are untouched. Rescan\n"
+            "proposals are untouched. This may take several minutes on the\n"
+            "full archive.",
+            QMessageBox.Ok | QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Ok:
+            return
+        from .rebuild import rebuild_back_proposals
+
+        self._start.setEnabled(False)
+        self._rebuild.setEnabled(False)
+        self._cancel.setEnabled(True)
+        self._progress.setVisible(True)
+        self._t0 = time.time()
+        self._counts.setText("rebuilding…")
+        self._last.setText("")
+
+        def target(*, progress_cb, cancel_token, **_ignored):
+            summary = rebuild_back_proposals(
+                settings=self._settings, roots=roots,
+                progress_cb=progress_cb, cancel_token=cancel_token,
+            )
+            return summary.as_dict()
+
+        self._job = BackgroundJob(target)
+        self._job.signals.progress.connect(self._on_rebuild_progress)
+        self._job.signals.finished.connect(self._on_rebuild_finished)
+        self._job.signals.failed.connect(self._on_failed)
+        self._job.start()
+
+    def _on_rebuild_progress(self, payload: dict[str, Any]) -> None:
+        if payload.get("kind") == "scored":
+            n = int(payload.get("n", 0))
+            elapsed = max(time.time() - (self._t0 or time.time()), 0.001)
+            self._rate.setText(f"{n} scored, {n / elapsed:.1f}/s over {elapsed:.0f}s")
+
+    def _on_rebuild_finished(self, summary: dict) -> None:
+        self._teardown_job()
+        self._rebuild.setEnabled(True)
+        text = _rebuild_summary_text(summary)
+        self._counts.setText("rebuild complete")
+        QMessageBox.information(self, "Rebuild complete", text)
+        self._refresh_review_button()
 
     def _on_progress(self, payload: dict[str, Any]) -> None:
         if payload.get("kind") != "counts":
@@ -198,6 +256,25 @@ class IngestPanel(QWidget):
         dlg = ReviewGridDialog(self._settings, self)
         dlg.exec()
         self._refresh_review_button()
+
+
+def _rebuild_summary_text(s: dict) -> str:
+    lines = [
+        f"Files scored: {s.get('scan_files_scored', 0)}",
+        f"Pending kept:   {s.get('pending_kept', 0)}",
+        f"Pending dropped: {s.get('pending_dropped', 0)}",
+        f"Photo-as-back proposed: {s.get('photo_as_back_proposed', 0)}",
+        f"  (skipped-rejected {s.get('photo_as_back_skipped_rejected', 0)},"
+        f" no-predecessor {s.get('photo_as_back_skipped_no_predecessor', 0)},"
+        f" predecessor-is-back {s.get('photo_as_back_skipped_predecessor_is_back', 0)},"
+        f" aspect {s.get('photo_as_back_skipped_aspect', 0)})",
+        f"Total pending after: {s.get('total_pending_after', 0)}",
+        "",
+        "Score histogram (0.1 buckets, all scored files):",
+    ]
+    for bucket, n in (s.get("histogram") or {}).items():
+        lines.append(f"  {bucket}  {'█' * min(n, 60)}  ({n})")
+    return "\n".join(lines)
 
 
 def _summary_text(s: dict) -> str:
