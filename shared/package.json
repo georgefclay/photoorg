@@ -2,14 +2,18 @@
   "name": "photoarchive-shared",
   "version": "0.0.1",
   "private": true,
+  "type": "module",
   "description": "Postgres migrations and nickname seed shared between laptop and VM",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "migrate:up": "node-pg-migrate up",
-    "migrate:down": "node-pg-migrate down",
-    "migrate:create": "node-pg-migrate create"
+    "migrate:up": "node --env-file=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js up",
+    "migrate:down": "node --env-file=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js down",
+    "migrate:down:all": "node --env-file=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js down 0",
+    "migrate:create": "node node_modules/node-pg-migrate/bin/node-pg-migrate.js create",
+    "seed:nicknames": "node --env-file=.env seed/nicknames.js",
+    "test": "node --env-file=.env --test test/"
   },
   "dependencies": {
     "node-pg-migrate": "^9.0.0",
