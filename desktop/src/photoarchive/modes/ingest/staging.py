@@ -169,19 +169,22 @@ def stage_pairing(
     back_score: float,
     staging_working_path: str,
     staging_thumb_path: str | None,
+    back_aspect_mismatch: bool = False,
 ) -> int:
     row = conn.execute(
         """
         insert into ingest_pairings
           (front_photo_id, back_master_path, back_sha256,
            back_source_folder, back_source_filename, back_scan_sequence,
-           back_score, staging_working_path, staging_thumb_path)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+           back_score, staging_working_path, staging_thumb_path,
+           back_aspect_mismatch)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning id
         """,
         (front_photo_id, back_master_path, back_sha256,
          back_source_folder, back_source_filename, back_scan_sequence,
-         back_score, staging_working_path, staging_thumb_path),
+         back_score, staging_working_path, staging_thumb_path,
+         back_aspect_mismatch),
     ).fetchone()
     return row[0]
 

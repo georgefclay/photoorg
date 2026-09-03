@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from photoarchive.config import MasterRoot
@@ -10,24 +11,43 @@ from photoarchive.modes.ingest.scanner import (
 )
 
 
-def _touch(p: Path, name: str) -> Path:
+def _touch(p: Path, name: str, mtime: float | None = None) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     f = p / name
     f.write_bytes(b"x")
+    if mtime is not None:
+        os.utime(f, (mtime, mtime))
     return f
 
 
-def test_natural_sort_scan_sequence(tmp_path):
+def test_scan_root_orders_by_mtime(tmp_path):
+    """Fix-up 3: scan_sequence follows mtime (the scanner writes envelope
+    order). Filenames alone would sort 0001 < 0004 < 0010 < 0026, but we
+    stamp explicit mtimes to force scanner-order 0026, 0004, 0010, 0001."""
     folder = tmp_path / "Batch 00012"
-    # Deliberately mixed order: alphabetical would give 0001, 0010, 0026, 0004.
+    for i, name in enumerate(["IMG_0026.JPG", "IMG_0004.JPG",
+                              "IMG_0010.JPG", "IMG_0001.JPG"]):
+        _touch(folder, name, mtime=1_700_000_000 + i * 60)
+    root = MasterRoot(label="scans", path=tmp_path, kind="scan")
+    seen = list(walk_root(root))
+    assert [f.source_filename for f in seen] == [
+        "IMG_0026.JPG", "IMG_0004.JPG", "IMG_0010.JPG", "IMG_0001.JPG",
+    ]
+    assert [f.scan_sequence for f in seen] == [1, 2, 3, 4]
+
+
+def test_scan_root_falls_back_to_natsort_when_mtimes_identical(tmp_path):
+    """If every file has the same mtime (a copy that flattened mtimes),
+    fall back to natsort by filename."""
+    folder = tmp_path / "Batch 00099"
+    same = 1_700_000_000
     for name in ["IMG_0026.JPG", "IMG_0004.JPG", "IMG_0010.JPG", "IMG_0001.JPG"]:
-        _touch(folder, name)
+        _touch(folder, name, mtime=same)
     root = MasterRoot(label="scans", path=tmp_path, kind="scan")
     seen = list(walk_root(root))
     assert [f.source_filename for f in seen] == [
         "IMG_0001.JPG", "IMG_0004.JPG", "IMG_0010.JPG", "IMG_0026.JPG",
     ]
-    assert [f.scan_sequence for f in seen] == [1, 2, 3, 4]
 
 
 def test_scan_batch_top_level_only(tmp_path):

@@ -63,6 +63,7 @@ def walk_root(root: MasterRoot) -> Iterator[ScannedFile]:
                 continue
             by_folder[d].append(name)
 
+    from .scan_order import order_files
     for folder in sorted(by_folder.keys()):
         try:
             rel = folder.relative_to(root.path)
@@ -72,8 +73,19 @@ def walk_root(root: MasterRoot) -> Iterator[ScannedFile]:
         top = source_folder.split("/", 1)[0] if source_folder else ""
         is_scan_root = root.kind == "scan"
         scan_batch = top if (is_scan_root and top) else None
-        sorted_names = natsorted(by_folder[folder])
-        for i, name in enumerate(sorted_names, start=1):
+        # For scan-kind roots, order by mtime (envelope order) with natsort
+        # filename as tie-break; for digital roots, natsort is fine.
+        if is_scan_root:
+            with_mtimes: list[tuple[str, float]] = []
+            for name in by_folder[folder]:
+                try:
+                    with_mtimes.append((name, (folder / name).stat().st_mtime))
+                except OSError:
+                    with_mtimes.append((name, 0.0))
+            ordered_names, _fallback = order_files(with_mtimes)
+        else:
+            ordered_names = natsorted(by_folder[folder])
+        for i, name in enumerate(ordered_names, start=1):
             ext = os.path.splitext(name)[1].lower()
             yield ScannedFile(
                 root_label=root.label,

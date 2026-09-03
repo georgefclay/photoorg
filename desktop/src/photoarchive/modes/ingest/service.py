@@ -233,15 +233,19 @@ def _process_file(
             rescan_hit = staging.find_rescan_candidate(conn, phash, threshold=6)
 
     # Decide the path: rescan candidate, back candidate, or normal.
+    # Fix-up 2: aspect is evidence, not a veto — at raw score >= 0.8 we
+    # propose regardless of aspect and let the review grid tag it.
     prev = per_folder_prev.get(f.source_folder)
-    is_back_candidate = (
-        root.kind == "scan"
-        and back_feat is not None
-        and back_feat.score >= 0.6
-        and prev is not None
-        and not prev.get("was_back", False)
-        and back_detect.aspect_close(prev["aspect"], back_feat.aspect_ratio)
-    )
+    aspect_mismatch = False
+    is_back_candidate = False
+    if (root.kind == "scan"
+            and back_feat is not None
+            and back_feat.score >= 0.6
+            and prev is not None
+            and not prev.get("was_back", False)):
+        aspects_ok = back_detect.aspect_close(prev["aspect"], back_feat.aspect_ratio)
+        aspect_mismatch = not aspects_ok
+        is_back_candidate = aspects_ok or back_feat.score >= 0.8
 
     if rescan_hit is not None:
         _handle_rescan(
@@ -258,7 +262,7 @@ def _process_file(
             settings=settings, root=root, f=f, sha=sha,
             width=width, height=height, back_feat=back_feat,  # type: ignore[arg-type]
             counts=counts, job_run_id=job_run_id, per_folder_prev=per_folder_prev,
-            front_photo_id=prev["photo_id"],
+            front_photo_id=prev["photo_id"], aspect_mismatch=aspect_mismatch,
         )
         return
 
@@ -346,6 +350,7 @@ def _commit_normal(
 def _handle_back(
     *, settings, root, f, sha, width, height, back_feat,
     counts, job_run_id, per_folder_prev, front_photo_id,
+    aspect_mismatch: bool = False,
 ) -> None:
     staging_wpath = paths.staging_working_path(settings, sha, f.ext)
     staging_tpath = paths.staging_thumb_path(settings, sha)
@@ -370,6 +375,7 @@ def _handle_back(
                 back_score=back_feat.score,
                 staging_working_path=str(staging_wpath),
                 staging_thumb_path=str(staging_tpath),
+                back_aspect_mismatch=aspect_mismatch,
             )
             conn.commit()
         except Exception:

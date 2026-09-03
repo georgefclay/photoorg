@@ -103,6 +103,136 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
             raise
 
 
+def accept_pairing_orphan(settings: Settings, pairing_id: int) -> int:
+    """Accept the back but with no front (photo_id null).
+
+    Used when George can see the writing on the back but the print itself
+    isn't in the archive. The back still gets stored + moved to the back
+    working name + becomes eligible for Phase 6 OCR; the front may be
+    identified later. Photo-as-back proposals still demote the old photos
+    row with `physical_ref_note='converted to orphan back'`.
+    Returns the new photo_backs.id.
+    """
+    with db.connection() as conn:
+        conn.autocommit = False
+        try:
+            row = conn.execute(
+                """
+                select back_master_path, back_sha256,
+                       back_source_folder, back_source_filename, back_scan_sequence,
+                       staging_working_path, staging_thumb_path, status,
+                       back_photo_id
+                from ingest_pairings where id = %s
+                for update
+                """,
+                (pairing_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"pairing {pairing_id} not found")
+            (back_path, sha, folder, name, seq,
+             staging_wpath, staging_tpath, status, back_pid) = row
+            if status != "pending":
+                raise ValueError(f"pairing {pairing_id} is {status}, not pending")
+
+            new_row = conn.execute(
+                """
+                insert into photo_backs
+                  (photo_id, master_path, sha256, source_folder,
+                   source_filename, scan_sequence)
+                values (NULL, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (back_path, sha, folder, name, seq),
+            ).fetchone()
+            back_id = new_row[0]
+
+            final_wpath = _final_back_working_path(settings, back_id, sha, staging_wpath)
+            _move(Path(staging_wpath), final_wpath)
+            conn.execute(
+                "update photo_backs set working_path = %s where id = %s",
+                (str(final_wpath), back_id),
+            )
+            if staging_tpath:
+                dest_thumb = settings.THUMBS_DIR / f"back_{back_id:08d}.jpg"
+                _move(Path(staging_tpath), dest_thumb)
+
+            audit_new: dict = {"status": "accepted", "photo_back_id": back_id,
+                               "orphan": True}
+            if back_pid is not None:
+                conn.execute(
+                    """
+                    update photos
+                    set is_deleted = true,
+                        deleted_at = now(),
+                        physical_ref_note = %s
+                    where id = %s
+                    """,
+                    ("converted to orphan back", back_pid),
+                )
+                audit_new["demoted_photo_id"] = back_pid
+
+            conn.execute(
+                "update ingest_pairings set status = 'accepted', decided_at = now() where id = %s",
+                (pairing_id,),
+            )
+            db.audit(conn, actor="desktop", action="pairing.accept_orphan",
+                     entity_type="ingest_pairing", entity_id=pairing_id,
+                     previous_value={"status": "pending"},
+                     new_value=audit_new)
+            conn.commit()
+            return back_id
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def change_pairing_front(
+    settings: Settings, pairing_id: int, new_front_photo_id: int,
+) -> None:
+    """Re-point a pending pairing's front. Used by the review grid's
+    filmstrip 'F' picker. Refuses if the pairing is already decided or
+    the new front is deleted / not a scan-root photo."""
+    with db.connection() as conn:
+        conn.autocommit = False
+        try:
+            row = conn.execute(
+                """
+                select ip.status, ip.front_photo_id
+                from ingest_pairings ip where id = %s for update
+                """,
+                (pairing_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"pairing {pairing_id} not found")
+            status, old_front = row
+            if status != "pending":
+                raise ValueError(f"pairing {pairing_id} is {status}, not pending")
+            new_front = conn.execute(
+                """
+                select id, is_deleted from photos where id = %s
+                """,
+                (new_front_photo_id,),
+            ).fetchone()
+            if new_front is None:
+                raise ValueError(f"photo {new_front_photo_id} not found")
+            if new_front[1]:
+                raise ValueError(f"photo {new_front_photo_id} is deleted")
+            conn.execute(
+                "update ingest_pairings set front_photo_id = %s where id = %s",
+                (new_front_photo_id, pairing_id),
+            )
+            db.audit(
+                conn, actor="desktop", action="pairing.change_front",
+                entity_type="ingest_pairing", entity_id=pairing_id,
+                previous_value={"front_photo_id": old_front},
+                new_value={"front_photo_id": new_front_photo_id, "reason": "filmstrip pick"},
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def reject_pairing(
     settings: Settings, pairing_id: int, *, job_run_id: int | None = None,
 ) -> int | None:
@@ -185,9 +315,16 @@ def reject_pairing(
                 final_tpath = paths.thumb_path(settings, photo_id)
                 _move(Path(staging_tpath), final_tpath)
 
+            # Point the rejected pairing at the newly-created photo so
+            # future rebuilds see "this photo was already dealt with as a
+            # back" via `back_photo_id`.
             conn.execute(
-                "update ingest_pairings set status = 'rejected', decided_at = now() where id = %s",
-                (pairing_id,),
+                """
+                update ingest_pairings
+                set status = 'rejected', decided_at = now(), back_photo_id = %s
+                where id = %s
+                """,
+                (photo_id, pairing_id),
             )
             db.audit(conn, actor="desktop", action="pairing.reject",
                      entity_type="ingest_pairing", entity_id=pairing_id,

@@ -38,6 +38,10 @@ from .scanner import ScannedFile, walk_root
 log = logging.getLogger(__name__)
 
 BACK_SCORE_THRESHOLD = 0.6
+# Fix-up 2: at or above this raw score, aspect is evidence not a veto —
+# a back can be cropped very differently from its front, so we still propose
+# the pair and tag it "aspect differs" in the grid.
+STRONG_SCORE_ASPECT_OVERRIDE = 0.8
 
 
 @dataclass
@@ -46,12 +50,15 @@ class RebuildSummary:
     pending_kept: int = 0
     pending_updated_front: int = 0
     pending_dropped: int = 0
+    pending_aspect_tagged: int = 0
     photo_as_back_proposed: int = 0
+    photo_as_back_aspect_tagged: int = 0
     photo_as_back_skipped_rejected: int = 0
     photo_as_back_skipped_no_predecessor: int = 0
     photo_as_back_skipped_predecessor_is_back: int = 0
     photo_as_back_skipped_aspect: int = 0
     total_pending_after: int = 0
+    total_pending_aspect_tagged: int = 0
     histogram: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -218,12 +225,14 @@ def rebuild_back_proposals(
 
         # For held backs the front's predecessor logic doesn't apply — the
         # front is a committed photo. We just want the front NOT to be a
-        # back itself, and aspects reasonably close.
+        # back itself, and (for weaker candidates) aspects reasonably close.
         aspects_ok = back_detect.aspect_close(front_scored.aspect, new_aspect)
-        if front_scored.score >= BACK_SCORE_THRESHOLD or not aspects_ok:
-            # Front is now a probable back OR aspect mismatch → recover the
-            # back through the normal path (held staging) or drop the
-            # proposal (photo-as-back).
+        aspect_mismatch = not aspects_ok
+        aspect_is_veto = new_score < STRONG_SCORE_ASPECT_OVERRIDE
+        if front_scored.score >= BACK_SCORE_THRESHOLD or (aspect_mismatch and aspect_is_veto):
+            # Front is now a probable back OR (weak-scored proposal with
+            # aspect mismatch) → recover the back through the normal path
+            # (held staging) or drop the proposal (photo-as-back).
             try:
                 if back_pid is None:
                     decisions.reject_pairing(settings, pair_id)
@@ -243,15 +252,22 @@ def rebuild_back_proposals(
                 log.exception("rebuild: could not drop pairing %d: %s", pair_id, e)
             continue
 
-        # Just refresh the score.
+        # Refresh score + aspect_mismatch tag.
         try:
             with db.connection() as conn:
                 conn.autocommit = True
                 conn.execute(
-                    "update ingest_pairings set back_score = %s where id = %s",
-                    (new_score, pair_id),
+                    """
+                    update ingest_pairings
+                    set back_score = %s,
+                        back_aspect_mismatch = %s
+                    where id = %s
+                    """,
+                    (new_score, aspect_mismatch, pair_id),
                 )
             summary.pending_kept += 1
+            if aspect_mismatch:
+                summary.pending_aspect_tagged += 1
         except Exception as e:
             log.exception("rebuild: could not update pairing %d: %s", pair_id, e)
 
@@ -282,6 +298,17 @@ def rebuild_back_proposals(
         already_rejected_as_back = {
             row[0] for row in conn.execute(
                 "select back_photo_id from ingest_pairings where status = 'rejected' and back_photo_id is not null"
+            ).fetchall()
+        }
+        # Also block photos whose master_path is already used as
+        # back_master_path in ANY (pending/accepted/rejected) pairing row —
+        # the unique index on back_master_path would fail our insert
+        # otherwise, and semantically it's the same "already dealt with"
+        # signal even when the earlier row's back_photo_id is null (held
+        # back that was rejected + inserted as a new photo).
+        already_used_master_paths = {
+            row[0] for row in conn.execute(
+                "select back_master_path from ingest_pairings"
             ).fetchall()
         }
         # Photo metadata we need to insert new pairings.
@@ -317,7 +344,8 @@ def rebuild_back_proposals(
         if pred.score >= BACK_SCORE_THRESHOLD:
             summary.photo_as_back_skipped_predecessor_is_back += 1
             continue
-        if not back_detect.aspect_close(pred.aspect, s.aspect):
+        aspect_mismatch = not back_detect.aspect_close(pred.aspect, s.aspect)
+        if aspect_mismatch and s.score < STRONG_SCORE_ASPECT_OVERRIDE:
             summary.photo_as_back_skipped_aspect += 1
             continue
         meta = meta_by_id.get(s.photo_id)
@@ -325,13 +353,20 @@ def rebuild_back_proposals(
             log.warning("rebuild: no photo_masters row for photo %d", s.photo_id)
             continue
         _, folder, name, seq, master_path, sha256, working_path = meta
+        if master_path in already_used_master_paths:
+            # Master already claimed by a prior pairing row (typically a
+            # rejected held-back that we then inserted as a normal photo).
+            summary.photo_as_back_skipped_rejected += 1
+            continue
         thumb_path = str(paths.thumb_path(settings, s.photo_id))
         inserts.append((
             pred.photo_id, master_path, sha256,
             folder, name, seq,
             s.score, working_path, thumb_path,
-            s.photo_id,
+            s.photo_id, aspect_mismatch,
         ))
+        if aspect_mismatch:
+            summary.photo_as_back_aspect_tagged += 1
 
     if inserts:
         with db.connection() as conn:
@@ -345,8 +380,8 @@ def rebuild_back_proposals(
                            back_source_folder, back_source_filename,
                            back_scan_sequence, back_score,
                            staging_working_path, staging_thumb_path,
-                           back_photo_id)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           back_photo_id, back_aspect_mismatch)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         tup,
                     )
@@ -359,9 +394,14 @@ def rebuild_back_proposals(
     # --- Step 4: summary + histogram ------------------------------------
     with db.connection() as conn:
         conn.autocommit = True
-        summary.total_pending_after = conn.execute(
-            "select count(*) from ingest_pairings where status = 'pending'"
-        ).fetchone()[0]
+        row = conn.execute(
+            """
+            select count(*), count(*) filter (where back_aspect_mismatch)
+            from ingest_pairings where status = 'pending'
+            """
+        ).fetchone()
+        summary.total_pending_after = int(row[0])
+        summary.total_pending_aspect_tagged = int(row[1])
 
     # Histogram over ALL scored files (not just proposals) so George can see
     # the distribution.

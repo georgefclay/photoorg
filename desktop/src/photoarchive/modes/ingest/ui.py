@@ -55,6 +55,8 @@ class IngestPanel(QWidget):
         self._cancel = QPushButton("Cancel")
         self._cancel.setEnabled(False)
         self._cancel.clicked.connect(self._on_cancel)
+        self._recompute = QPushButton("Recompute scan order…")
+        self._recompute.clicked.connect(self._on_recompute)
         self._rebuild = QPushButton("Rebuild back proposals…")
         self._rebuild.clicked.connect(self._on_rebuild)
         self._review = QPushButton("Review proposals…")
@@ -62,6 +64,7 @@ class IngestPanel(QWidget):
         controls.addWidget(self._start)
         controls.addWidget(self._cancel)
         controls.addStretch(1)
+        controls.addWidget(self._recompute)
         controls.addWidget(self._rebuild)
         controls.addWidget(self._review)
         outer.addLayout(controls)
@@ -125,6 +128,75 @@ class IngestPanel(QWidget):
             self._cancel.setEnabled(False)
             self._counts.setText("cancelling — will stop after current file…")
             self._job.cancel()
+
+    def _on_recompute(self) -> None:
+        roots = self._selected_roots()
+        if not any(r.kind == "scan" for r in roots):
+            QMessageBox.warning(
+                self, "Recompute", "Select at least one scan-kind root.",
+            )
+            return
+        reply = QMessageBox.question(
+            self, "Recompute scan order",
+            "Rewrite scan_sequence for every scan folder using file mtime\n"
+            "(with natsort filename as tie-break, and falling back to\n"
+            "natsort when mtimes are identical or absurdly wide).\n\n"
+            "Also updates photo_backs and pending ingest_pairings.\n"
+            "Accepted/rejected proposals are untouched.\n\n"
+            "You'll usually want to rebuild back proposals afterwards.",
+            QMessageBox.Ok | QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Ok:
+            return
+        from .recompute_order import recompute_scan_order
+
+        self._start.setEnabled(False)
+        self._rebuild.setEnabled(False)
+        self._recompute.setEnabled(False)
+        self._cancel.setEnabled(True)
+        self._progress.setVisible(True)
+        self._t0 = time.time()
+        self._counts.setText("recomputing scan order…")
+        self._last.setText("")
+
+        def target(*, progress_cb, cancel_token, **_ignored):
+            s = recompute_scan_order(
+                settings=self._settings, roots=roots,
+                progress_cb=progress_cb, cancel_token=cancel_token,
+            )
+            return s.as_dict()
+
+        self._job = BackgroundJob(target)
+        self._job.signals.progress.connect(self._on_recompute_progress)
+        self._job.signals.finished.connect(self._on_recompute_finished)
+        self._job.signals.failed.connect(self._on_failed)
+        self._job.start()
+
+    def _on_recompute_progress(self, payload: dict[str, Any]) -> None:
+        if payload.get("kind") == "folder_done":
+            self._last.setText(
+                f"{payload.get('root')}/{payload.get('folder')}"
+                + ("  (fallback)" if payload.get('fallback') else "")
+            )
+
+    def _on_recompute_finished(self, summary: dict) -> None:
+        self._teardown_job()
+        self._recompute.setEnabled(True)
+        self._rebuild.setEnabled(True)
+        text = (
+            f"Folders processed: {summary.get('folders_processed', 0)}\n"
+            f"  natsort fallback: {summary.get('folders_fallback', 0)}\n"
+            f"  no change:        {summary.get('folders_unchanged', 0)}\n"
+            f"Photos updated:            {summary.get('photos_updated', 0)}\n"
+            f"Photo_backs updated:       {summary.get('photo_backs_updated', 0)}\n"
+            f"Pending pairings updated:  {summary.get('ingest_pairings_updated', 0)}"
+        )
+        if summary.get("fallback_folders"):
+            text += "\n\nFallback folders:\n  " + "\n  ".join(
+                summary["fallback_folders"][:20]
+            )
+        self._counts.setText("scan order recomputed")
+        QMessageBox.information(self, "Recompute complete", text)
 
     def _on_rebuild(self) -> None:
         roots = self._selected_roots()

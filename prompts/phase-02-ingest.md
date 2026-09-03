@@ -154,3 +154,28 @@ Do this, in order:
 
 Commit: `Phase 2 fix-up 1: back detector, pairing direction, rebuild`.
 Report: the diagnostic table, root cause, new proposal count and histogram.
+
+---
+
+## Phase 2 fix-up 2 — don't skip on aspect mismatch
+
+The rebuild skipped 129 candidates for aspect mismatch. A back is frequently cropped differently from its front, so aspect is evidence, not a veto. Change: when the back score (without the aspect term) is >= 0.8, propose the pair regardless of aspect and show an "aspect differs" tag in the grid. Keep aspect as a veto only for scores below 0.8. Re-run the rebuild and report the new pending count and how many carry the tag. Commit: `Phase 2 fix-up 2: aspect is evidence, not veto`.
+
+---
+
+## Phase 2 fix-up 3 — scan order is wrong in some batches
+
+George reviewed ~100 proposals in order; they were right. After that: backs paired with the wrong front in both directions, runs of 5 backs in a row with no front. The detector is fine now; the **sequence** is wrong for some folders. Do not change the scorer.
+
+1. **Diagnose first.** `tools/scanorder.py` prints, per scan folder: file count, distinct filename styles (timestamp / IMG / other), whether natural-sort order == mtime order, the number of positions that differ, and any runs of >= 2 consecutive proposed backs. Run it over both scan roots and paste the folders that disagree. Also print the first folder after which the review order went bad (proposals are reviewed in batch/sequence order; find the batch of proposal ~#100).
+
+2. **Sequence by scan time.** `scan_sequence` = order by file mtime, then natural filename as tie-break. Rationale: the scanner writes files in the order prints went through it; that is the envelope order. Recompute `scan_sequence` for every scan photo and back (new tool action "Recompute scan order"), rebuild back proposals (pending only; accepted/rejected untouched), and re-run the diagnostic to show the disagreements are gone. If mtime order is *also* nonsense for some folder (all identical mtimes from a copy), fall back to filename order for that folder and flag it in the report.
+
+3. **Manual pairing in the grid.** Under the two images, a filmstrip of the batch from #N-5 to #N+5 with sequence numbers and a back-score badge. Clicking a thumbnail makes it the front for this proposal. Keys: A accept, R reject, S swap to following, F pick front from filmstrip (then arrows + Enter), N = orphan back.
+
+4. **Orphan backs.** Migration 13: make `photo_backs.photo_id` nullable. "N" accepts the file as a back with no front: `photo_backs` row with `photo_id = null`, working file/thumb moved as for any back, the old photo row soft-deleted if it was committed. It will still be transcribed in Phase 6; the writing often identifies the front later. Add "Attach to front" later; not now.
+
+5. Grid order is strictly `scan_batch`, then `scan_sequence` of the back. Show "batch N of M" in the header.
+
+Commit: `Phase 2 fix-up 3: scan order by mtime, manual pairing, orphan backs`.
+Report: the diagnostic before and after, and how many pending proposals changed front.
