@@ -53,12 +53,14 @@ class RebuildSummary:
     pending_aspect_tagged: int = 0
     photo_as_back_proposed: int = 0
     photo_as_back_aspect_tagged: int = 0
+    photo_as_back_orphan_proposed: int = 0
     photo_as_back_skipped_rejected: int = 0
     photo_as_back_skipped_no_predecessor: int = 0
     photo_as_back_skipped_predecessor_is_back: int = 0
     photo_as_back_skipped_aspect: int = 0
     total_pending_after: int = 0
     total_pending_aspect_tagged: int = 0
+    total_pending_orphan: int = 0
     histogram: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -338,35 +340,42 @@ def rebuild_back_proposals(
             summary.photo_as_back_skipped_rejected += 1
             continue
         pred = predecessor(s)
-        if pred is None:
-            summary.photo_as_back_skipped_no_predecessor += 1
-            continue
-        if pred.score >= BACK_SCORE_THRESHOLD:
-            summary.photo_as_back_skipped_predecessor_is_back += 1
-            continue
-        aspect_mismatch = not back_detect.aspect_close(pred.aspect, s.aspect)
-        if aspect_mismatch and s.score < STRONG_SCORE_ASPECT_OVERRIDE:
-            summary.photo_as_back_skipped_aspect += 1
-            continue
         meta = meta_by_id.get(s.photo_id)
         if meta is None:
             log.warning("rebuild: no photo_masters row for photo %d", s.photo_id)
             continue
         _, folder, name, seq, master_path, sha256, working_path = meta
         if master_path in already_used_master_paths:
-            # Master already claimed by a prior pairing row (typically a
-            # rejected held-back that we then inserted as a normal photo).
             summary.photo_as_back_skipped_rejected += 1
             continue
         thumb_path = str(paths.thumb_path(settings, s.photo_id))
+
+        if pred is None:
+            # First file in the folder that scores as a back → orphan.
+            # George picks a front from the filmstrip if there is one.
+            front_id: int | None = None
+            aspect_mismatch = False
+            summary.photo_as_back_orphan_proposed += 1
+        elif pred.score >= BACK_SCORE_THRESHOLD:
+            # Fix-up 4: don't skip and don't walk back — propose as orphan.
+            front_id = None
+            aspect_mismatch = False
+            summary.photo_as_back_orphan_proposed += 1
+        else:
+            aspect_mismatch = not back_detect.aspect_close(pred.aspect, s.aspect)
+            if aspect_mismatch and s.score < STRONG_SCORE_ASPECT_OVERRIDE:
+                summary.photo_as_back_skipped_aspect += 1
+                continue
+            front_id = pred.photo_id
+            if aspect_mismatch:
+                summary.photo_as_back_aspect_tagged += 1
+
         inserts.append((
-            pred.photo_id, master_path, sha256,
+            front_id, master_path, sha256,
             folder, name, seq,
             s.score, working_path, thumb_path,
             s.photo_id, aspect_mismatch,
         ))
-        if aspect_mismatch:
-            summary.photo_as_back_aspect_tagged += 1
 
     if inserts:
         with db.connection() as conn:
@@ -396,12 +405,15 @@ def rebuild_back_proposals(
         conn.autocommit = True
         row = conn.execute(
             """
-            select count(*), count(*) filter (where back_aspect_mismatch)
+            select count(*),
+                   count(*) filter (where back_aspect_mismatch),
+                   count(*) filter (where front_photo_id is null)
             from ingest_pairings where status = 'pending'
             """
         ).fetchone()
         summary.total_pending_after = int(row[0])
         summary.total_pending_aspect_tagged = int(row[1])
+        summary.total_pending_orphan = int(row[2])
 
     # Histogram over ALL scored files (not just proposals) so George can see
     # the distribution.

@@ -499,6 +499,7 @@ def _proposal_caption(
     scan_batch: str | None, source_folder: str,
     front_seq: int | None, back_seq: int | None,
     score: float, back_pid: int | None, aspect_mismatch: bool,
+    orphan_front: bool = False,
 ) -> str:
     batch = scan_batch or (source_folder.split('/', 1)[0] if source_folder else "")
     tags: list[str] = []
@@ -506,10 +507,13 @@ def _proposal_caption(
         tags.append("photo-as-back")
     if aspect_mismatch:
         tags.append("aspect differs")
+    if orphan_front:
+        tags.append("no front")
     tag_str = f" [{', '.join(tags)}]" if tags else ""
+    front_part = "front unknown" if orphan_front else f"#{front_seq or '?'} (front)"
     return (
         f"BACK PROPOSAL{tag_str} — {batch} "
-        f"#{front_seq or '?'} (front) ← #{back_seq or '?'} (back)   "
+        f"{front_part} ← #{back_seq or '?'} (back)   "
         f"score {score:.2f}"
     )
 
@@ -523,25 +527,32 @@ def _load_pending(settings: Settings) -> list[Proposal]:
                    ip.back_source_folder, ip.back_source_filename,
                    ip.back_scan_sequence,
                    ip.back_photo_id, ip.back_aspect_mismatch,
-                   p.scan_batch, p.scan_sequence, p.source_folder,
-                   p.source_filename, p.source_root,
-                   p.id as front_photo_id
+                   ip.front_photo_id,
+                   pf.scan_batch, pf.scan_sequence,
+                   pb.scan_batch as back_batch,
+                   coalesce(pf.source_root, pb.source_root) as source_root
             from ingest_pairings ip
-            join photos p on p.id = ip.front_photo_id
+            left join photos pf on pf.id = ip.front_photo_id
+            left join photos pb on pb.id = ip.back_photo_id
             where ip.status = 'pending'
-            order by p.scan_batch nulls last, ip.back_scan_sequence nulls last, ip.id
+            order by coalesce(pf.scan_batch, pb.scan_batch) nulls last,
+                     ip.back_scan_sequence nulls last, ip.id
             """
         ).fetchall()
         for r in rows:
             (pair_id, tpath, score, back_folder, back_name, back_seq,
              back_pid, back_aspect_mismatch,
-             front_batch, front_seq, front_folder, front_name, source_root,
-             front_photo_id) = r
-            front_thumb = settings.THUMBS_DIR / f"{front_photo_id:08d}.jpg"
+             front_photo_id, front_batch, front_seq, back_batch,
+             source_root) = r
+            batch = front_batch or back_batch
+            front_thumb: Path | None = None
+            if front_photo_id is not None:
+                front_thumb = settings.THUMBS_DIR / f"{front_photo_id:08d}.jpg"
             back_thumb = Path(tpath) if tpath else None
             caption = _proposal_caption(
-                front_batch, front_folder, front_seq, back_seq,
+                batch, back_folder, front_seq, back_seq,
                 float(score), back_pid, bool(back_aspect_mismatch),
+                orphan_front=(front_photo_id is None),
             )
             out.append(Proposal(
                 kind="pairing", id=pair_id,
@@ -549,7 +560,7 @@ def _load_pending(settings: Settings) -> list[Proposal]:
                 caption=caption, score_or_distance=float(score),
                 back_photo_id=back_pid,
                 back_aspect_mismatch=bool(back_aspect_mismatch),
-                scan_batch=front_batch,
+                scan_batch=batch,
                 back_scan_sequence=back_seq,
                 back_source_folder=back_folder,
                 source_root=source_root,
@@ -640,6 +651,10 @@ def _rebuild_caption_after_front_change(settings: Settings, cur: Proposal) -> st
 
 def _swap_front_in_db(settings: Settings, pair_id: int) -> tuple[int, str]:
     """Re-point a pairing's front to the FOLLOWING file in scan order.
+    Works when front is currently NULL (orphan) too — resolves source_root
+    via the back's own photo (photo-as-back proposals always have
+    back_photo_id set).
+
     Returns (new_front_photo_id, new_caption)."""
     with db.connection() as conn:
         conn.autocommit = False
@@ -648,9 +663,11 @@ def _swap_front_in_db(settings: Settings, pair_id: int) -> tuple[int, str]:
                 """
                 select ip.front_photo_id, ip.back_scan_sequence,
                        ip.back_source_folder, ip.back_score, ip.back_photo_id,
-                       ip.back_aspect_mismatch, p.source_root
+                       ip.back_aspect_mismatch,
+                       coalesce(pf.source_root, pb.source_root) as source_root
                 from ingest_pairings ip
-                join photos p on p.id = ip.front_photo_id
+                left join photos pf on pf.id = ip.front_photo_id
+                left join photos pb on pb.id = ip.back_photo_id
                 where ip.id = %s for update
                 """,
                 (pair_id,),
@@ -659,6 +676,8 @@ def _swap_front_in_db(settings: Settings, pair_id: int) -> tuple[int, str]:
                 raise ValueError(f"pairing {pair_id} not found")
             (front_id, back_seq, back_folder, score, back_pid,
              aspect_mismatch, source_root) = row
+            if source_root is None:
+                raise LookupError("Can't determine source_root for this proposal.")
             if back_seq is None:
                 raise LookupError("Back has no scan_sequence; can't swap.")
             new_front = conn.execute(

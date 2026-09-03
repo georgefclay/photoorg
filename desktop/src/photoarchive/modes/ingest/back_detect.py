@@ -9,6 +9,8 @@ A back has all of:
   - near-grayscale (mean HLS S is very low)
   - sparse ink strokes (dark-pixel fraction in the ~0.5 %..15 % band)
   - no faces (Haar cascade)
+  - bimodal tone distribution (mid-tone fraction very low; fix-up 4)
+  - no large dark blob (largest dark connected component tiny; fix-up 4)
 
 Any failure zeros the score. All passing → score → 1.
 
@@ -33,6 +35,19 @@ MAX_MEAN_SATURATION = 0.08
 INK_LO = 0.005
 INK_HI = 0.15
 
+# Fix-up 4:
+# A back's tone distribution is bimodal — paper (~1.0) plus ink (~0.0) —
+# so very few pixels sit in the mid-band. A photo (even a high-key B&W
+# portrait on a white sweep) has continuous tone and lots of mid-values.
+MID_TONE_LO = 0.15
+MID_TONE_HI = 0.85
+MAX_MID_TONE_FRACTION = 0.10
+
+# A back's dark pixels are strokes: small connected components. A photo's
+# dark pixels are hair / clothing / shadow: one or two big blobs.
+DARK_L_THRESHOLD = 0.4
+MAX_LARGEST_DARK_COMPONENT_FRAC = 0.008
+
 _HAAR: cv2.CascadeClassifier | None = None
 
 
@@ -51,6 +66,8 @@ class BackFeatures:
     mean_saturation: float
     ink_fraction: float
     face_count: int
+    mid_tone_fraction: float
+    largest_dark_component_frac: float
     aspect_ratio: float
 
 
@@ -62,18 +79,33 @@ def analyse(image: Image.Image) -> BackFeatures:
     h, w = arr.shape[:2]
     aspect = w / max(h, 1)
 
-    # HLS: L is lightness (0..1 after divide), S is saturation (0..1).
     hls = cv2.cvtColor(arr, cv2.COLOR_RGB2HLS).astype(np.float32) / 255.0
     L = hls[..., 1]
     S = hls[..., 2]
+    total_px = float(L.size)
     light_pixel_fraction = float((L > LIGHT_L_THRESHOLD).mean())
     mean_saturation = float(S.mean())
+    mid_tone_fraction = float(((L > MID_TONE_LO) & (L < MID_TONE_HI)).mean())
 
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     thr = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 10,
     )
     ink_fraction = float((thr > 0).mean())
+
+    # Largest connected component of dark pixels (L < 0.4). A back's biggest
+    # dark blob is a stroke; a photo's is hair / clothing / shadow.
+    dark_mask = (L < DARK_L_THRESHOLD).astype(np.uint8)
+    largest_dark_frac = 0.0
+    if dark_mask.any():
+        n_labels, _labels, stats, _ = cv2.connectedComponentsWithStats(
+            dark_mask, connectivity=8,
+        )
+        if n_labels > 1:
+            # Row 0 is the background label; find the largest of the rest.
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            if areas.size > 0:
+                largest_dark_frac = float(areas.max()) / total_px
 
     face_count = 0
     try:
@@ -85,37 +117,43 @@ def analyse(image: Image.Image) -> BackFeatures:
     except cv2.error:
         pass
 
-    score = _score(light_pixel_fraction, mean_saturation, ink_fraction, face_count)
+    score = _score(
+        light_pixel_fraction, mean_saturation, ink_fraction, face_count,
+        mid_tone_fraction, largest_dark_frac,
+    )
     return BackFeatures(
         score=score,
         light_pixel_fraction=light_pixel_fraction,
         mean_saturation=mean_saturation,
         ink_fraction=ink_fraction,
         face_count=face_count,
+        mid_tone_fraction=mid_tone_fraction,
+        largest_dark_component_frac=largest_dark_frac,
         aspect_ratio=aspect,
     )
 
 
-def _score(light_pixel_fraction: float, mean_saturation: float,
-           ink_fraction: float, face_count: int) -> float:
-    # Hard veto: any human face → not a back.
+def _score(
+    light_pixel_fraction: float, mean_saturation: float,
+    ink_fraction: float, face_count: int,
+    mid_tone_fraction: float, largest_dark_frac: float,
+) -> float:
     if face_count > 0:
         return 0.0
-    # Hard veto: no light background at all → not a back.
     if light_pixel_fraction < MIN_LIGHT_FRAC / 2:
         return 0.0
-    # Hard veto: too saturated to be paper.
     if mean_saturation > 2 * MAX_MEAN_SATURATION:
         return 0.0
-    # Hard veto: outside the ink band (blank paper OR densely dark).
     if ink_fraction < INK_LO or ink_fraction > INK_HI:
         return 0.0
-    # Otherwise combine multiplicatively. Each factor peaks at 1.0 in its
-    # ideal region, ramps to 0 at the veto boundary.
+    # Fix-up 4 vetoes.
+    if mid_tone_fraction > MAX_MID_TONE_FRACTION:
+        return 0.0
+    if largest_dark_frac > MAX_LARGEST_DARK_COMPONENT_FRAC:
+        return 0.0
+
     light_factor = _ramp_up(light_pixel_fraction, MIN_LIGHT_FRAC / 2, MIN_LIGHT_FRAC)
     sat_factor = _ramp_down(mean_saturation, MAX_MEAN_SATURATION, 2 * MAX_MEAN_SATURATION)
-    # Ink: 1 across the plateau [INK_LO, 0.12], falling off at 0.005 and
-    # again above 0.12 to the hard veto at INK_HI. Spec: 0.5-15 % is a back.
     ink_factor = _plateau(ink_fraction, INK_LO * 0.5, INK_LO, 0.12, INK_HI)
     return float(max(0.0, min(1.0, light_factor * sat_factor * ink_factor)))
 

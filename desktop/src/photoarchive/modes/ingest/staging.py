@@ -160,7 +160,7 @@ def insert_suggestion(
 def stage_pairing(
     conn: psycopg.Connection,
     *,
-    front_photo_id: int,
+    front_photo_id: int | None,
     back_master_path: str,
     back_sha256: str,
     back_source_folder: str,

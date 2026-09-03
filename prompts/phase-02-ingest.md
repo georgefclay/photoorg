@@ -179,3 +179,24 @@ George reviewed ~100 proposals in order; they were right. After that: backs pair
 
 Commit: `Phase 2 fix-up 3: scan order by mtime, manual pairing, orphan backs`.
 Report: the diagnostic before and after, and how many pending proposals changed front.
+
+---
+
+## Phase 2 fix-up 4 — B&W photos on white backgrounds are scored as backs
+
+Observed: `Batch 00005 #235 (front) <- #240 (back)`, score 1.00. #240 is a black-and-white studio photo of a baby on a white background. Every current feature passes for it: saturation 0 (it is B&W), light fraction high, "ink" fraction in range (hair, shadows), no face found (Haar misses a laughing baby). Runs of such photos produce runs of "backs", and the front search then walks back 5 positions.
+
+The features in use cannot separate "white-background B&W photo" from "handwriting on paper". Add the two that can, both as hard vetoes:
+
+1. **Mid-tone fraction.** Convert to L. Fraction of pixels with 0.15 < L < 0.85. A back is bimodal (paper + ink): expect < 0.06. A photo, even a high-key B&W one, has continuous tone: expect > 0.15. Veto if > 0.10.
+2. **Largest dark connected component.** Threshold L < 0.4, connected components. On a back the largest component is a stroke: area < 0.5 % of the image, and its bounding box is thin (min(w,h)/max(w,h) < 0.3 or area/bbox < 0.35). On a photo the largest dark component is hair/clothing/shadow: area > 1 %. Veto if largest component area > 0.8 % of image.
+
+Keep the existing vetoes. Verify on: Batch 00001 #19 (must stay >= 0.8), Batch 00001 #20-#22 (0), Batch 00005 #236-#240 (all 0), and print the component table for each of those in the report.
+
+3. **Front is the immediate predecessor only.** Never walk back past a probable back. If the preceding file is itself a probable back, propose the file as an orphan-back candidate (front = none, George decides with N or F). Remove the walk-back logic.
+
+4. **Contact sheet before pairs.** Add "Proposed backs contact sheet": an HTML page (written to `%LOCALAPPDATA%\PhotoArchive\reports\backs-<timestamp>.html`) with every pending proposed back as a 200 px thumbnail, batch and sequence under each, sorted by batch/sequence, clicking a thumbnail toggles a "not a back" mark, and a button that writes the marked ids to a JSON file the app can import ("Reject marked from contact sheet"). George can clear false positives in minutes this way instead of one pair at a time.
+
+5. Rebuild pending proposals with the new scorer, produce the contact sheet, and report: new pending count, histogram, and the component tables from step 2.
+
+Commit: `Phase 2 fix-up 4: mid-tone and component vetoes, no walk-back, contact sheet`.

@@ -59,6 +59,8 @@ class IngestPanel(QWidget):
         self._recompute.clicked.connect(self._on_recompute)
         self._rebuild = QPushButton("Rebuild back proposals…")
         self._rebuild.clicked.connect(self._on_rebuild)
+        self._contact = QPushButton("Contact sheet")
+        self._contact.clicked.connect(self._on_contact_sheet)
         self._review = QPushButton("Review proposals…")
         self._review.clicked.connect(self._open_review)
         controls.addWidget(self._start)
@@ -66,6 +68,7 @@ class IngestPanel(QWidget):
         controls.addStretch(1)
         controls.addWidget(self._recompute)
         controls.addWidget(self._rebuild)
+        controls.addWidget(self._contact)
         controls.addWidget(self._review)
         outer.addLayout(controls)
 
@@ -305,6 +308,28 @@ class IngestPanel(QWidget):
         self._start.setEnabled(True)
         self._cancel.setEnabled(False)
         self._progress.setVisible(False)
+
+    def _on_contact_sheet(self) -> None:
+        from ...tools import contact_sheet as cs
+        try:
+            rows = cs._rows(self._settings)
+        except Exception as e:
+            log.exception("contact sheet load failed")
+            QMessageBox.critical(self, "Contact sheet failed", str(e))
+            return
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_path = cs.reports_dir() / f"backs-{ts}.html"
+        cs.render_html(rows, out_path)
+        import webbrowser
+        webbrowser.open(out_path.as_uri())
+        QMessageBox.information(
+            self, "Contact sheet written",
+            f"{len(rows)} proposals rendered to\n{out_path}\n\n"
+            "Click thumbnails to mark 'not a back'. Save marked as JSON,\n"
+            "then run:\n"
+            "  python -m photoarchive.tools.reject_from_contact <that.json>"
+        )
 
     def _refresh_review_button(self) -> None:
         try:
