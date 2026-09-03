@@ -1,7 +1,27 @@
-from pathlib import Path
+from __future__ import annotations
 
-from pydantic import Field
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_LABEL_RE = re.compile(r"^[a-z0-9_]+$")
+_KIND_VALUES = {"digital", "scan"}
+
+
+@dataclass(frozen=True)
+class MasterRoot:
+    """One master directory. `kind` decides whether ingest runs scan-only
+    steps (batch/sequence, back detect, rescan detect, folder-name album).
+    """
+
+    label: str
+    path: Path
+    kind: str  # "digital" | "scan"
 
 
 class Settings(BaseSettings):
@@ -11,8 +31,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    MASTERS_PHOTOS: Path = Field(..., description="Read-only master JPGs exported from the photo app")
-    MASTERS_SCANS: Path = Field(..., description="Read-only master scans (JPG + TIFF)")
+    # Semicolon-separated list of `label=path[|kind]`. Example:
+    #   MASTER_ROOTS=photos=D:\Photos;scans=D:\Scanned Photos|scan
+    # Kind defaults to `digital`. `|scan` opts a root into scan-only handling.
+    MASTER_ROOTS: str = Field(..., description="Master roots list; see config.py")
+
     WORKING_DIR: Path = Field(..., description="Derived working copies (writable)")
     QUARANTINE_DIR: Path = Field(..., description="Soft-deleted files (writable)")
     MANUAL_FIX_DIR: Path = Field(..., description="Cleanup rejects awaiting manual attention (writable)")
@@ -24,24 +47,78 @@ class Settings(BaseSettings):
     WEB_API_URL: str
     WEB_API_TOKEN: str
 
+    @field_validator("MASTER_ROOTS")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("MASTER_ROOTS must not be empty")
+        return v
+
+    @property
+    def master_roots(self) -> list[MasterRoot]:
+        return list(_parse_master_roots(self.MASTER_ROOTS))
+
+    def master_root_by_label(self, label: str) -> MasterRoot | None:
+        for root in self.master_roots:
+            if root.label == label:
+                return root
+        return None
+
     def check_masters_isolation(self) -> None:
+        """Refuse to start if any master root overlaps a writable directory."""
         writable = {
             "WORKING_DIR": _norm(self.WORKING_DIR),
             "QUARANTINE_DIR": _norm(self.QUARANTINE_DIR),
             "MANUAL_FIX_DIR": _norm(self.MANUAL_FIX_DIR),
             "THUMBS_DIR": _norm(self.THUMBS_DIR),
         }
-        for master_name, master_path in (
-            ("MASTERS_PHOTOS", _norm(self.MASTERS_PHOTOS)),
-            ("MASTERS_SCANS", _norm(self.MASTERS_SCANS)),
-        ):
+        for root in self.master_roots:
+            master_path = _norm(root.path)
             for writable_name, writable_path in writable.items():
                 if _overlaps(master_path, writable_path):
                     raise RuntimeError(
-                        f"Refusing to start: {master_name}={master_path} overlaps with "
-                        f"{writable_name}={writable_path}. Masters must be isolated from "
+                        f"Refusing to start: master root '{root.label}' = "
+                        f"{master_path} overlaps with {writable_name}="
+                        f"{writable_path}. Masters must be isolated from "
                         "writable directories."
                     )
+
+
+def _parse_master_roots(raw: str) -> Iterator[MasterRoot]:
+    seen_labels: set[str] = set()
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise ValueError(
+                f"MASTER_ROOTS entry {chunk!r} is missing '=': "
+                "expected label=path[|kind]"
+            )
+        label, rest = chunk.split("=", 1)
+        label = label.strip()
+        rest = rest.strip()
+        if not _LABEL_RE.match(label):
+            raise ValueError(
+                f"MASTER_ROOTS label {label!r} must match [a-z0-9_]+"
+            )
+        if label in seen_labels:
+            raise ValueError(f"MASTER_ROOTS label {label!r} is duplicated")
+        seen_labels.add(label)
+        if "|" in rest:
+            path_str, kind = rest.rsplit("|", 1)
+            kind = kind.strip().lower()
+        else:
+            path_str, kind = rest, "digital"
+        path_str = path_str.strip()
+        if not path_str:
+            raise ValueError(f"MASTER_ROOTS entry {label!r} has empty path")
+        if kind not in _KIND_VALUES:
+            raise ValueError(
+                f"MASTER_ROOTS entry {label!r} has invalid kind {kind!r}; "
+                f"expected one of {sorted(_KIND_VALUES)}"
+            )
+        yield MasterRoot(label=label, path=Path(path_str), kind=kind)
 
 
 def _norm(p: Path) -> Path:

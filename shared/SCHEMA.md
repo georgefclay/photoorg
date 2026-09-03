@@ -61,6 +61,12 @@ The rule that governs the whole schema:
   - `transcription`: `{"text":"...","parsed_date":"1962","names":["Peggy"],"photo_back_id":34}`
   - `classification`: `{"label":"document","confidence":0.93}`
 
+### Ingest staging (migration 12)
+
+- **`ingest_pairings`** — proposed front/back pairs held between the ingest scan pass and George's review. `front_photo_id` FK to the already-committed front photo; `back_master_path` / `back_sha256` identify the back file on disk (unique). `back_score` 0–1 from the back-detect heuristic. `staging_working_path` and `staging_thumb_path` point to `WORKING_DIR/_staging/{sha256}.{ext}` and `THUMBS_DIR/_staging/{sha256}.jpg`; the file is not promoted to the normal working name until accept. `status ingest_proposal_status` (`pending|accepted|rejected`) + `decided_at`. Accepting inserts a `photo_backs` row for `front_photo_id` and renames the staged files into place; rejecting takes the back through the normal new-photo path.
+- **`ingest_rescans`** — proposed rescans (a new file whose pHash Hamming distance ≤ 6 to an existing scan photo). `existing_photo_id` FK; `new_master_path` / `new_sha256` identify the incoming file (unique). Full source metadata (`new_source_root/folder/filename`, `new_scan_batch`, `new_scan_sequence`, `new_width`/`height`/`file_size`/`mime`) is carried on the staging row so accepting does not require re-decoding. Same staging paths and status columns as `ingest_pairings`. Accepting inserts a new `photo_masters` row for `existing_photo_id`, marks it preferred if its pixel count is larger, and updates `photos.sha256` / `working_path` / `file_version`; rejecting inserts a normal new photo.
+- **`ingest_failures`** — files that failed to ingest (unreadable, undecodable, hash error). `job_items` requires a non-null `photo_id`, and these files never got a photos row, so failures land here instead. Records the run, source root/folder/filename, master_path, and error text.
+
 ### Audit and jobs
 
 - **`audit_log`** — id, `user_id` nullable, `actor` (`user email | 'desktop' | 'system'`), `action`, `entity_type`, `entity_id`, `previous_value` / `new_value` JSONB, `created_at`. Every state change writes one.

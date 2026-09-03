@@ -12,13 +12,14 @@ dependencies = [
   "Pillow",
   "pillow-heif",
   "imagehash",
-  "psycopg[binary]",
+  "psycopg[binary,pool]",
+  "natsort",
   "pydantic",
   "pydantic-settings",
   "exifread",
   "piexif",
   "numpy",
-  "opencv-python-headless",
+  "opencv-python-headless<5",
   "requests",
 ]
 

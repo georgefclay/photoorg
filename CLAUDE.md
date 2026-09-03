@@ -35,6 +35,29 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   interval '15 minutes'`. Applies to magic links, access-request tokens,
   anything time-bounded.
 
+## Desktop (Phase 2 onwards)
+- **Master roots are a list**, not two fields. `MASTER_ROOTS=label=path[|kind];…`
+  in `desktop/.env`. Labels match `[a-z0-9_]+`, are unique, and become
+  `photos.source_root`. `kind` defaults to `digital`; `|scan` opts a root into
+  scan-only handling (scan_batch/scan_sequence, back detection, rescan
+  detection, folder-name album). Add roots without touching code.
+- **Working-name scheme:** `WORKING_DIR/{photo_id:08d}_{sha256[:8]}.{ext}`
+  (flat, no subfolders). Thumbnails: `THUMBS_DIR/{photo_id:08d}.jpg`.
+  Held (unaccepted) proposals stage under `WORKING_DIR/_staging/{sha256}.{ext}`
+  and `THUMBS_DIR/_staging/{sha256}.jpg` until accepted.
+- **Staging tables (migration 12):** `ingest_pairings` and `ingest_rescans`
+  hold proposed backs / rescans until George reviews. Ingest never writes to
+  `photo_backs` or promotes rescans directly. `ingest_failures` records files
+  that failed ingest (unreadable, undecodable) because `job_items` requires a
+  non-null `photo_id`.
+- **Masters guard:** at ingest start, ingest attempts to write a probe file to
+  every master root and one random subfolder. Any writable root → refuse to
+  run and print the `icacls` deny command. The status bar shows a red WRITABLE
+  warning even when ingest isn't running. `attrib +R` on a directory is
+  advisory and does NOT block writes; use icacls (see `GC.md`).
+- **Videos:** whitelisted in the extension list but log-and-skip until the
+  first video actually appears. The full video code path is deferred.
+
 ## Web (CraftTags lessons — always apply)
 - Token links land on a POST-confirm page. GET on the token changes nothing.
 - `app.set('trust proxy', 1)` before any middleware that reads client IP.
