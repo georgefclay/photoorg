@@ -58,6 +58,29 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Videos:** whitelisted in the extension list but log-and-skip until the
   first video actually appears. The full video code path is deferred.
 
+## Triage (Phase 3 onwards)
+- **Four states:** `triage_status` is one of `untriaged | keep | junk | private`.
+  Every transition writes an `audit_log` row (`actor='desktop'`,
+  `action='triage.decision'`) with previous and new state, plus the hint that
+  the reviewer saw.
+- **Post-condition invariants** (all enforced by
+  `modes/triage/decisions.apply_decision`):
+  - `junk`: file at `quarantine_path`, `working_path=NULL`, `is_deleted=true`,
+    `deleted_at=now()`. Restorable — this is the only thing junk means.
+  - `keep`/`private`/`untriaged`: file at `working_path`, `quarantine_path=NULL`,
+    `is_deleted=false`, `deleted_at=NULL`. `is_private` is only true for
+    `private`.
+- **Quarantine path:** `QUARANTINE_DIR/{photo_id:08d}_{sha256[:8]}.{ext}`, flat
+  (same scheme as working). `QUARANTINE_DIR` is set in `desktop/.env`.
+- **Thumbnails stay put** at `THUMBS_DIR/{photo_id:08d}.jpg` regardless of
+  triage state, so the quarantine browser stays cheap.
+- **File moves happen AFTER the DB commit.** DB is the source of truth. A
+  move failure logs and leaves the DB row as-decided; the quarantine browser
+  is where mismatches get reconciled.
+- **Hints are hints.** `triage_hints` is written by the `triage_presort` job
+  and read by the UI to pick the default decision key. Hints never make a
+  decision on their own; only a keypress does.
+
 ## Web (CraftTags lessons — always apply)
 - Token links land on a POST-confirm page. GET on the token changes nothing.
 - `app.set('trust proxy', 1)` before any middleware that reads client IP.

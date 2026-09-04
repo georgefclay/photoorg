@@ -1,6 +1,3 @@
-from .._placeholder import PlaceholderPanel
+from .ui import TriagePanel
 
-
-class TriagePanel(PlaceholderPanel):
-    def __init__(self) -> None:
-        super().__init__("Triage", "Phase 3.")
+__all__ = ["TriagePanel"]

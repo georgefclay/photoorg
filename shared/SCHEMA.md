@@ -67,6 +67,18 @@ The rule that governs the whole schema:
 - **`ingest_rescans`** — proposed rescans (a new file whose pHash Hamming distance ≤ 6 to an existing scan photo). `existing_photo_id` FK; `new_master_path` / `new_sha256` identify the incoming file (unique). Full source metadata (`new_source_root/folder/filename`, `new_scan_batch`, `new_scan_sequence`, `new_width`/`height`/`file_size`/`mime`) is carried on the staging row so accepting does not require re-decoding. Same staging paths and status columns as `ingest_pairings`. Accepting inserts a new `photo_masters` row for `existing_photo_id`, marks it preferred if its pixel count is larger, and updates `photos.sha256` / `working_path` / `file_version`; rejecting inserts a normal new photo.
 - **`ingest_failures`** — files that failed to ingest (unreadable, undecodable, hash error). `job_items` requires a non-null `photo_id`, and these files never got a photos row, so failures land here instead. Records the run, source root/folder/filename, master_path, and error text.
 
+### Triage hints (migration 17)
+
+- **`triage_hints`** — one row per photo (PK `photo_id`) written by the
+  `triage_presort` job (Phase 3). `hint` is one of `photo | screenshot |
+  document | blank_or_dark | tiny | burst | exact_dup_of` after the
+  precedence cascade (`exact_dup_of` → `screenshot` → `blank_or_dark` → `tiny`
+  → `document` → `burst`). `confidence` 0–1. `details` JSONB carries per-hint
+  evidence (e.g. dimensions, tone stats, sharpest peer in a burst group) and
+  a `details.also` key holding the losing hints so nothing is lost. Hints
+  set the default decision key in the Triage grid; they never make a
+  decision on their own.
+
 ### Audit and jobs
 
 - **`audit_log`** — id, `user_id` nullable, `actor` (`user email | 'desktop' | 'system'`), `action`, `entity_type`, `entity_id`, `previous_value` / `new_value` JSONB, `created_at`. Every state change writes one.
