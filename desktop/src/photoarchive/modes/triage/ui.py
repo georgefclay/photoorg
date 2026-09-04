@@ -607,6 +607,19 @@ class TriagePanel(QWidget):
         # Action bar
         outer.addLayout(self._build_action_bar())
 
+        # Refusal banner (hidden by default). Shown for "nothing was done"
+        # messages — refusals, errors, "not a scan". Persists until Esc
+        # or the next decision key.
+        self._banner = QLabel("")
+        self._banner.setVisible(False)
+        self._banner.setWordWrap(True)
+        self._banner.setStyleSheet(
+            "background: #663; color: white; padding: 6px 10px;"
+            "border-left: 4px solid #fc0;"
+            f"font-family: {FONT_MONO};"
+        )
+        outer.addWidget(self._banner)
+
         # Stack: grid over single view
         self._stack = QStackedWidget()
         self._grid_model = TriageGridModel(self._cache)
@@ -734,16 +747,28 @@ class TriagePanel(QWidget):
         bar.addWidget(self._presort_progress)
         return bar
 
-    def _build_status_strip(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
+    def _build_status_strip(self) -> QVBoxLayout:
+        strip = QVBoxLayout()
+
+        top = QHBoxLayout()
         self._counts_lbl = QLabel("")
         self._counts_lbl.setStyleSheet(f"font-family: {FONT_MONO}")
-        bar.addWidget(self._counts_lbl)
-        bar.addStretch(1)
+        top.addWidget(self._counts_lbl)
+        top.addStretch(1)
         self._session_lbl = QLabel("")
         self._session_lbl.setStyleSheet(f"font-family: {FONT_MONO}")
-        bar.addWidget(self._session_lbl)
-        return bar
+        top.addWidget(self._session_lbl)
+        strip.addLayout(top)
+
+        # "Last action" line persists until the next keypress — the counts
+        # tick would otherwise clobber a note within a second or two.
+        self._last_action_lbl = QLabel("")
+        self._last_action_lbl.setStyleSheet(
+            f"font-family: {FONT_MONO}; color: #7cf"
+        )
+        self._last_action_lbl.setTextFormat(Qt.PlainText)
+        strip.addWidget(self._last_action_lbl)
+        return strip
 
     # ----- Data plumbing -----
 
@@ -944,13 +969,12 @@ class TriagePanel(QWidget):
                 self._grid_model.update_status(
                     photo_id, snap["triage_status"], snap["is_private"],
                 )
-            if not getattr(self, "_shown_err", False):
-                self._shown_err = True
-                QMessageBox.warning(
-                    self, "Triage",
-                    f"A commit failed and was reverted: {err}. "
-                    "See log dock for details.",
-                )
+            # Refusal banner — persists until Esc or the next decision key.
+            self._show_banner(
+                f"commit failed and was reverted for photo {photo_id}: "
+                f"{err}. See log dock for details.",
+                kind="error",
+            )
         elif result is not None:
             grp["results"].append(result)
 
@@ -961,12 +985,18 @@ class TriagePanel(QWidget):
                 self._session_decisions += len(grp["results"])
                 if self._session_start is None:
                     self._session_start = time.time()
+                target = grp["target"]
+                n = len(grp["results"])
+                self._set_last_action(
+                    f"{target} × {n}" if n > 1 else target,
+                )
             self._refresh_counts()
             self._advance_cursor_to_position(grp["first_position"])
 
     def _on_this_is_a_back(self) -> None:
         """B key: reclassify this scan as the back of the preceding print.
-        Digital-root photos are ignored with a status-bar note."""
+        Always resolves — the outcome discriminates the message and
+        whether the row leaves the current filter."""
         pid = self._current_photo_id()
         if pid is None:
             return
@@ -974,26 +1004,22 @@ class TriagePanel(QWidget):
             result = back_from_triage.propose_back_from_triage(
                 self._settings, pid,
             )
-        except back_from_triage.NotAScan:
-            self._counts_lbl.setText(
-                self._counts_lbl.text() + "    · not a scan"
-            )
-            return
-        except back_from_triage.AlreadyProposed as e:
-            self._counts_lbl.setText(
-                self._counts_lbl.text() + f"    · {e}"
-            )
-            return
         except Exception:
             log.exception("propose_back_from_triage failed for %s", pid)
-            QMessageBox.critical(
-                self, "Triage",
-                "Could not create back proposal. See log dock.",
+            self._show_banner(
+                "B failed — see log dock for details.", kind="error",
             )
             return
 
-        # Under the untriaged filter the photo should now leave the list
-        # (it was set to keep). Under any other filter, update the badge.
+        if result.is_refusal:
+            # 'not_a_scan' or 'already_accepted' — nothing changed on the
+            # photo, so show a banner and don't advance the cursor.
+            self._show_banner(_format_back_message(result), kind="warn")
+            return
+
+        # inserted / reopened / already_pending — the photo now (or already)
+        # has triage_status='keep'. Under untriaged filter the row leaves;
+        # elsewhere its badge updates.
         i = self._grid_model.row_by_photo_id(pid)
         if i >= 0:
             if self._f_status.currentData() == "untriaged":
@@ -1006,27 +1032,41 @@ class TriagePanel(QWidget):
             self._session_start = time.time()
         self._refresh_counts()
         self._refresh_pending_count()
-
-        note = f"B: pairing {result.pairing_id}"
-        if result.front_photo_id is None:
-            note += " (orphan)"
-        else:
-            note += f" ← photo {result.front_photo_id}"
-        if result.aspect_mismatch:
-            note += "  [aspect differs]"
-        self._counts_lbl.setText(self._counts_lbl.text() + "    · " + note)
+        self._set_last_action(_format_back_message(result))
 
     def _refresh_pending_count(self) -> None:
         try:
             self._pending_pairings = back_from_triage.pending_pairings_count()
         except Exception:
             return
-        # Only rewrite the tail; the head is set by _refresh_counts and
-        # would otherwise flicker on every tick.
-        base = self._counts_lbl.text().split("   pending pairings", 1)[0]
-        self._counts_lbl.setText(
-            f"{base}   pending pairings {self._pending_pairings:>4}"
+        self._refresh_counts()
+
+    def _set_last_action(self, text: str) -> None:
+        """The message persists until the next keypress clears it."""
+        self._last_action_lbl.setText(text)
+
+    def _clear_last_action(self) -> None:
+        self._last_action_lbl.setText("")
+
+    def _show_banner(self, text: str, *, kind: str = "warn") -> None:
+        """kind ∈ 'warn' (yellow) | 'error' (red). Dismissed by Esc or
+        any decision key (K/J/P/B)."""
+        colors = {
+            "warn":  ("#663", "#fc0"),   # dark yellow bg, yellow accent
+            "error": ("#633", "#f66"),   # dark red bg, red accent
+        }
+        bg, accent = colors.get(kind, colors["warn"])
+        self._banner.setStyleSheet(
+            f"background: {bg}; color: white; padding: 6px 10px;"
+            f"border-left: 4px solid {accent};"
+            f"font-family: {FONT_MONO};"
         )
+        self._banner.setText(text)
+        self._banner.setVisible(True)
+
+    def _clear_banner(self) -> None:
+        self._banner.setVisible(False)
+        self._banner.setText("")
 
     def _advance_cursor_to_position(self, position: int) -> None:
         """After a decision, land the cursor at the row that took the
@@ -1073,9 +1113,7 @@ class TriagePanel(QWidget):
                 sel.select(self._grid_model.index(i, 0),
                            sel.SelectionFlag.Select)
                 count += 1
-        self._counts_lbl.setText(
-            self._counts_lbl.text() + f"    · selected {count} for review"
-        )
+        self._set_last_action(f"selected {count} for review")
 
     # ----- Presort -----
 
@@ -1162,6 +1200,11 @@ class TriagePanel(QWidget):
         # If the search box has focus, let it eat characters.
         if self._f_search.hasFocus() and key not in (Qt.Key_Escape,):
             return False
+        # Decision keys clear the refusal banner and the last-action line
+        # (the handler will fill last-action back in on success).
+        if key in (Qt.Key_K, Qt.Key_J, Qt.Key_P, Qt.Key_B):
+            self._clear_banner()
+            self._clear_last_action()
         if key == Qt.Key_K:
             self._apply_to_selection("keep"); return True
         if key == Qt.Key_J:
@@ -1177,6 +1220,9 @@ class TriagePanel(QWidget):
         if key in HINT_KEY_MAP:
             self._apply_hint_key(key); return True
         if key == Qt.Key_Escape:
+            if self._banner.isVisible():
+                self._clear_banner()
+                return True
             if self._stack.currentIndex() == 1:
                 self._stack.setCurrentIndex(0)
                 self._grid.setFocus()
@@ -1390,3 +1436,26 @@ def _grid_style() -> str:
         QListView::item { padding: 6px; border: 2px solid transparent; }
         QListView::item:selected { border: 2px solid #4ea1ff; }
     """
+
+
+def _format_back_message(r: "back_from_triage.BackProposalResult") -> str:
+    """One-line summary of a B-key outcome for the status strip or the
+    refusal banner."""
+    if r.outcome == back_from_triage.OUTCOME_NOT_A_SCAN:
+        return "B ignored — not a scan (digital-root photo)."
+    if r.outcome == back_from_triage.OUTCOME_ALREADY_ACCEPTED:
+        base = f"already a back (pairing {r.pairing_id})"
+        if r.front_label:
+            base += f" — front: {r.front_label}"
+        return f"B: {base}. See log for details."
+    if r.outcome == back_from_triage.OUTCOME_ALREADY_PENDING:
+        front = f"front: {r.front_label}" if r.front_label else "orphan"
+        return f"B: already queued for review ({front})"
+    if r.outcome == back_from_triage.OUTCOME_REOPENED:
+        front = f"front: {r.front_label}" if r.front_label else "orphan"
+        note = " [aspect differs]" if r.aspect_mismatch else ""
+        return f"B: reopened pairing {r.pairing_id} ({front}){note}"
+    # inserted
+    front = f"← {r.front_label}" if r.front_label else "(orphan)"
+    note = " [aspect differs]" if r.aspect_mismatch else ""
+    return f"B: pairing {r.pairing_id} {front}{note}"

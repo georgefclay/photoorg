@@ -98,3 +98,18 @@ During triage George found a `blank_or_dark` photo that is really the back of a 
 4. Show the key in the bottom strip and the status bar count of pending pairings.
 
 Commit: `Phase 3 fix-up 2: B key and possible_back hint`.
+
+---
+
+## Phase 3 fix-up 3 — B on a photo that already has a pairing row
+
+George pressed B on a back and got "Photo already has ingest pairings ...". Many scans have old rows from the Phase 2 rounds (rejected while fronts were wrong, or still pending). B must resolve, not refuse:
+
+- Existing row **pending** for this photo as back: leave it, status bar "already queued for review (front: Batch X #N)", advance.
+- Existing row **rejected**: reopen it — status back to pending, `front_photo_id` recomputed as the immediate predecessor (null if none/back), `back_score` 1.0, `details.source='triage'`, `details.reopened_from=<old status>`; audit row. Advance.
+- Existing row **accepted**: this photo should already be a back and not in triage; log a warning with the ids and show "already a back", no change.
+- Multiple rows: apply the rule to the most recent; if any is pending, treat as pending.
+
+Add a test for each branch. Commit: `Phase 3 fix-up 3: B reopens rejected pairings`.
+
+Also in fix-up 3: status-bar messages triggered by a keypress must persist until the next keypress (no timeout). Any message that means "nothing was done" (refusal, error, "not a scan") shows as a coloured banner above the grid that stays until dismissed with Esc or the next decision key.

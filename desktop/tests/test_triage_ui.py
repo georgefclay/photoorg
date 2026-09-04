@@ -66,8 +66,11 @@ def _test_settings(tmp_path: Path, url: str) -> Settings:
 def _reset_and_seed(url: str, settings: Settings, n: int = 5) -> list[int]:
     from photoarchive.modes.ingest.paths import working_path
     with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute("truncate audit_log, triage_hints, photos "
-                     "restart identity cascade")
+        conn.execute(
+            "truncate audit_log, ingest_pairings, ingest_rescans, "
+            "ingest_failures, triage_hints, photo_masters, photos, "
+            "job_items, job_runs restart identity cascade"
+        )
     pids: list[int] = []
     for i in range(n):
         sha = f"{i:064x}"
@@ -89,6 +92,15 @@ def _reset_and_seed(url: str, settings: Settings, n: int = 5) -> list[int]:
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("update photos set working_path=%s where id=%s",
                          (str(wp), pid))
+            conn.execute(
+                """
+                insert into photo_masters
+                  (photo_id, master_path, sha256, width, height, mime,
+                   is_preferred)
+                values (%s, %s, %s, 100, 100, 'image/jpeg', true)
+                """,
+                (pid, f"D:\\Stub\\stub-{i}.jpg", sha),
+            )
         pids.append(pid)
     return pids
 
@@ -140,6 +152,78 @@ def test_first_decision_leaves_grid_alive(monkeypatch, tmp_path):
     pix = panel._grid.viewport().grab()
     assert not pix.isNull()
     assert pix.width() > 0 and pix.height() > 0
+
+    db.close_pool()
+
+
+def test_b_on_digital_root_shows_banner_and_dismisses_on_esc(
+    monkeypatch, tmp_path,
+):
+    """Fix-up 3: refusal messages ('not a scan') show as a coloured
+    banner that persists until Esc or the next decision key."""
+    _app()
+    settings = _test_settings(tmp_path, TEST_DATABASE_URL)
+    _init_pool(TEST_DATABASE_URL, settings)
+    _reset_and_seed(TEST_DATABASE_URL, settings, n=1)
+    # The seed uses source_root='tst', which is not a scan root in our
+    # settings (which has 'dummy'). B will refuse with 'not a scan'.
+
+    panel = _make_panel(monkeypatch, settings)
+    _pump(100)
+    assert panel._grid_model.rowCount() == 1
+    assert not panel._banner.isVisible()
+
+    panel._handle_key(
+        Qt.Key_B,
+        QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_B, Qt.NoModifier),
+    )
+    _pump(200)
+
+    assert panel._banner.isVisible()
+    assert "not a scan" in panel._banner.text()
+    # Row untouched.
+    assert panel._grid_model.rowCount() == 1
+
+    # Esc dismisses.
+    panel._handle_key(
+        Qt.Key_Escape,
+        QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_Escape, Qt.NoModifier),
+    )
+    assert not panel._banner.isVisible()
+
+    db.close_pool()
+
+
+def test_last_action_persists_until_next_keypress(monkeypatch, tmp_path):
+    """Fix-up 3: after a decision, the status-bar note stays until the
+    next decision key. Timer ticks (pending-count refresh) must not
+    blank it."""
+    _app()
+    settings = _test_settings(tmp_path, TEST_DATABASE_URL)
+    _init_pool(TEST_DATABASE_URL, settings)
+    _reset_and_seed(TEST_DATABASE_URL, settings, n=3)
+
+    panel = _make_panel(monkeypatch, settings)
+    _pump(100)
+
+    panel._handle_key(
+        Qt.Key_K,
+        QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_K, Qt.NoModifier),
+    )
+    _pump(500)
+    assert panel._last_action_lbl.text() == "keep"
+
+    # Simulate the pending-count tick — must not clobber last-action.
+    panel._refresh_pending_count()
+    assert panel._last_action_lbl.text() == "keep"
+
+    # Next decision key clears and replaces.
+    panel._handle_key(
+        Qt.Key_J,
+        QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key_J, Qt.NoModifier),
+    )
+    _pump(500)
+    assert panel._last_action_lbl.text() == "junk"
 
     db.close_pool()
 
