@@ -85,3 +85,16 @@ George opened Triage, pressed K on the first photo, and the whole grid went blac
 5. Wrap the delegate's paint in a try/except that draws a grey placeholder and logs once per photo, so a bad thumbnail can never blank the grid again.
 
 Commit: `Phase 3 fix-up 1: grid blank after decision`. Report the root cause.
+
+---
+
+## Phase 3 fix-up 2 — "this is a back" key in Triage
+
+During triage George found a `blank_or_dark` photo that is really the back of a print with only a date written on it. The back detector missed it (too little ink). Triage needs a way to say so.
+
+1. Key **B** = "this is a back". For a scan-root photo: create a pending `ingest_pairings` row with `back_photo_id` = this photo, `front_photo_id` = the immediately preceding photo in the same folder by `scan_sequence` (null if none or if that one is itself a back/pending back), `back_score` = 1.0, `details.source = 'triage'`. Set `triage_status='keep'` so it does not get junked meanwhile. Cursor advances. The pair is then decided in the Phase 2 review grid like any other (A/R/S/F/N). For a digital-root photo, B does nothing but show "not a scan" in the status bar.
+2. Add `blank_or_dark` handling: when the hint fires on a **scan-root** photo, run the back scorer's ink/stroke measure; if there is *any* ink (fraction > 0.001), change the hint to `possible_back` instead. Add `possible_back` to the hint CHECK and to the picklist; key 4 now shows blank_or_dark + possible_back together.
+3. Re-run the presort for scan-root photos currently hinted `blank_or_dark` and report how many moved to `possible_back`.
+4. Show the key in the bottom strip and the status bar count of pending pairings.
+
+Commit: `Phase 3 fix-up 2: B key and possible_back hint`.

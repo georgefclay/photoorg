@@ -33,14 +33,16 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QFileDialog, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox, QProgressBar,
     QPushButton, QSizePolicy, QSpacerItem, QSplitter, QStackedWidget,
-    QToolButton, QVBoxLayout, QWidget,
+    QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
+
+from PySide6.QtCore import QTimer
 
 from ... import db
 from ...config import Settings, load as load_config
 from ...workers import BackgroundJob
 from ..ingest.paths import thumb_path
-from . import decisions, presort
+from . import back_from_triage, decisions, presort
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +69,11 @@ HINT_CHOICES = [
     ("screenshot", "screenshot"),
     ("document", "document"),
     ("blank_or_dark", "blank/dark"),
+    # Fix-up 2: compound value for the 1-5 key mapping — key 4 shows
+    # both blank_or_dark AND possible_back together, since they're the
+    # same "near-blank scan" family and George decides between J and B.
+    ("blank_or_dark_or_possible_back", "blank/dark + possible back"),
+    ("possible_back", "possible back"),
     ("tiny", "tiny"),
     ("burst", "burst extra"),
     ("exact_dup_of", "exact dup"),
@@ -95,6 +102,7 @@ class TriageQuery:
         if self.status == "all":
             where.append("p.triage_status <> 'junk'")
         elif self.status == "junk":
+            # Junk photos have is_deleted=true; keep those visible.
             where = ["p.triage_status = 'junk'"]
         else:
             where.append("p.triage_status = %s")
@@ -102,6 +110,8 @@ class TriageQuery:
             params.append(self.status)
         if self.hint == "no_hint":
             where.append("h.photo_id is null")
+        elif self.hint == "blank_or_dark_or_possible_back":
+            where.append("h.hint in ('blank_or_dark', 'possible_back')")
         elif self.hint != "all":
             where.append("h.hint = %s")
             params.append(self.hint)
@@ -112,6 +122,7 @@ class TriageQuery:
             where.append("p.source_folder = %s")
             params.append(self.folder)
         if self.year != "all":
+            # Match either capture_date year OR _YYYY-MM folder prefix.
             where.append("""(
                 (p.capture_date is not null and extract(year from p.capture_date)::int = %s)
                 or (p.source_folder like %s)
@@ -137,7 +148,7 @@ class TriageRow:
     photo_id: int
     triage_status: str
     is_private: bool
-    hint: str
+    hint: str  # 'photo' when null
     hint_confidence: float
     hint_details: dict
     source_root: str
@@ -149,7 +160,7 @@ class TriageRow:
     exif_camera: str | None
     width: int | None
     height: int | None
-    year_from: str | None
+    year_from: str | None  # 'exif' or 'folder' or None (for single-view badge)
 
 
 def _fetch_rows(query: TriageQuery) -> list[TriageRow]:
@@ -185,6 +196,7 @@ def _fetch_rows(query: TriageQuery) -> list[TriageRow]:
 
 
 def _fetch_filter_options() -> dict[str, list[Any]]:
+    """Load unique roots, folders, and years for the filter dropdowns."""
     with db.connection() as conn:
         conn.autocommit = True
         roots = [r[0] for r in conn.execute(
@@ -215,7 +227,7 @@ def _fetch_filter_options() -> dict[str, list[Any]]:
 # ---------------------------------------------------------------------------
 
 class ThumbCache(QObject):
-    ready = Signal(int)
+    ready = Signal(int)  # photo_id whose pixmap is now cached
 
     def __init__(self, settings: Settings, size: int = THUMB_TILE) -> None:
         super().__init__()
@@ -367,11 +379,57 @@ class TriageGridModel(QAbstractListModel):
         ix = self.index(i, 0)
         self.dataChanged.emit(ix, ix, [Qt.DisplayRole, STATUS_ROLE])
 
+    def remove_photo(self, photo_id: int) -> int:
+        """Remove the row for `photo_id`. Returns the row index it lived at,
+        or -1 if not present. Callers use the returned position to reseat
+        the cursor after a decision moved an item out of the current filter.
+        """
+        i = self.row_by_photo_id(photo_id)
+        if i < 0:
+            return -1
+        self.beginRemoveRows(QModelIndex(), i, i)
+        self._rows.pop(i)
+        self.endRemoveRows()
+        return i
+
+    def insert_row_at(self, position: int, row: TriageRow) -> None:
+        """Insert a row (used to undo a removal). Clamps position to the
+        current end so an out-of-range insert becomes an append."""
+        pos = max(0, min(position, len(self._rows)))
+        self.beginInsertRows(QModelIndex(), pos, pos)
+        self._rows.insert(pos, row)
+        self.endInsertRows()
+
 
 def _placeholder_pixmap(size: int) -> QPixmap:
     pm = QPixmap(size, size)
     pm.fill(Qt.darkGray)
     return pm
+
+
+class _SafePaintDelegate(QStyledItemDelegate):
+    """Wrap the default item delegate's paint in try/except so one bad row
+    can never blank the viewport (fix-up 1 rule 5). Logs each failure once
+    per photo_id."""
+
+    def __init__(self, placeholder: QPixmap, parent=None) -> None:
+        super().__init__(parent)
+        self._placeholder = placeholder
+        self._reported: set[int] = set()
+
+    def paint(self, painter, option, index):  # noqa: N802
+        try:
+            super().paint(painter, option, index)
+        except Exception:
+            pid = index.data(PHOTO_ID_ROLE)
+            if pid not in self._reported:
+                self._reported.add(pid)
+                log.exception("delegate paint failed for photo %s", pid)
+            painter.save()
+            painter.fillRect(option.rect, Qt.darkGray)
+            painter.setPen(Qt.white)
+            painter.drawText(option.rect, Qt.AlignCenter, f"#{pid or '?'}")
+            painter.restore()
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +467,7 @@ class SingleView(QWidget):
         self._current = row
         self._position = position
         thumb = thumb_path(self._settings, row.photo_id)
+        # Prefer working file for high-res; fall back to thumb.
         pm = QPixmap()
         source = None
         with db.connection() as conn:
@@ -477,16 +536,29 @@ class SingleView(QWidget):
 # Decision worker
 # ---------------------------------------------------------------------------
 
-class _DecisionSignals(QObject):
-    done = Signal(int, object, object)
+class _DecisionMediator(QObject):
+    """Bridge from a QThreadPool worker back to the GUI thread. The panel
+    owns exactly one of these; every runnable emits `done` on it. Because
+    the mediator lives on the GUI thread and its slot is connected with
+    Qt.QueuedConnection, the slot always runs on the GUI thread even
+    though `emit` happens from the worker.
+
+    group_id lets the slot know which multi-select batch a decision
+    belongs to, so undo grouping and cursor advance can happen once per
+    keypress rather than per photo.
+    """
+    done = Signal(int, int, object, object)  # group_id, photo_id, result, err
 
 
 class _DecisionRunnable(QRunnable):
-    def __init__(self, settings: Settings, photo_id: int, target: str,
-                 hint: str | None) -> None:
+    def __init__(
+        self, settings: Settings, mediator: _DecisionMediator,
+        group_id: int, photo_id: int, target: str, hint: str | None,
+    ) -> None:
         super().__init__()
-        self.signals = _DecisionSignals()
         self._settings = settings
+        self._mediator = mediator
+        self._group_id = group_id
         self._photo_id = photo_id
         self._target = target
         self._hint = hint
@@ -496,18 +568,19 @@ class _DecisionRunnable(QRunnable):
             r = decisions.apply_decision(
                 self._settings, self._photo_id, self._target, hint=self._hint,
             )
-            self.signals.done.emit(self._photo_id, r, None)
+            self._mediator.done.emit(self._group_id, self._photo_id, r, None)
         except Exception as e:
             log.exception("decision failed for %s", self._photo_id)
-            self.signals.done.emit(self._photo_id, None, repr(e))
+            self._mediator.done.emit(self._group_id, self._photo_id, None, repr(e))
 
 
 # ---------------------------------------------------------------------------
 # Panel
 # ---------------------------------------------------------------------------
 
+# 1-5 keys map to hint filters (per answer 7).
 HINT_KEY_MAP: dict[int, tuple[str, str]] = {
-    Qt.Key_1: ("all", "untriaged"),
+    Qt.Key_1: ("all", "untriaged"),          # status=untriaged, hint=all
     Qt.Key_2: ("screenshot", "all_status"),
     Qt.Key_3: ("document", "all_status"),
     Qt.Key_4: ("blank_or_dark", "all_status"),
@@ -528,9 +601,13 @@ class TriagePanel(QWidget):
 
         outer = QVBoxLayout(self)
 
+        # Filter bar
         outer.addLayout(self._build_filter_bar())
+
+        # Action bar
         outer.addLayout(self._build_action_bar())
 
+        # Stack: grid over single view
         self._stack = QStackedWidget()
         self._grid_model = TriageGridModel(self._cache)
         self._grid = _TriageGridView()
@@ -549,6 +626,27 @@ class TriagePanel(QWidget):
         self._grid.doubleClicked.connect(self._on_double_click)
         self._grid.activated.connect(self._on_double_click)
         self._grid.installEventFilter(self)
+        self._grid.setItemDelegate(_SafePaintDelegate(
+            _placeholder_pixmap(THUMB_TILE), self._grid,
+        ))
+
+        # Decision mediator: worker → this slot on the GUI thread.
+        # Explicit QueuedConnection removes any doubt about receiver thread.
+        self._decision_mediator = _DecisionMediator(self)
+        self._decision_mediator.done.connect(
+            self._on_decision_done, Qt.QueuedConnection,
+        )
+        self._next_decision_group = 1
+        self._decision_groups: dict[int, dict] = {}
+        self._scan_root_labels = {r.label for r in self._settings.master_roots
+                                  if r.kind == "scan"}
+        self._pending_pairings = 0
+
+        # Poll the pending-pairings count for the status bar. Cheap query.
+        self._pending_tick = QTimer(self)
+        self._pending_tick.setInterval(3000)
+        self._pending_tick.timeout.connect(self._refresh_pending_count)
+        self._pending_tick.start()
 
         self._single_view = SingleView(self._settings)
         self._single_view.installEventFilter(self)
@@ -557,12 +655,14 @@ class TriagePanel(QWidget):
         self._stack.addWidget(self._single_view)
         outer.addWidget(self._stack, 1)
 
+        # Status strip
         outer.addLayout(self._build_status_strip())
 
+        # Key hints (bottom bar)
         hints = QLabel(
-            "  K keep    J junk    P private    U undo    Space select    "
-            "Enter open    Esc back    1-5 hint filters    / focus filter    "
-            "Ctrl+A select all"
+            "  K keep    J junk    P private    B this-is-a-back    "
+            "U undo    Space select    Enter open    Esc back    "
+            "1-5 hint filters    / focus filter    Ctrl+A select all"
         )
         hints.setStyleSheet(
             "color: #ccc; background: #333; padding: 4px 8px;"
@@ -570,14 +670,18 @@ class TriagePanel(QWidget):
         )
         outer.addWidget(hints)
 
+        # Wire filter changes
         for combo in (self._f_status, self._f_hint, self._f_root,
                       self._f_folder, self._f_year, self._f_sort):
             combo.currentIndexChanged.connect(self._on_filter_changed)
         self._f_search.textChanged.connect(self._on_filter_changed)
 
         self._populate_filter_options()
+        self._refresh_pending_count()
         self._refresh_rows()
         self._refresh_presort_button()
+
+    # ----- Layout builders -----
 
     def _build_filter_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
@@ -641,6 +745,8 @@ class TriagePanel(QWidget):
         bar.addWidget(self._session_lbl)
         return bar
 
+    # ----- Data plumbing -----
+
     def _populate_filter_options(self) -> None:
         try:
             opts = _fetch_filter_options()
@@ -699,7 +805,8 @@ class TriagePanel(QWidget):
         p = by_status.get("private", 0)
         self._counts_lbl.setText(
             f"untriaged {u:>6}   keep {k:>6}   junk {j:>6}   private {p:>4}   "
-            f"showing {self._grid_model.rowCount()}"
+            f"showing {self._grid_model.rowCount():>5}   "
+            f"pending pairings {self._pending_pairings:>4}"
         )
         self._refresh_session_stats()
 
@@ -723,10 +830,12 @@ class TriagePanel(QWidget):
             self._presort_btn.setEnabled(True)
         else:
             self._presort_btn.setText("Compute hints  (all up to date)")
-            self._presort_btn.setEnabled(True)
+            self._presort_btn.setEnabled(True)  # allow re-run for burst pass
 
     def _on_filter_changed(self) -> None:
         self._refresh_rows()
+
+    # ----- Decisions -----
 
     def _selected_photo_ids(self) -> list[int]:
         return [
@@ -740,6 +849,16 @@ class TriagePanel(QWidget):
             return None
         return self._grid_model.rows()[ix.row()].photo_id
 
+    def _row_should_leave_after_decision(
+        self, *, new_triage_status: str,
+    ) -> bool:
+        """Per fix-up 1 rule 4: only the untriaged filter drains items when
+        they get a decision. Under any other filter the item stays and shows
+        its new status badge — George is inspecting a set, not clearing a
+        queue."""
+        return (self._f_status.currentData() == "untriaged"
+                and new_triage_status != "untriaged")
+
     def _apply_to_selection(self, target: str) -> None:
         photo_ids = self._selected_photo_ids()
         if not photo_ids:
@@ -748,8 +867,15 @@ class TriagePanel(QWidget):
                 return
             photo_ids = [pid]
 
+        # Snapshot the previous state + optimistic model change on the GUI
+        # thread. We NEVER touch model/view state from the worker thread —
+        # the worker only computes the DB write and emits `done` to the
+        # mediator, which is queued back here.
         hint_by_pid = {r.photo_id: r.hint for r in self._grid_model.rows()}
         prev_snapshots: dict[int, dict[str, Any]] = {}
+        removed_positions: dict[int, tuple[int, TriageRow]] = {}
+
+        first_position = None
         for pid in photo_ids:
             i = self._grid_model.row_by_photo_id(pid)
             if i < 0:
@@ -758,62 +884,164 @@ class TriagePanel(QWidget):
             prev_snapshots[pid] = {
                 "triage_status": r.triage_status,
                 "is_private": r.is_private,
+                "hint": r.hint,
+                "row_snapshot": r,
             }
+            if first_position is None:
+                first_position = i
             is_private = (target == "private")
-            self._grid_model.update_status(pid, target, is_private)
+            if self._row_should_leave_after_decision(new_triage_status=target):
+                # Untriaged filter: item leaves the list immediately so the
+                # cursor visibly advances through the cull queue.
+                removed_positions[pid] = (i, r)
+                self._grid_model.remove_photo(pid)
+            else:
+                self._grid_model.update_status(pid, target, is_private)
 
-        this_group: list[decisions.DecisionResult] = []
-        pending = {pid for pid in photo_ids}
-
-        def _handle(photo_id: int, result: decisions.DecisionResult | None,
-                    err: str | None) -> None:
-            pending.discard(photo_id)
-            if err:
-                log.error("decision revert for %s: %s", photo_id, err)
-                snap = prev_snapshots.get(photo_id) or {
-                    "triage_status": "untriaged", "is_private": False,
-                }
-                self._grid_model.update_status(
-                    photo_id, snap["triage_status"], snap["is_private"],
-                )
-                if not getattr(self, "_shown_err", False):
-                    self._shown_err = True
-                    QMessageBox.warning(
-                        self, "Triage",
-                        f"A commit failed and was reverted: {err}. "
-                        "See log dock for details.",
-                    )
-            elif result is not None:
-                this_group.append(result)
-            if not pending:
-                if this_group:
-                    self._undo.append(this_group)
-                self._session_decisions += len(this_group)
-                if self._session_start is None:
-                    self._session_start = time.time()
-                self._refresh_counts()
-                self._advance_cursor(photo_ids[-1])
+        # Register the group. When every decision reports back, we'll
+        # append this group to the undo stack, update session stats, and
+        # place the cursor.
+        group_id = self._next_decision_group
+        self._next_decision_group += 1
+        self._decision_groups[group_id] = {
+            "pending": set(photo_ids),
+            "results": [],
+            "removed": removed_positions,
+            "prev": prev_snapshots,
+            "target": target,
+            "first_position": first_position or 0,
+        }
 
         for pid in photo_ids:
             runnable = _DecisionRunnable(
-                self._settings, pid, target, hint_by_pid.get(pid),
+                self._settings, self._decision_mediator,
+                group_id, pid, target, hint_by_pid.get(pid),
             )
-            runnable.signals.done.connect(_handle)
             self._pool.start(runnable)
 
-    def _advance_cursor(self, from_photo_id: int) -> None:
-        i = self._grid_model.row_by_photo_id(from_photo_id)
-        if i < 0:
+    @Slot(int, int, object, object)
+    def _on_decision_done(
+        self, group_id: int, photo_id: int,
+        result, err,
+    ) -> None:
+        """Runs on the GUI thread (queued from the worker). Handles success
+        and failure per photo, and finalises the group when the last
+        pending decision lands."""
+        grp = self._decision_groups.get(group_id)
+        if grp is None:
             return
+        grp["pending"].discard(photo_id)
+
+        if err:
+            log.error("decision revert for %s: %s", photo_id, err)
+            snap = grp["prev"].get(photo_id)
+            # Reinsert if we optimistically removed it.
+            removed = grp["removed"].pop(photo_id, None)
+            if removed is not None:
+                pos, row = removed
+                self._grid_model.insert_row_at(pos, row)
+            elif snap is not None:
+                self._grid_model.update_status(
+                    photo_id, snap["triage_status"], snap["is_private"],
+                )
+            if not getattr(self, "_shown_err", False):
+                self._shown_err = True
+                QMessageBox.warning(
+                    self, "Triage",
+                    f"A commit failed and was reverted: {err}. "
+                    "See log dock for details.",
+                )
+        elif result is not None:
+            grp["results"].append(result)
+
+        if not grp["pending"]:
+            self._decision_groups.pop(group_id, None)
+            if grp["results"]:
+                self._undo.append(grp["results"])
+                self._session_decisions += len(grp["results"])
+                if self._session_start is None:
+                    self._session_start = time.time()
+            self._refresh_counts()
+            self._advance_cursor_to_position(grp["first_position"])
+
+    def _on_this_is_a_back(self) -> None:
+        """B key: reclassify this scan as the back of the preceding print.
+        Digital-root photos are ignored with a status-bar note."""
+        pid = self._current_photo_id()
+        if pid is None:
+            return
+        try:
+            result = back_from_triage.propose_back_from_triage(
+                self._settings, pid,
+            )
+        except back_from_triage.NotAScan:
+            self._counts_lbl.setText(
+                self._counts_lbl.text() + "    · not a scan"
+            )
+            return
+        except back_from_triage.AlreadyProposed as e:
+            self._counts_lbl.setText(
+                self._counts_lbl.text() + f"    · {e}"
+            )
+            return
+        except Exception:
+            log.exception("propose_back_from_triage failed for %s", pid)
+            QMessageBox.critical(
+                self, "Triage",
+                "Could not create back proposal. See log dock.",
+            )
+            return
+
+        # Under the untriaged filter the photo should now leave the list
+        # (it was set to keep). Under any other filter, update the badge.
+        i = self._grid_model.row_by_photo_id(pid)
+        if i >= 0:
+            if self._f_status.currentData() == "untriaged":
+                self._grid_model.remove_photo(pid)
+                self._advance_cursor_to_position(i)
+            else:
+                self._grid_model.update_status(pid, "keep", False)
+        self._session_decisions += 1
+        if self._session_start is None:
+            self._session_start = time.time()
+        self._refresh_counts()
+        self._refresh_pending_count()
+
+        note = f"B: pairing {result.pairing_id}"
+        if result.front_photo_id is None:
+            note += " (orphan)"
+        else:
+            note += f" ← photo {result.front_photo_id}"
+        if result.aspect_mismatch:
+            note += "  [aspect differs]"
+        self._counts_lbl.setText(self._counts_lbl.text() + "    · " + note)
+
+    def _refresh_pending_count(self) -> None:
+        try:
+            self._pending_pairings = back_from_triage.pending_pairings_count()
+        except Exception:
+            return
+        # Only rewrite the tail; the head is set by _refresh_counts and
+        # would otherwise flicker on every tick.
+        base = self._counts_lbl.text().split("   pending pairings", 1)[0]
+        self._counts_lbl.setText(
+            f"{base}   pending pairings {self._pending_pairings:>4}"
+        )
+
+    def _advance_cursor_to_position(self, position: int) -> None:
+        """After a decision, land the cursor at the row that took the
+        first-decided item's position (or the previous one if we're at
+        the end). Called only on the GUI thread."""
         n = self._grid_model.rowCount()
         if n == 0:
             return
-        nxt = min(i + 1, n - 1)
-        idx = self._grid_model.index(nxt, 0)
+        target = min(position, n - 1)
+        target = max(target, 0)
+        idx = self._grid_model.index(target, 0)
         self._grid.setCurrentIndex(idx)
         self._grid.scrollTo(idx, QListView.PositionAtCenter)
         if self._stack.currentIndex() == 1:
-            self._show_single_at_row(nxt)
+            self._show_single_at_row(target)
 
     def _do_undo(self) -> None:
         if not self._undo:
@@ -821,16 +1049,20 @@ class TriagePanel(QWidget):
         group = self._undo.pop()
         for r in reversed(group):
             try:
-                new = decisions.undo(self._settings, r)
-                self._grid_model.update_status(
-                    r.photo_id, new.new["triage_status"], new.new["is_private"],
-                )
+                decisions.undo(self._settings, r)
                 self._session_decisions = max(self._session_decisions - 1, 0)
             except Exception:
                 log.exception("undo failed for %s", r.photo_id)
-        self._refresh_counts()
+        # A decision may have removed a row from the current filter; the
+        # cleanest way to put the world back the way it was is to re-query
+        # once. Cheap on a single group.
+        self._refresh_rows()
+
+    # ----- Apply hints selection -----
 
     def _on_apply_hints(self) -> None:
+        # possible_back is *not* included: those are candidate backs for
+        # George to press B on, not junk to press J on.
         target_hints = {"screenshot", "document", "blank_or_dark",
                         "tiny", "burst"}
         sel = self._grid.selectionModel()
@@ -845,12 +1077,14 @@ class TriagePanel(QWidget):
             self._counts_lbl.text() + f"    · selected {count} for review"
         )
 
+    # ----- Presort -----
+
     def _on_presort(self) -> None:
         if self._presort_job is not None:
             return
         self._presort_btn.setEnabled(False)
         self._presort_progress.setVisible(True)
-        self._presort_progress.setRange(0, 0)
+        self._presort_progress.setRange(0, 0)  # indeterminate until first
         self._presort_job = BackgroundJob(
             lambda progress_cb, cancel_token: presort.run_presort(
                 progress_cb=progress_cb, cancel_token=cancel_token,
@@ -881,7 +1115,7 @@ class TriagePanel(QWidget):
                  "",
                  "Distribution:"]
         for h in ("photo", "screenshot", "document", "blank_or_dark",
-                  "tiny", "burst", "exact_dup_of"):
+                  "possible_back", "tiny", "burst", "exact_dup_of"):
             lines.append(f"  {h:<14} {dist.get(h, 0)}")
         QMessageBox.information(self, "Presort complete", "\n".join(lines))
         self._refresh_presort_button()
@@ -893,10 +1127,14 @@ class TriagePanel(QWidget):
         self._presort_btn.setEnabled(True)
         QMessageBox.critical(self, "Presort failed", tb[-2000:])
 
+    # ----- Quarantine browser -----
+
     def _open_quarantine(self) -> None:
         dlg = QuarantineBrowser(self._settings, self)
         dlg.exec()
         self._refresh_rows()
+
+    # ----- Single view -----
 
     def _on_double_click(self, index) -> None:
         if not index.isValid():
@@ -910,6 +1148,8 @@ class TriagePanel(QWidget):
             return
         self._single_view.show_row(rows[row], (row + 1, len(rows)))
 
+    # ----- Keyboard -----
+
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if event.type() == event.Type.KeyPress:
             key = event.key()
@@ -919,6 +1159,7 @@ class TriagePanel(QWidget):
         return super().eventFilter(obj, event)
 
     def _handle_key(self, key: int, event: QKeyEvent) -> bool:
+        # If the search box has focus, let it eat characters.
         if self._f_search.hasFocus() and key not in (Qt.Key_Escape,):
             return False
         if key == Qt.Key_K:
@@ -929,6 +1170,8 @@ class TriagePanel(QWidget):
             self._apply_to_selection("private"); return True
         if key == Qt.Key_U:
             self._do_undo(); return True
+        if key == Qt.Key_B:
+            self._on_this_is_a_back(); return True
         if key == Qt.Key_Slash:
             self._f_search.setFocus(); self._f_search.selectAll(); return True
         if key in HINT_KEY_MAP:
@@ -952,6 +1195,7 @@ class TriagePanel(QWidget):
             self._stack.setCurrentIndex(0)
             self._grid.setFocus()
             return True
+        # Space toggles selection in the grid.
         if key == Qt.Key_Space and self._stack.currentIndex() == 0:
             ix = self._grid.currentIndex()
             if ix.isValid():
@@ -960,6 +1204,7 @@ class TriagePanel(QWidget):
                        | sel.SelectionFlag.Rows)
                 sel.select(ix, cmd)
             return True
+        # Single view navigation.
         if self._stack.currentIndex() == 1 and key in (
             Qt.Key_Left, Qt.Key_Right, Qt.Key_PageUp, Qt.Key_PageDown,
             Qt.Key_Home, Qt.Key_End, Qt.Key_Up, Qt.Key_Down,
@@ -977,8 +1222,9 @@ class TriagePanel(QWidget):
         elif key == Qt.Key_3:
             _select_by_data(self._f_hint, "document")
         elif key == Qt.Key_4:
-            _select_by_data(self._f_hint, "blank_or_dark")
+            _select_by_data(self._f_hint, "blank_or_dark_or_possible_back")
         elif key == Qt.Key_5:
+            # tiny + burst — treat as tiny first; second press cycles to burst.
             current = self._f_hint.currentData()
             _select_by_data(self._f_hint, "burst" if current == "tiny" else "tiny")
 
@@ -1006,8 +1252,13 @@ class TriagePanel(QWidget):
         self._show_single_at_row(new_row)
 
 
+# ---------------------------------------------------------------------------
+# Grid subclass for Ctrl+A within the current model
+# ---------------------------------------------------------------------------
+
 class _TriageGridView(QListView):
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        # Ctrl+A selects everything in the current model.
         if (event.matches(QKeySequence.SelectAll)
                 and self.model() is not None):
             m = self.model()
@@ -1026,6 +1277,10 @@ class _TriageGridView(QListView):
             return
         super().keyPressEvent(event)
 
+
+# ---------------------------------------------------------------------------
+# Quarantine browser
+# ---------------------------------------------------------------------------
 
 class QuarantineBrowser(QDialog):
     def __init__(self, settings: Settings, parent=None) -> None:
@@ -1090,12 +1345,16 @@ class QuarantineBrowser(QDialog):
             try:
                 if target == "junk":
                     decisions.restore_from_quarantine(self._settings, pid)
-                else:
+                else:  # private
                     decisions.unprivate(self._settings, pid)
             except Exception:
                 log.exception("restore failed for %s", pid)
         self._refresh()
 
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 
 def _combo(items: list[tuple[str, str]]) -> QComboBox:
     c = QComboBox()
@@ -1124,6 +1383,8 @@ def _select_by_data(c: QComboBox, value: str) -> None:
 
 
 def _grid_style() -> str:
+    # Colour the item background by triage status so the reviewer can see
+    # the pending state without hovering.
     return """
         QListView { background: #1e1e1e; color: white; }
         QListView::item { padding: 6px; border: 2px solid transparent; }

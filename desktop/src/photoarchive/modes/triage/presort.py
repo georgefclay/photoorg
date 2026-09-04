@@ -4,10 +4,15 @@ Incremental: only photos with `triage_status = 'untriaged'` and no existing
 triage_hints row are considered. Re-running is cheap.
 
 Precedence when multiple hints match (highest wins):
-  exact_dup_of → screenshot → blank_or_dark → tiny → document → burst
+  exact_dup_of → screenshot → possible_back → blank_or_dark → tiny → document → burst
 
 Losing hints are recorded in `details.also` so nothing is lost. `photo` is
 the fallback when nothing matched.
+
+`possible_back` is a scan-only reclassification of blank_or_dark: a
+near-blank scan with any ink at all (fraction > 0.001) is likely the
+back of a print with a date scribbled on it — the strict back detector
+missed it because the ink is too sparse. Fix-up 2.
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ import psycopg
 from PIL import Image
 
 from ... import db
+from ...config import Settings
 from ...workers import CancelToken, Cancelled
 from ..ingest.image_io import open_image
 from . import classifiers, burst
@@ -31,8 +37,11 @@ log = logging.getLogger(__name__)
 
 
 HINT_PRECEDENCE = (
-    "exact_dup_of", "screenshot", "blank_or_dark", "tiny", "document", "burst",
+    "exact_dup_of", "screenshot", "possible_back",
+    "blank_or_dark", "tiny", "document", "burst",
 )
+
+POSSIBLE_BACK_MIN_INK = 0.001
 
 
 def _read_software(path: Path) -> str | None:
@@ -130,11 +139,14 @@ def _upsert_hint(
     )
 
 
-def _classify_one(row: dict[str, Any], conn: psycopg.Connection
-                 ) -> tuple[dict[str, tuple[float, dict]], _ClassifyStats | None]:
+def _classify_one(
+    row: dict[str, Any], conn: psycopg.Connection,
+    *, scan_root_labels: set[str],
+) -> tuple[dict[str, tuple[float, dict]], _ClassifyStats | None]:
     """Return the per-classifier matches for one photo, before precedence."""
     matches: dict[str, tuple[float, dict]] = {}
     stats: _ClassifyStats | None = None
+    is_scan_root = row["source_root"] in scan_root_labels
 
     # exact_dup_of — safety net; ingest should have deduped already.
     dup_count = _count_sha_dups(conn, row["sha256"], row["id"])
@@ -169,7 +181,23 @@ def _classify_one(row: dict[str, Any], conn: psycopg.Connection
                 stats = _ClassifyStats(tone=tone)
                 matched, conf, det = classifiers.is_blank_or_dark(img, cached=tone)
                 if matched:
-                    matches["blank_or_dark"] = (conf, det)
+                    # Fix-up 2: a near-blank scan with any ink at all
+                    # (fraction > 0.001) is likely a back with just a date
+                    # written on it. Reclassify as possible_back so George
+                    # sees it and can hit B.
+                    if is_scan_root:
+                        ink = classifiers.ink_fraction(img)
+                        if ink > POSSIBLE_BACK_MIN_INK:
+                            matches["possible_back"] = (
+                                min(1.0, 0.5 + ink * 10),
+                                {"ink_fraction": round(ink, 4),
+                                 "reason": "scan_blank_with_ink",
+                                 **det},
+                            )
+                        else:
+                            matches["blank_or_dark"] = (conf, det)
+                    else:
+                        matches["blank_or_dark"] = (conf, det)
                 matched, conf, det = classifiers.is_document(img, cached=tone)
                 if matched:
                     matches["document"] = (conf, det)
@@ -187,21 +215,33 @@ class _ClassifyStats:
 
 def run_presort(
     *,
+    settings: Settings | None = None,
     progress_cb: Callable[[dict], None] = lambda _: None,
     cancel_token: CancelToken | None = None,
 ) -> dict[str, Any]:
     """Compute hints for every untriaged photo lacking one. Also recomputes
     burst membership across the current untriaged pool.
 
+    `settings` is used to tell scan roots from digital ones (Fix-up 2:
+    the possible_back reclassification only applies to scan-root photos).
+    If omitted, we load it from .env.
+
     Returns a summary dict with the hint distribution.
     """
+    if settings is None:
+        from ...config import load as load_config
+        settings = load_config()
+    scan_root_labels = {r.label for r in settings.master_roots
+                        if r.kind == "scan"}
+
     ctok = cancel_token or CancelToken()
 
     started = time.time()
     with db.connection() as conn:
         conn.autocommit = True
         job_run_id = db.start_job_run(
-            conn, job_name="triage_presort", params={},
+            conn, job_name="triage_presort",
+            params={"scan_root_labels": sorted(scan_root_labels)},
         )
         db.audit(conn, actor="desktop", action="triage_presort.start",
                  entity_type="job_run", entity_id=job_run_id, new_value={})
@@ -220,7 +260,9 @@ def run_presort(
         with db.connection() as conn:
             conn.autocommit = True
             try:
-                matches, _stats = _classify_one(row, conn)
+                matches, _stats = _classify_one(
+                    row, conn, scan_root_labels=scan_root_labels,
+                )
                 per_hint_matches[row["id"]] = matches
                 hint, conf, det = _pick_hint(matches)
                 _upsert_hint(
@@ -364,3 +406,73 @@ def count_photos_needing_hints() -> int:
               and h.photo_id is null
             """
         ).fetchone()[0])
+
+
+def reclassify_blank_or_dark_on_scans(
+    *, settings: Settings | None = None,
+    progress_cb: Callable[[dict], None] = lambda _: None,
+) -> dict[str, Any]:
+    """Fix-up 2 backfill: for every scan-root photo currently hinted
+    `blank_or_dark`, run the ink measure and reclassify as `possible_back`
+    when ink fraction > POSSIBLE_BACK_MIN_INK. Idempotent."""
+    if settings is None:
+        from ...config import load as load_config
+        settings = load_config()
+    scan_root_labels = {r.label for r in settings.master_roots
+                        if r.kind == "scan"}
+
+    with db.connection() as conn:
+        conn.autocommit = True
+        rows = conn.execute(
+            """
+            select p.id, p.working_path, p.source_root
+            from photos p
+            join triage_hints h on h.photo_id = p.id
+            where h.hint = 'blank_or_dark'
+              and not p.is_deleted
+              and p.source_root = ANY(%s)
+              and p.working_path is not null
+            order by p.id
+            """,
+            (list(scan_root_labels),),
+        ).fetchall()
+
+    total = len(rows)
+    progress_cb({"kind": "start", "total": total})
+    moved = 0
+    processed = 0
+    for pid, wp, sroot in rows:
+        processed += 1
+        p = Path(wp)
+        if not p.exists():
+            continue
+        try:
+            with open_image(p) as img:
+                img.load()
+                ink = classifiers.ink_fraction(img)
+        except Exception as e:
+            log.warning("reclassify decode failed for %s: %s", pid, e)
+            continue
+        if ink <= POSSIBLE_BACK_MIN_INK:
+            continue
+        # Overwrite the row; details carries the ink evidence.
+        with db.connection() as conn:
+            conn.autocommit = True
+            # Preserve any prior details.also for provenance.
+            det = conn.execute(
+                "select details from triage_hints where photo_id = %s",
+                (pid,),
+            ).fetchone()[0]
+            if not isinstance(det, dict):
+                det = {}
+            det["ink_fraction"] = round(ink, 4)
+            det["reason"] = "scan_blank_with_ink"
+            _upsert_hint(
+                conn, photo_id=pid, hint="possible_back",
+                confidence=min(1.0, 0.5 + ink * 10), details=det,
+            )
+        moved += 1
+        if processed % 25 == 0 or processed == total:
+            progress_cb({"kind": "progress", "done": processed,
+                         "total": total, "moved": moved})
+    return {"processed": processed, "moved": moved, "total": total}

@@ -105,6 +105,30 @@ def test_document_rejects_saturated_photo():
     assert not matched
 
 
+def test_ink_fraction_high_on_page_with_scribble():
+    """A near-blank scan with a hand-scribbled date should have ink well
+    above the 0.001 threshold used to reclassify blank_or_dark →
+    possible_back. Using rectangles instead of text avoids PIL's tiny
+    default font — real handwriting is many pixels tall."""
+    arr = np.full((600, 800, 3), 250, dtype=np.uint8)
+    img = Image.fromarray(arr)
+    d = ImageDraw.Draw(img)
+    # A handwritten date takes up maybe 200×20 px of ink strokes.
+    for x in (200, 260, 320, 380, 440):
+        d.line([(x, 260), (x, 320)], fill=(20, 20, 20), width=3)
+    d.line([(200, 260), (460, 262)], fill=(20, 20, 20), width=3)
+    d.line([(200, 320), (460, 322)], fill=(20, 20, 20), width=3)
+    ink = classifiers.ink_fraction(img)
+    assert ink > 0.001, ink
+
+
+def test_ink_fraction_low_on_truly_blank_page():
+    """A completely blank near-white scan should not trigger possible_back."""
+    img = _blank(600, 400, colour=252)
+    ink = classifiers.ink_fraction(img)
+    assert ink <= 0.001, ink
+
+
 def test_laplacian_sharpness_prefers_edges():
     # A flat image is not sharp; add an edge to bump variance.
     flat = _blank(300, 300, colour=128)

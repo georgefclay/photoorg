@@ -218,6 +218,23 @@ def laplacian_sharpness(image: Image.Image) -> float:
     return float(cv2.Laplacian(arr, cv2.CV_64F).var())
 
 
+def ink_fraction(image: Image.Image) -> float:
+    """Same adaptive-threshold ink measure the back detector uses. Any
+    handwriting, date scribble, or stamp will push this above ~0.001,
+    even on an otherwise near-blank print. Called for scan-root photos
+    that would otherwise be tagged blank_or_dark, to reclassify them
+    as `possible_back`."""
+    img = ImageOps.exif_transpose(image).convert("RGB")
+    img.thumbnail((512, 512), Image.LANCZOS)
+    arr = np.asarray(img)
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    thr = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 25, 10,
+    )
+    return float((thr > 0).mean())
+
+
 def analyse_tone(image: Image.Image) -> _ToneStats:
     """Public helper so the caller can compute once and pass to both
     is_blank_or_dark and is_document without re-decoding."""
