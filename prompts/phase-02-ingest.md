@@ -200,3 +200,29 @@ Keep the existing vetoes. Verify on: Batch 00001 #19 (must stay >= 0.8), Batch 0
 5. Rebuild pending proposals with the new scorer, produce the contact sheet, and report: new pending count, histogram, and the component tables from step 2.
 
 Commit: `Phase 2 fix-up 4: mid-tone and component vetoes, no walk-back, contact sheet`.
+
+---
+
+## Phase 2 fix-up 5 — review grid display bugs (photo-as-back proposals)
+
+Screenshot from George, `Batch 00006 #2 (front) <- #3 (back)`, a correct proposal:
+
+1. Right pane shows "(no thumb)" for the back, yet the same photo's thumbnail renders in the filmstrip. For `photo-as-back` proposals (`back_photo_id` set, `back_master_path` null) the main pane is still looking in `THUMBS_DIR/_staging/{sha}.jpg`. Resolve the thumb the same way the filmstrip does: `back_photo_id` -> `THUMBS_DIR/{photo_id:08d}.jpg`; fall back to staging only for held files. Same for the front. Add an offscreen UI test that loads a photo-as-back proposal and asserts both panes have a non-placeholder pixmap.
+2. Filmstrip labels: most tiles show only `#` — the sequence number is clipped. Give the label its own line under the thumbnail (not overlaid on the right edge), full width, `#N` plus `FRONT` / `BACK` / `PENDING` tags where relevant.
+3. The red focus border sits on tile #1 while the proposal is #2/#3. On load, the filmstrip's current item must be the proposed front; the back tile gets a distinct outline.
+4. The back in this example is scanned mirrored (text reads reversed). Record `details.mirrored = true` when the filmstrip/back detector sees mostly reversed strokes is out of scope; instead add a note to `PROJECT-PLAN.md` Phase 6: transcribe-back should try the horizontally flipped and 180-degree rotated variants when the first pass returns low confidence, and record which orientation was used.
+
+Commit: `Phase 2 fix-up 5: review grid thumbs and filmstrip labels`.
+
+---
+
+## Phase 2 fix-up 6 — Accept on a photo-as-back proposal fails with WinError 2
+
+George pressed Accept on a photo-as-back proposal and got "Decision failed: [WinError 2] The system cannot find the file specified". Do this with fix-up 5.
+
+1. **Integrity check first.** Find every `ingest_pairings` row touched in the last 24 h (any status change or `decided_at`), and for each: does the `photos` row / `photo_backs` row / working file / thumb agree with the status? Report any half-applied state and repair it (restore the photo row and file to their pre-accept state if the DB moved but the file did not, or vice versa). Also list any `photo_backs` rows whose `working_path` does not exist on disk.
+2. **Root cause.** For `back_photo_id` proposals the source file is `photos.working_path` (or `quarantine_path` if the photo was junked meanwhile) and the thumb is `THUMBS_DIR/{id:08d}.jpg` — not `_staging/{sha}`. Use one resolver function for "where is this proposal's back file / thumb right now" shared by the grid display, accept, and reject.
+3. **Order of operations on accept** (all inside one try): verify source files exist -> DB transaction (insert `photo_backs`, soft-delete the photo row with `physical_ref_note`, mark proposal accepted, audit) -> commit -> move file and thumb -> if a move fails, log it, keep the DB as decided, and put the proposal id in a "needs file repair" list shown in the status bar (DB is the source of truth; files catch up). Never show a raw WinError to George: the banner says what file was expected and where.
+4. Tests: accept a photo-as-back proposal end to end on the test DB with real temp files; accept when the photo is in quarantine; accept when the file is missing (DB decided, repair list populated).
+
+Commit: `Phase 2 fix-up 6: accept photo-as-back proposals`.

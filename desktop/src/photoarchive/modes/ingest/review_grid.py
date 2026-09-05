@@ -72,6 +72,84 @@ class Proposal:
     filmstrip: list[FilmstripCell] = field(default_factory=list)
 
 
+class _FilmstripCellWidget(QFrame):
+    """One filmstrip cell: thumbnail on top, label underneath (never
+    overlaid on the pixmap). Emits `clicked` with the cell's photo_id."""
+    clicked = Signal(int)
+
+    THUMB_SIZE = 110
+
+    def __init__(self, cell: FilmstripCell, parent=None) -> None:
+        super().__init__(parent)
+        self.cell = cell
+        self.setFrameShape(QFrame.NoFrame)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedWidth(self.THUMB_SIZE + 8)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(2, 2, 2, 2)
+        outer.setSpacing(2)
+
+        self._thumb = QLabel()
+        self._thumb.setAlignment(Qt.AlignCenter)
+        self._thumb.setFixedSize(self.THUMB_SIZE, self.THUMB_SIZE)
+        self._thumb.setStyleSheet("background: #111")
+        if cell.thumb_path and cell.thumb_path.exists():
+            pm = QPixmap(str(cell.thumb_path))
+            if not pm.isNull():
+                self._thumb.setPixmap(pm.scaled(
+                    self._thumb.size(), Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                ))
+            else:
+                self._thumb.setText("(unreadable)")
+                self._thumb.setStyleSheet("background: #111; color: #666")
+        else:
+            self._thumb.setText("(no thumb)")
+            self._thumb.setStyleSheet("background: #111; color: #666")
+        outer.addWidget(self._thumb, alignment=Qt.AlignHCenter)
+
+        self._label = QLabel()
+        self._label.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self._label.setWordWrap(True)
+        self._label.setTextFormat(Qt.PlainText)
+        self._label.setText(self._label_text(cell))
+        self._label.setStyleSheet(
+            f"font-size: 9pt; color: {self._label_fg(cell)}"
+        )
+        outer.addWidget(self._label)
+
+        self._focused = False
+        self.setStyleSheet(_frame_style(cell, focused=False))
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.cell.photo_id)
+        super().mouseReleaseEvent(event)
+
+    def set_focused(self, on: bool) -> None:
+        self._focused = on
+        self.setStyleSheet(_frame_style(self.cell, focused=on))
+
+    @staticmethod
+    def _label_text(cell: FilmstripCell) -> str:
+        parts = [f"#{cell.scan_sequence if cell.scan_sequence is not None else '?'}"]
+        tags: list[str] = []
+        if cell.is_current_front:
+            tags.append("FRONT")
+        if cell.is_current_back:
+            tags.append("BACK")
+        if cell.is_deleted:
+            tags.append("del")
+        if tags:
+            parts.append(" ".join(tags))
+        return "\n".join(parts)
+
+    @staticmethod
+    def _label_fg(cell: FilmstripCell) -> str:
+        return "#666" if cell.is_deleted else "#ccc"
+
+
 class _FilmstripBar(QFrame):
     """Row of clickable thumbnail cells representing scan-order neighbours."""
     picked = Signal(int)  # emits photo_id
@@ -82,7 +160,7 @@ class _FilmstripBar(QFrame):
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(4, 4, 4, 4)
         self._layout.setSpacing(4)
-        self._cells: list[tuple[FilmstripCell, QPushButton]] = []
+        self._cells: list[tuple[FilmstripCell, _FilmstripCellWidget]] = []
         self._focused = False
         self._selected_idx = 0
 
@@ -93,53 +171,50 @@ class _FilmstripBar(QFrame):
                 item.widget().deleteLater()
         self._cells = []
         for cell in cells:
-            btn = QPushButton()
-            btn.setFlat(False)
-            btn.setFixedSize(110, 130)
-            btn.setIconSize(btn.size())
-            if cell.thumb_path and cell.thumb_path.exists():
-                pm = QPixmap(str(cell.thumb_path))
-                if not pm.isNull():
-                    scaled = pm.scaled(btn.iconSize(), Qt.KeepAspectRatio,
-                                       Qt.SmoothTransformation)
-                    from PySide6.QtGui import QIcon
-                    btn.setIcon(QIcon(scaled))
-            tags = []
-            if cell.is_current_front:
-                tags.append("FRONT")
-            if cell.is_current_back:
-                tags.append("BACK")
-            if cell.is_deleted:
-                tags.append("del")
-            label = f"#{cell.scan_sequence or '?'}"
-            if tags:
-                label += f"\n{' '.join(tags)}"
-            btn.setText(label)
-            btn.setStyleSheet(_cell_style(cell))
-            btn.clicked.connect(lambda _c=False, pid=cell.photo_id: self.picked.emit(pid))
-            self._layout.addWidget(btn)
-            self._cells.append((cell, btn))
-        self._selected_idx = 0
+            w = _FilmstripCellWidget(cell)
+            w.clicked.connect(self.picked)
+            self._layout.addWidget(w)
+            self._cells.append((cell, w))
+        # Default selection is the FRONT (fix-up 5 rule 3); back is
+        # highlighted by its own coloured outline regardless of focus.
+        # `x or y` is wrong here — index 0 is a valid selection.
+        default = self._front_index()
+        if default is None:
+            default = self._back_index()
+        self._selected_idx = default if default is not None else 0
         self._focused = False
         self._paint_focus()
+
+    def _front_index(self) -> int | None:
+        for i, (c, _) in enumerate(self._cells):
+            if c.is_current_front:
+                return i
+        return None
+
+    def _back_index(self) -> int | None:
+        for i, (c, _) in enumerate(self._cells):
+            if c.is_current_back:
+                return i
+        return None
 
     def set_focused(self, on: bool) -> None:
         self._focused = on
         if on and self._cells:
-            # Start on the current back if it's in the strip; else on the front.
-            for i, (c, _) in enumerate(self._cells):
-                if c.is_current_back:
-                    self._selected_idx = i
-                    break
+            # Start on the back if it's in the strip; else on the front.
+            back = self._back_index()
+            if back is not None:
+                self._selected_idx = back
             else:
-                for i, (c, _) in enumerate(self._cells):
-                    if c.is_current_front:
-                        self._selected_idx = i
-                        break
+                front = self._front_index()
+                if front is not None:
+                    self._selected_idx = front
         self._paint_focus()
 
     def is_focused(self) -> bool:
         return self._focused
+
+    def selected_index(self) -> int:
+        return self._selected_idx
 
     def move_selection(self, delta: int) -> None:
         if not self._cells:
@@ -154,25 +229,28 @@ class _FilmstripBar(QFrame):
         self.picked.emit(cell.photo_id)
 
     def _paint_focus(self) -> None:
-        for i, (cell, btn) in enumerate(self._cells):
-            outline = "3px solid #4dc3ff" if (self._focused and i == self._selected_idx) else "1px solid #444"
-            btn.setStyleSheet(_cell_style(cell, outline=outline))
+        for i, (_cell, w) in enumerate(self._cells):
+            w.set_focused(self._focused and i == self._selected_idx)
 
 
-def _cell_style(cell: FilmstripCell, outline: str = "1px solid #444") -> str:
+def _frame_style(cell: FilmstripCell, *, focused: bool) -> str:
+    """Border colour reflects role (front/back) so it's obvious even
+    when the strip isn't focused. The focus ring is a bright blue on
+    top of that."""
+    if focused:
+        border = "3px solid #4dc3ff"
+    elif cell.is_current_back:
+        border = "3px solid #d97728"     # orange for the back tile
+    elif cell.is_current_front:
+        border = "2px solid #6dc06d"     # green for the front tile
+    else:
+        border = "1px solid #444"
     bg = "#222"
-    fg = "#ccc"
     if cell.is_current_front:
         bg = "#1e3a1e"
     elif cell.is_current_back:
         bg = "#3a1e1e"
-    if cell.is_deleted:
-        fg = "#666"
-    return (
-        f"QPushButton {{ background: {bg}; color: {fg}; "
-        f"border: {outline}; padding: 2px; font-size: 9pt }}"
-        f"QPushButton:hover {{ border: 2px solid #66aaff }}"
-    )
+    return f"_FilmstripCellWidget {{ background: {bg}; border: {border}; }}"
 
 
 class ReviewGridDialog(QDialog):
@@ -329,6 +407,14 @@ class ReviewGridDialog(QDialog):
             return
         try:
             decisions.accept_pairing_orphan(self._settings, cur.id)
+        except decisions.SourceFileMissing as e:
+            log.warning("orphan-accept refused — source missing: %s", e)
+            QMessageBox.warning(
+                self, "Orphan accept refused",
+                str(e) + "\n\nExpected the file to still be at that path. "
+                "Nothing was changed.",
+            )
+            return
         except Exception as e:
             log.exception("orphan-accept failed")
             QMessageBox.critical(self, "Orphan accept failed", str(e))
@@ -422,6 +508,16 @@ class ReviewGridDialog(QDialog):
                     decisions.accept_rescan(self._settings, cur.id)
                 else:
                     decisions.reject_rescan(self._settings, cur.id)
+        except decisions.SourceFileMissing as e:
+            # Fix-up 6: friendly message, never a raw WinError.
+            log.warning("decision refused — source missing: %s", e)
+            QMessageBox.warning(
+                self, "Decision refused",
+                str(e) + "\n\nExpected the file to still be at that path. "
+                "Nothing was changed. Run the pairing integrity check to "
+                "reconcile.",
+            )
+            return
         except Exception as e:
             log.exception("decision failed")
             QMessageBox.critical(self, "Decision failed", str(e))
@@ -472,6 +568,9 @@ class ReviewGridDialog(QDialog):
                 else:
                     decisions.accept_rescan(self._settings, p.id)
                 self._history.append((p.kind, p.id, "accept"))
+            except decisions.SourceFileMissing as e:
+                log.warning("bulk accept skipped %s %d: %s", p.kind, p.id, e)
+                continue
             except Exception as e:
                 log.exception("bulk accept failed for %s %d", p.kind, p.id)
                 QMessageBox.critical(self, "Bulk accept aborted", str(e))
@@ -545,10 +644,22 @@ def _load_pending(settings: Settings) -> list[Proposal]:
              front_photo_id, front_batch, front_seq, back_batch,
              source_root) = r
             batch = front_batch or back_batch
+            # Fix-up 5: resolve thumbs the same way the filmstrip does.
+            # For a photo-as-back proposal (back_photo_id set) the thumb
+            # lives at THUMBS_DIR/{back_pid:08d}.jpg — the staged path is
+            # only relevant for held (not-yet-committed) backs. Same for
+            # the front — front_photo_id is always a committed photo.
             front_thumb: Path | None = None
             if front_photo_id is not None:
                 front_thumb = settings.THUMBS_DIR / f"{front_photo_id:08d}.jpg"
-            back_thumb = Path(tpath) if tpath else None
+            if back_pid is not None:
+                back_thumb: Path | None = (
+                    settings.THUMBS_DIR / f"{back_pid:08d}.jpg"
+                )
+            elif tpath:
+                back_thumb = Path(tpath)
+            else:
+                back_thumb = None
             caption = _proposal_caption(
                 batch, back_folder, front_seq, back_seq,
                 float(score), back_pid, bool(back_aspect_mismatch),

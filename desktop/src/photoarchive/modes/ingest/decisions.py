@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
@@ -14,6 +15,108 @@ from . import paths, staging
 log = logging.getLogger(__name__)
 
 
+# Fix-up 6: proposals whose DB decision committed but whose file move
+# failed. The status bar surfaces the count; the integrity check tool
+# lists the ids. In-memory — repopulated on demand by scanning the DB.
+_NEEDS_FILE_REPAIR: set[int] = set()
+
+
+def needs_file_repair_ids() -> set[int]:
+    return set(_NEEDS_FILE_REPAIR)
+
+
+def needs_file_repair_count() -> int:
+    return len(_NEEDS_FILE_REPAIR)
+
+
+def mark_file_repair_needed(pairing_id: int) -> None:
+    _NEEDS_FILE_REPAIR.add(pairing_id)
+
+
+def clear_file_repair(pairing_id: int) -> None:
+    _NEEDS_FILE_REPAIR.discard(pairing_id)
+
+
+class SourceFileMissing(RuntimeError):
+    """Raised before any DB mutation when the proposal's source file
+    can't be found. The UI surfaces this as a friendly banner, never a
+    raw OSError."""
+
+    def __init__(self, pairing_id: int, kind: str, path: Path) -> None:
+        super().__init__(
+            f"Pairing {pairing_id}: {kind} file not found at {path}. "
+            f"Nothing was changed."
+        )
+        self.pairing_id = pairing_id
+        self.kind = kind
+        self.path = path
+
+
+@dataclass(frozen=True)
+class BackFiles:
+    """Where a proposal's back file and thumb are RIGHT NOW.
+    Not the DB-recorded staging paths — the resolver reads current state
+    so that a photo that has since been junked, or a photo-as-back
+    proposal whose file already lives at photos.working_path, both
+    resolve to the file that actually exists on disk."""
+    working: Path
+    thumb: Path | None
+    # Where the file was located from: 'staging', 'photo_working',
+    # 'photo_quarantine'. Purely for logs and diagnostics.
+    source: str
+
+
+def resolve_back_files(
+    conn: psycopg.Connection, pairing_id: int, settings: Settings,
+) -> BackFiles:
+    """Return the current on-disk location of a pending pairing's back
+    file (and thumb). See BackFiles docstring for the resolution rules.
+
+    Held-back proposal (back_photo_id null):
+      working -> ingest_pairings.staging_working_path
+      thumb   -> ingest_pairings.staging_thumb_path
+
+    Photo-as-back proposal (back_photo_id set):
+      working -> photos.working_path OR photos.quarantine_path
+      thumb   -> THUMBS_DIR/{back_photo_id:08d}.jpg
+    """
+    row = conn.execute(
+        """
+        select ip.back_photo_id, ip.staging_working_path,
+               ip.staging_thumb_path,
+               p.working_path, p.quarantine_path
+        from ingest_pairings ip
+        left join photos p on p.id = ip.back_photo_id
+        where ip.id = %s
+        """,
+        (pairing_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"pairing {pairing_id} not found")
+    back_pid, staging_w, staging_t, photo_w, photo_q = row
+
+    if back_pid is None:
+        return BackFiles(
+            working=Path(staging_w),
+            thumb=Path(staging_t) if staging_t else None,
+            source="staging",
+        )
+
+    thumb = settings.THUMBS_DIR / f"{back_pid:08d}.jpg"
+    if photo_w:
+        return BackFiles(working=Path(photo_w), thumb=thumb,
+                         source="photo_working")
+    if photo_q:
+        return BackFiles(working=Path(photo_q), thumb=thumb,
+                         source="photo_quarantine")
+    # Fall back to the recorded staging path — this is what a rebuild
+    # would have stored if the photo lost working_path somehow.
+    return BackFiles(
+        working=Path(staging_w) if staging_w else Path(""),
+        thumb=thumb, source="staging_fallback",
+    )
+
+
 # ---------- Pairing ----------
 
 def accept_pairing(settings: Settings, pairing_id: int) -> None:
@@ -23,32 +126,77 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
       - **held back** (back_photo_id is null): the file has been sitting in
         `WORKING_DIR/_staging/` since ingest. Move staging → back working
         name, insert photo_backs.
-      - **photo-as-back** (back_photo_id set): rebuild proposed an
-        already-committed photo as the back of another. The file already
-        lives at photos.working_path; move it to the back working name,
-        insert photo_backs, then mark the demoted photos row is_deleted with
-        `physical_ref_note='converted to back of photo <front_id>'`.
+      - **photo-as-back** (back_photo_id set): rebuild or the Triage B key
+        proposed an already-committed photo as the back of another. The
+        file lives at photos.working_path (or quarantine_path if the
+        photo was junked meanwhile); move it to the back working name,
+        insert photo_backs, then mark the demoted photos row is_deleted
+        with `physical_ref_note='converted to back of photo <front_id>'`.
+
+    Fix-up 6 order of operations:
+      1. Verify source files exist (resolver, current on-disk state).
+      2. DB transaction: photo_backs insert, demote photo, mark accepted,
+         audit. Commit.
+      3. Move file and thumb OUTSIDE the transaction. On move failure log
+         it, keep the DB as decided, add the pairing to the "needs file
+         repair" list surfaced by the status bar. The DB is the source of
+         truth; files catch up.
     """
+    _accept_pairing_impl(settings, pairing_id, orphan=False)
+
+
+def accept_pairing_orphan(settings: Settings, pairing_id: int) -> int:
+    """Accept the back but with no front (photo_id null). See
+    accept_pairing for the order of operations. Returns the new
+    photo_backs.id."""
+    return _accept_pairing_impl(settings, pairing_id, orphan=True)
+
+
+def _accept_pairing_impl(
+    settings: Settings, pairing_id: int, *, orphan: bool,
+) -> int:
+    # Step 1: read the row + resolve source files. This is a read-only
+    # snapshot; no locks yet.
+    with db.connection() as conn:
+        conn.autocommit = True
+        row = conn.execute(
+            """
+            select front_photo_id, back_master_path, back_sha256,
+                   back_source_folder, back_source_filename, back_scan_sequence,
+                   back_score, status, back_photo_id
+            from ingest_pairings where id = %s
+            """,
+            (pairing_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"pairing {pairing_id} not found")
+        (front_id, back_master_path, sha, folder, name, seq,
+         score, status, back_pid) = row
+        if status != "pending":
+            raise ValueError(f"pairing {pairing_id} is {status}, not pending")
+        files = resolve_back_files(conn, pairing_id, settings)
+
+    if not files.working.exists():
+        raise SourceFileMissing(pairing_id, "back working", files.working)
+
+    # Step 2: DB txn. Insert photo_backs (with the final working_path
+    # already recorded), demote the photo row if photo-as-back, mark
+    # accepted, audit. Commit.
+    audit_new: dict = {"status": "accepted", "source": files.source}
+    front_for_row = None if orphan else front_id
     with db.connection() as conn:
         conn.autocommit = False
         try:
-            row = conn.execute(
-                """
-                select front_photo_id, back_master_path, back_sha256,
-                       back_source_folder, back_source_filename, back_scan_sequence,
-                       back_score, staging_working_path, staging_thumb_path, status,
-                       back_photo_id
-                from ingest_pairings where id = %s
-                for update
-                """,
+            # SELECT ... FOR UPDATE re-checks status to guard against
+            # a second reviewer racing us.
+            recheck = conn.execute(
+                "select status from ingest_pairings where id = %s for update",
                 (pairing_id,),
             ).fetchone()
-            if row is None:
-                raise ValueError(f"pairing {pairing_id} not found")
-            (front_id, back_path, sha, folder, name, seq,
-             score, staging_wpath, staging_tpath, status, back_pid) = row
-            if status != "pending":
-                raise ValueError(f"pairing {pairing_id} is {status}, not pending")
+            if recheck is None or recheck[0] != "pending":
+                raise ValueError(
+                    f"pairing {pairing_id} is no longer pending"
+                )
 
             new_row = conn.execute(
                 """
@@ -58,132 +206,82 @@ def accept_pairing(settings: Settings, pairing_id: int) -> None:
                 values (%s, %s, %s, %s, %s, %s)
                 returning id
                 """,
-                (front_id, back_path, sha, folder, name, seq),
+                (front_for_row, back_master_path, sha, folder, name, seq),
             ).fetchone()
             back_id = new_row[0]
+            audit_new["photo_back_id"] = back_id
+            if orphan:
+                audit_new["orphan"] = True
+            else:
+                audit_new["front_photo_id"] = front_id
 
-            final_wpath = _final_back_working_path(settings, back_id, sha, staging_wpath)
-            _move(Path(staging_wpath), final_wpath)
+            final_working = _final_back_working_path(
+                settings, back_id, sha, str(files.working),
+            )
+            final_thumb = settings.THUMBS_DIR / f"back_{back_id:08d}.jpg"
             conn.execute(
                 "update photo_backs set working_path = %s where id = %s",
-                (str(final_wpath), back_id),
+                (str(final_working), back_id),
             )
-            if staging_tpath:
-                dest_thumb = settings.THUMBS_DIR / f"back_{back_id:08d}.jpg"
-                _move(Path(staging_tpath), dest_thumb)
-
-            audit_new: dict = {"status": "accepted", "photo_back_id": back_id,
-                               "front_photo_id": front_id}
 
             if back_pid is not None:
-                # Photo-as-back: demote the old photos row.
+                note = (
+                    "converted to orphan back" if orphan
+                    else f"converted to back of photo {front_id}"
+                )
                 conn.execute(
                     """
                     update photos
                     set is_deleted = true,
                         deleted_at = now(),
-                        physical_ref_note = %s
+                        physical_ref_note = %s,
+                        working_path = null,
+                        quarantine_path = null
                     where id = %s
                     """,
-                    (f"converted to back of photo {front_id}", back_pid),
+                    (note, back_pid),
                 )
                 audit_new["demoted_photo_id"] = back_pid
 
             conn.execute(
-                "update ingest_pairings set status = 'accepted', decided_at = now() where id = %s",
+                "update ingest_pairings set status = 'accepted', "
+                "decided_at = now() where id = %s",
                 (pairing_id,),
             )
-            db.audit(conn, actor="desktop", action="pairing.accept",
-                     entity_type="ingest_pairing", entity_id=pairing_id,
-                     previous_value={"status": "pending"},
-                     new_value=audit_new)
+            db.audit(
+                conn, actor="desktop",
+                action="pairing.accept_orphan" if orphan else "pairing.accept",
+                entity_type="ingest_pairing", entity_id=pairing_id,
+                previous_value={"status": "pending"},
+                new_value=audit_new,
+            )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
 
-
-def accept_pairing_orphan(settings: Settings, pairing_id: int) -> int:
-    """Accept the back but with no front (photo_id null).
-
-    Used when George can see the writing on the back but the print itself
-    isn't in the archive. The back still gets stored + moved to the back
-    working name + becomes eligible for Phase 6 OCR; the front may be
-    identified later. Photo-as-back proposals still demote the old photos
-    row with `physical_ref_note='converted to orphan back'`.
-    Returns the new photo_backs.id.
-    """
-    with db.connection() as conn:
-        conn.autocommit = False
+    # Step 3: move files. DB is committed; failures land in the repair
+    # list and are surfaced in the status bar and integrity report.
+    try:
+        _move(files.working, final_working)
+    except OSError as e:
+        log.error(
+            "pairing %s: DB committed but moving %s -> %s failed: %s. "
+            "Marked for file repair.",
+            pairing_id, files.working, final_working, e,
+        )
+        mark_file_repair_needed(pairing_id)
+    if files.thumb and files.thumb.exists():
         try:
-            row = conn.execute(
-                """
-                select back_master_path, back_sha256,
-                       back_source_folder, back_source_filename, back_scan_sequence,
-                       staging_working_path, staging_thumb_path, status,
-                       back_photo_id
-                from ingest_pairings where id = %s
-                for update
-                """,
-                (pairing_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"pairing {pairing_id} not found")
-            (back_path, sha, folder, name, seq,
-             staging_wpath, staging_tpath, status, back_pid) = row
-            if status != "pending":
-                raise ValueError(f"pairing {pairing_id} is {status}, not pending")
-
-            new_row = conn.execute(
-                """
-                insert into photo_backs
-                  (photo_id, master_path, sha256, source_folder,
-                   source_filename, scan_sequence)
-                values (NULL, %s, %s, %s, %s, %s)
-                returning id
-                """,
-                (back_path, sha, folder, name, seq),
-            ).fetchone()
-            back_id = new_row[0]
-
-            final_wpath = _final_back_working_path(settings, back_id, sha, staging_wpath)
-            _move(Path(staging_wpath), final_wpath)
-            conn.execute(
-                "update photo_backs set working_path = %s where id = %s",
-                (str(final_wpath), back_id),
+            _move(files.thumb, final_thumb)
+        except OSError as e:
+            log.error(
+                "pairing %s: thumb move %s -> %s failed: %s.",
+                pairing_id, files.thumb, final_thumb, e,
             )
-            if staging_tpath:
-                dest_thumb = settings.THUMBS_DIR / f"back_{back_id:08d}.jpg"
-                _move(Path(staging_tpath), dest_thumb)
+            mark_file_repair_needed(pairing_id)
 
-            audit_new: dict = {"status": "accepted", "photo_back_id": back_id,
-                               "orphan": True}
-            if back_pid is not None:
-                conn.execute(
-                    """
-                    update photos
-                    set is_deleted = true,
-                        deleted_at = now(),
-                        physical_ref_note = %s
-                    where id = %s
-                    """,
-                    ("converted to orphan back", back_pid),
-                )
-                audit_new["demoted_photo_id"] = back_pid
-
-            conn.execute(
-                "update ingest_pairings set status = 'accepted', decided_at = now() where id = %s",
-                (pairing_id,),
-            )
-            db.audit(conn, actor="desktop", action="pairing.accept_orphan",
-                     entity_type="ingest_pairing", entity_id=pairing_id,
-                     previous_value={"status": "pending"},
-                     new_value=audit_new)
-            conn.commit()
-            return back_id
-        except Exception:
-            conn.rollback()
-            raise
+    return back_id
 
 
 def change_pairing_front(

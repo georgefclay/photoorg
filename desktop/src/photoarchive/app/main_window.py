@@ -107,7 +107,17 @@ class MainWindow(QMainWindow):
             self.status_counts.setText(
                 f"photos {photos} | untriaged {untriaged} | backs {backs}"
             )
-            self.status_pending.setText(f"proposals: {pending}")
+            # Fix-up 6: surface any pairings whose DB was decided but
+            # whose file move failed. They live in an in-memory set;
+            # the pairing_integrity tool can rebuild it from the DB.
+            from ..modes.ingest.decisions import needs_file_repair_count
+            repair = needs_file_repair_count()
+            repair_txt = f" · needs repair: {repair}" if repair else ""
+            self.status_pending.setText(f"proposals: {pending}{repair_txt}")
+            if repair:
+                self.status_pending.setStyleSheet("color: orange; font-weight: bold")
+            else:
+                self.status_pending.setStyleSheet("")
         except Exception as e:
             self.status_db.setText(f"DB: down ({e.__class__.__name__})")
 

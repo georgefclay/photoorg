@@ -112,6 +112,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Jobs: classify, transcribe-backs, describe, estimate-date, detect-faces. Per-photo status, each re-runnable alone.
 - Faces UI: cluster, bulk label, exclude disputed from references, human confirm.
 - All AI output lands in `suggestions` with `source='ai'`. Back transcriptions flagged high confidence.
+- **Transcribe-back orientation retry** (deferred from Phase 2 fix-up 5): when the first pass returns low confidence, retry with the horizontally flipped and 180°-rotated variants of the image, keep the best, and record `details.orientation ∈ {"upright","mirrored","rot180","rot180+mirrored"}` on the suggestion so the reviewer can tell the scanner had it wrong.
 - Accept when: overnight run over the keep set completes; killing at N resumes at N; a disputed tag is provably absent from the reference set.
 
 ### Phase 7 — Scan cleanup (Claude Code, Windows) — spec §5
