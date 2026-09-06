@@ -839,6 +839,9 @@ class TriagePanel(QWidget):
         try:
             with db.connection() as conn:
                 conn.autocommit = True
+                # Same shape as _refresh_counts; the message must match
+                # the grid filters or George gets a second confusing
+                # discrepancy.
                 rows = conn.execute(
                     "select triage_status, count(*) from photos "
                     "where not is_deleted group by triage_status"
@@ -888,21 +891,25 @@ class TriagePanel(QWidget):
         return "\n".join(lines)
 
     def _refresh_counts(self) -> None:
+        # Match what the grid's filters actually show:
+        #   - untriaged / keep / private: excludes is_deleted (a photo
+        #     demoted to a back by the review grid keeps its old
+        #     triage_status but is_deleted=true, and the grid hides it).
+        #   - junk: those really are the rows the 'Junk' filter surfaces
+        #     (is_deleted=true AND triage_status='junk').
         with db.connection() as conn:
             conn.autocommit = True
-            rows = conn.execute(
+            row = conn.execute(
                 """
-                select triage_status, count(*)
+                select
+                  count(*) filter (where triage_status = 'untriaged' and not is_deleted),
+                  count(*) filter (where triage_status = 'keep'      and not is_deleted),
+                  count(*) filter (where triage_status = 'private'   and not is_deleted),
+                  count(*) filter (where triage_status = 'junk')
                 from photos
-                where triage_status <> 'junk' or is_deleted
-                group by triage_status
                 """
-            ).fetchall()
-        by_status = {r[0]: int(r[1]) for r in rows}
-        u = by_status.get("untriaged", 0)
-        k = by_status.get("keep", 0)
-        j = by_status.get("junk", 0)
-        p = by_status.get("private", 0)
+            ).fetchone()
+        u, k, p, j = (int(x) for x in row)
         self._counts_lbl.setText(
             f"untriaged {u:>6}   keep {k:>6}   junk {j:>6}   private {p:>4}   "
             f"showing {self._grid_model.rowCount():>5}   "
