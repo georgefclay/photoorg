@@ -228,6 +228,45 @@ def test_last_action_persists_until_next_keypress(monkeypatch, tmp_path):
     db.close_pool()
 
 
+def test_empty_untriaged_filter_shows_helpful_message(monkeypatch, tmp_path):
+    """When the whole archive has been triaged (untriaged=0), the grid
+    would otherwise just show its dark background. Fix: swap in an
+    empty-state label naming the current filter and showing the by-status
+    counts so the reviewer knows the photos are still there under Keep."""
+    _app()
+    settings = _test_settings(tmp_path, TEST_DATABASE_URL)
+    _init_pool(TEST_DATABASE_URL, settings)
+    pids = _reset_and_seed(TEST_DATABASE_URL, settings, n=3)
+    # Everything is 'keep' — nothing untriaged.
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        conn.execute(
+            "update photos set triage_status = 'keep' where id = any(%s)",
+            (pids,),
+        )
+
+    panel = _make_panel(monkeypatch, settings)
+    _pump(150)
+
+    assert panel._grid_model.rowCount() == 0
+    # The grid_stack must have switched to the empty-state page.
+    assert panel._grid_stack.currentIndex() == 1
+    txt = panel._empty_state.text()
+    assert "No photos match" in txt
+    assert "status = untriaged" in txt
+    # By-status counts show up.
+    assert "keep" in txt
+    assert "3" in txt
+
+    # Switching to 'keep' brings the grid back.
+    from photoarchive.modes.triage.ui import _select_by_data
+    _select_by_data(panel._f_status, "keep")
+    _pump(100)
+    assert panel._grid_model.rowCount() == 3
+    assert panel._grid_stack.currentIndex() == 0
+
+    db.close_pool()
+
+
 def test_decision_under_non_untriaged_filter_leaves_item_in_place(
     monkeypatch, tmp_path,
 ):

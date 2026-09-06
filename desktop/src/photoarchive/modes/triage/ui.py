@@ -643,6 +643,22 @@ class TriagePanel(QWidget):
             _placeholder_pixmap(THUMB_TILE), self._grid,
         ))
 
+        # Empty-state page. If the current filter has zero rows the plain
+        # QListView is indistinguishable from a broken view (dark grey
+        # background, no items). Swap in a labelled explanation so George
+        # can see WHY it's empty and where the photos actually are.
+        self._grid_stack = QStackedWidget()
+        self._grid_stack.addWidget(self._grid)
+        self._empty_state = QLabel("")
+        self._empty_state.setAlignment(Qt.AlignCenter)
+        self._empty_state.setWordWrap(True)
+        self._empty_state.setTextFormat(Qt.PlainText)
+        self._empty_state.setStyleSheet(
+            "QLabel { background: #1e1e1e; color: #ccc; padding: 40px;"
+            f" font-family: {FONT_MONO}; font-size: 11pt; }}"
+        )
+        self._grid_stack.addWidget(self._empty_state)
+
         # Decision mediator: worker → this slot on the GUI thread.
         # Explicit QueuedConnection removes any doubt about receiver thread.
         self._decision_mediator = _DecisionMediator(self)
@@ -664,7 +680,7 @@ class TriagePanel(QWidget):
         self._single_view = SingleView(self._settings)
         self._single_view.installEventFilter(self)
 
-        self._stack.addWidget(self._grid)
+        self._stack.addWidget(self._grid_stack)
         self._stack.addWidget(self._single_view)
         outer.addWidget(self._stack, 1)
 
@@ -810,7 +826,66 @@ class TriagePanel(QWidget):
         self._grid_model.set_rows(rows)
         if rows:
             self._grid.setCurrentIndex(self._grid_model.index(0, 0))
+            self._grid_stack.setCurrentIndex(0)   # show the grid
+        else:
+            # Fix-up: never leave the reviewer staring at a black square.
+            # Tell them WHY the current filter is empty, and where the
+            # photos actually live so they can flip a filter and see them.
+            self._empty_state.setText(self._compose_empty_message(query))
+            self._grid_stack.setCurrentIndex(1)   # show the empty-state
         self._refresh_counts()
+
+    def _compose_empty_message(self, query: "TriageQuery") -> str:
+        try:
+            with db.connection() as conn:
+                conn.autocommit = True
+                rows = conn.execute(
+                    "select triage_status, count(*) from photos "
+                    "where not is_deleted group by triage_status"
+                ).fetchall()
+        except Exception:
+            log.exception("empty-state count query failed")
+            return "No photos match the current filter."
+        by_status = {r[0]: int(r[1]) for r in rows}
+        total_kept = sum(by_status.values())
+        bits: list[str] = []
+        filters_active = [
+            ("status", query.status),
+            ("hint", query.hint),
+            ("root", query.source_root),
+            ("folder", query.folder),
+            ("year", query.year),
+        ]
+        active_txt = "  ·  ".join(
+            f"{name} = {val}" for name, val in filters_active
+            if val not in ("all",)
+        )
+        needle = (self._f_search.text() or "").strip()
+        if needle:
+            active_txt += (("  ·  " if active_txt else "")
+                           + f"search = {needle!r}")
+        if not active_txt:
+            active_txt = "(no filters)"
+
+        lines = [
+            "No photos match the current filter.",
+            "",
+            f"Filters:  {active_txt}",
+            "",
+            "By status (non-deleted photos in the archive):",
+        ]
+        for s in ("untriaged", "keep", "private"):
+            lines.append(f"    {s:<10}  {by_status.get(s, 0):>6}")
+        lines.append(f"    total     {total_kept:>6}")
+
+        if query.status == "untriaged" and by_status.get("untriaged", 0) == 0:
+            lines.append("")
+            lines.append(
+                "There are no untriaged photos left. Change the Status "
+                "filter above to Keep / Junk / Private to review your "
+                "decisions, or All to browse everything."
+            )
+        return "\n".join(lines)
 
     def _refresh_counts(self) -> None:
         with db.connection() as conn:
