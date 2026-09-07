@@ -18,7 +18,7 @@ Image.MAX_IMAGE_PIXELS = 400_000_000  # 1200 DPI TIFF scans are legitimately hug
 class LoadedImage:
     """An image ready for a model, plus what it takes to map back to the original."""
 
-    image: Image.Image  # RGB, EXIF-oriented, downscaled to <= max_edge
+    image: Image.Image  # RGB, EXIF-oriented, downscaled to the endpoint's max edge
     original_w: int  # pixel size of the ORIGINAL, after EXIF orientation
     original_h: int
     scale: float  # multiply model-space coords by this to get original coords
@@ -51,12 +51,14 @@ def resolve_shared_path(raw: str) -> Path:
     return resolved
 
 
-def _prepare(img: Image.Image, nbytes: int, source: str) -> LoadedImage:
+def _prepare(
+    img: Image.Image, nbytes: int, source: str, max_edge: int | None = None
+) -> LoadedImage:
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
         img = img.convert("RGB")
     ow, oh = img.size
-    max_edge = get_settings().max_image_edge
+    max_edge = max_edge or get_settings().max_image_edge
     longest = max(ow, oh)
     if longest > max_edge:
         ratio = max_edge / float(longest)
@@ -69,7 +71,7 @@ def _prepare(img: Image.Image, nbytes: int, source: str) -> LoadedImage:
     )
 
 
-def load_from_bytes(data: bytes) -> LoadedImage:
+def load_from_bytes(data: bytes, max_edge: int | None = None) -> LoadedImage:
     if not data:
         raise HTTPException(status_code=400, detail="Empty upload")
     try:
@@ -77,14 +79,14 @@ def load_from_bytes(data: bytes) -> LoadedImage:
         img.load()
     except Exception as exc:  # noqa: BLE001 - any decode failure is a 400
         raise HTTPException(status_code=400, detail=f"Undecodable image: {exc}") from exc
-    return _prepare(img, len(data), "upload")
+    return _prepare(img, len(data), "upload", max_edge)
 
 
-def load_from_path(raw: str) -> LoadedImage:
+def load_from_path(raw: str, max_edge: int | None = None) -> LoadedImage:
     resolved = resolve_shared_path(raw)
     try:
         img = Image.open(resolved)
         img.load()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"Undecodable image: {exc}") from exc
-    return _prepare(img, resolved.stat().st_size, "path")
+    return _prepare(img, resolved.stat().st_size, "path", max_edge)

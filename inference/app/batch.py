@@ -9,6 +9,7 @@ the file is still there, and resume is caller-driven via skip_refs.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import re
 import time
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from . import blackout
 from .config import get_settings
 from .logging_conf import log_event
 
@@ -39,6 +41,7 @@ class BatchJob:
     failed: int = 0
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    pause_reason: str | None = None
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -106,6 +109,8 @@ class BatchJob:
             "finished_at": self.finished_at,
             "elapsed_s": round((self.finished_at or time.time()) - self.started_at, 2),
             "ndjson_path": str(self.ndjson_path),
+            "paused": self.pause_reason is not None,
+            "pause_reason": self.pause_reason,
         }
         if include_refs:
             payload["completed_refs"] = completed_refs(self.ndjson_path)
@@ -119,8 +124,18 @@ class BatchRegistry:
     def get(self, job_id: str) -> BatchJob | None:
         return self._jobs.get(job_id)
 
-    def new_job(self, endpoint: str, total: int, skipped: int) -> BatchJob:
-        job_id = f"{endpoint}-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    def running(self, job_name: str) -> BatchJob | None:
+        job = self._jobs.get(job_name)
+        return job if job is not None and job.status == "running" else None
+
+    def new_job(
+        self, endpoint: str, total: int, skipped: int, job_name: str | None = None
+    ) -> BatchJob:
+        # A named job keeps its results file across restarts, so a resumed run
+        # appends to the same NDJSON instead of starting a fresh random one.
+        job_id = job_name or (
+            f"{endpoint}-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        )
         path = get_settings().batch_dir / f"{job_id}.ndjson"
         path.parent.mkdir(parents=True, exist_ok=True)
         job = BatchJob(
@@ -136,10 +151,48 @@ class BatchRegistry:
 registry = BatchRegistry()
 
 
+def pause_reason(settings=None) -> str | None:
+    """Why an unattended batch should stand down right now, or None."""
+    settings = settings or get_settings()
+
+    window = blackout.active_window(settings.batch_blackout)
+    if window is not None:
+        return f"blackout until {window.ends_after(dt.datetime.now()):%a %H:%M}"
+
+    try:
+        import psutil
+
+        free_gb = psutil.virtual_memory().available / 1024**3
+        if free_gb < settings.batch_min_free_gb:
+            return f"only {free_gb:.1f} GB free (need {settings.batch_min_free_gb})"
+    except Exception:  # noqa: BLE001 - never let the memory check stop a batch
+        pass
+    return None
+
+
+async def _wait_while_paused(job: BatchJob) -> None:
+    """Finish the item in flight, then sleep through the window."""
+    settings = get_settings()
+    announced = None
+    while not job.cancelled:
+        reason = pause_reason(settings)
+        if reason is None:
+            if job.pause_reason is not None:
+                log_event("batch.resume", job_id=job.job_id, was=job.pause_reason)
+            job.pause_reason = None
+            return
+        job.pause_reason = reason
+        if reason != announced:
+            announced = reason
+            log_event("batch.pause", job_id=job.job_id, reason=reason)
+        await asyncio.sleep(settings.batch_pause_poll_s)
+
+
 async def _run_job(job: BatchJob, items: list[dict[str, str]], runner: ItemRunner) -> None:
     log_event("batch.start", job_id=job.job_id, endpoint=job.endpoint, total=job.total)
     try:
         for item in items:
+            await _wait_while_paused(job)
             if job.cancelled:
                 job.status = "cancelled"
                 break

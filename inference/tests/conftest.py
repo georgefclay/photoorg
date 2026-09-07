@@ -14,10 +14,16 @@ _TMP_LOGS = Path(tempfile.mkdtemp(prefix="inference-test-logs-"))
 
 # Environment beats the .env file in pydantic-settings, so this isolates the
 # tests from whatever the machine's real .env says.
-os.environ["INFERENCE_TOKEN"] = TEST_TOKEN
-os.environ["LOG_DIR"] = str(_TMP_LOGS)
-os.environ["SHARED_ROOT"] = ""
-os.environ["MAX_IMAGE_EDGE"] = "1536"
+#
+# Guarded because pytest imports this file as `conftest` while test modules
+# import it as `tests.conftest` — two module objects, two executions. Without
+# the guard the second one runs mid-test and undoes what a fixture just set.
+if not os.environ.get("_INFERENCE_TEST_ENV"):
+    os.environ["_INFERENCE_TEST_ENV"] = "1"
+    os.environ["INFERENCE_TOKEN"] = TEST_TOKEN
+    os.environ["LOG_DIR"] = str(_TMP_LOGS)
+    os.environ["SHARED_ROOT"] = ""
+    os.environ["MAX_IMAGE_EDGE"] = "1536"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
@@ -44,9 +50,23 @@ def client() -> TestClient:
 
 @pytest.fixture(autouse=True)
 def _clear_jobs():
-    batchmod.registry._jobs.clear()
+    """Each test gets a clean registry and a clean batches/ directory.
+
+    Results files are keyed by job_name now, so without this a job called
+    "describe" would inherit the previous test's results.
+    """
+
+    def wipe():
+        batchmod.registry._jobs.clear()
+        batch_dir = get_settings().batch_dir
+        if batch_dir.is_dir():
+            for entry in batch_dir.iterdir():
+                if entry.is_file():
+                    entry.unlink()
+
+    wipe()
     yield
-    batchmod.registry._jobs.clear()
+    wipe()
 
 
 def make_image_bytes(width: int = 400, height: int = 300, colour=(120, 90, 60)) -> bytes:
@@ -101,11 +121,15 @@ def mock_vlm(monkeypatch):
         "parsed": True,
         "raw": "",
         "exception": None,
+        "last_image_size": None,
+        "last_prompt": None,
     }
 
     async def fake_run_json(
         prompt_name, image, *, high_priority=True, max_tokens=None, timeout=None
     ):
+        state["last_image_size"] = image.size
+        state["last_prompt"] = prompt_name
         if state["exception"] is not None:
             raise state["exception"]
         return VLMOutput(

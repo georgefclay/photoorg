@@ -63,7 +63,10 @@ Everything lives in `.env` — see `.env.example` for the full list.
 | `VLM_MODEL` | `mlx-community/Qwen3-VL-8B-Instruct-4bit` | The M6 swap is this line. |
 | `FACE_MODEL` | `buffalo_l` | InsightFace model pack. |
 | `MAX_IMAGE_EDGE` | `1536` | Longest edge fed to either model. |
-| `SHARED_ROOT` | *(empty)* | Enables the `path` variant. Empty = 400 on any path request. |
+| `SHARED_ROOT` | *(empty)* | Enables the `path` variant and the inbox. Empty = 400 on both. |
+| `MAX_IMAGE_EDGE_OVERRIDES` | `classify=1024;describe=1024;estimate-date=1024` | Per-endpoint longest edge. |
+| `BATCH_BLACKOUT` | *(empty)* | When unattended batches stand down. |
+| `BATCH_MIN_FREE_GB` | `1.0` | Batches also pause below this much free RAM. |
 | `FACE_DET_SIZE` | `1024` | Bigger finds smaller faces in group scans, slower. |
 | `REQUEST_TIMEOUT_S` | `120` | Per request; a batch applies it per item. |
 
@@ -114,7 +117,10 @@ Every response has the same envelope:
 | `POST /detect-faces` | `image_w`, `image_h`, `faces[]` with `bbox`, `det_score`, 512-float `embedding`, `landmarks`. |
 | `POST /match-faces` | ranked `matches[]` with cosine `distance`. |
 | `POST /batch/{endpoint}` | NDJSON stream, one line per item. |
-| `GET /health` | Models, memory, uptime, queue depth. No token needed. |
+| `POST /batch/upload/{job_name}` | Hand the mini images to hold and work through. |
+| `GET /batch/inbox/{job_name}` | What is held, and how much is still pending. |
+| `GET /batch/results/{job_name}` | Collect NDJSON from a cursor. |
+| `GET /health` | Models, memory, uptime, queue depth, inbox, blackout. No token needed. |
 
 `parsed_dates` entries are `{text, iso, precision}` where `precision` is one of
 `exact | month | year | decade | unknown` — the same vocabulary as the database's
@@ -194,29 +200,105 @@ detection runs independently of the VLM.
 
 ## Throughput on the M4 (16 GB)
 
-Measured 2026-09-07 on `Qwen3-VL-8B-Instruct-4bit` at `MAX_IMAGE_EDGE=1536`,
-`FACE_DET_SIZE=1024`, images from `D:\Photos` (~3500 px scans).
+Measured 2026-09-07 on `Qwen3-VL-8B-Instruct-4bit`, `FACE_DET_SIZE=1024`, images
+from `D:\Photos` (~3500 px scans), at each endpoint's configured edge.
 
-| Endpoint | s/image | n | Whole keep set (12,821) |
-|---|---:|---:|---|
-| `/classify` | 16.7 | 10 | ~60 h |
-| `/describe` | 17.4 | 30 | ~62 h |
-| `/transcribe-back` | 18.7 | 3 | ~4 h over 826 backs |
-| `/estimate-date` | 19.2 | 10 | ~68 h |
-| `/detect-faces` | 0.19 | 30 | ~40 min |
+| Endpoint | edge | s/image | n | Whole keep set (12,821) |
+|---|---:|---:|---:|---|
+| `/classify` | 1024 | 8.5 | 15 | ~30 h |
+| `/describe` | 1024 | 9.1 | 30 | ~32 h |
+| `/estimate-date` | 1024 | 11.9 | 15 | ~42 h |
+| `/transcribe-back` | 1536 | 18.7 | 3 | ~4 h over 826 backs |
+| `/detect-faces` | 1536 | 0.19 | 30 | ~40 min |
+
+Measured at 1536 first, then again after the per-endpoint edges came in:
+
+| `/describe` | mean | median | min | max |
+|---|---:|---:|---:|---:|
+| at 1536 | 17.4 s | 17.2 s | 15.9 s | 22.1 s |
+| at 1024 | 9.1 s | 9.0 s | 7.7 s | 14.6 s |
+
+**1.92× for free.** Prompt processing dominates — ~1,800 image tokens per request
+against 40–90 generated — so the image edge is the whole ballgame and prompt length
+is noise. Descriptions at 1024 are still specific and factual; handwriting and small
+faces keep 1536, where the detail actually pays. Every figure above is measured at
+the edge it ships with.
 
 Model load is 2.9 s (VLM, already downloaded) and about 1 s for `buffalo_l`.
-Prompt processing dominates: ~1,800 image tokens per request against 40–90
-generated, so a shorter prompt saves little and a smaller `MAX_IMAGE_EDGE` saves
-a lot. Faces are cheap enough to run over everything.
 
-For Phase 6 that means the VLM jobs are **days, not a night**, and the priority
-order in the plan (backs first, then faces, then describe, then date) is the right
-one. Face detection over the whole archive is a coffee break.
+For Phase 6 that means the VLM jobs are still **days, not a night**, and the
+priority order (backs first, then faces, then describe, then date) is the right one.
+Face detection over the whole archive is a coffee break.
 
 Memory with both models resident: 5.4 GB held by MLX, peaks around 7.2 GB during
 generation, leaving ~3.5 GB of the 16 GB free. It works, but there is no room for a
 larger model until the M6.
+
+## Unattended runs
+
+George's laptop will not stay on for a multi-day job, so the mini holds the work
+*and* the results. Upload once, walk away, collect whenever.
+
+```bash
+# 1. hand over the images. The filename's stem is the ref (the photo id).
+curl -s -X POST localhost:8500/batch/upload/describe \
+  -H "Authorization: Bearer $TOKEN" \
+  -F files=@4711.jpg -F files=@4712.jpg
+
+# ...or keep your own filenames and send the refs alongside, in the same order:
+curl -s -X POST localhost:8500/batch/upload/describe \
+  -H "Authorization: Bearer $TOKEN" \
+  -F files=@00004711_a1b2c3d4.jpg -F refs=4711
+
+# 2. start it. Re-running this after a crash picks up where it left off.
+curl -sN -X POST localhost:8500/batch/describe \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"job_name":"describe","from_inbox":true}'
+
+# 3. collect, from wherever your cursor got to.
+curl -s "localhost:8500/batch/results/describe?after=120" -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8500/batch/results/describe/summary -H "Authorization: Bearer $TOKEN"
+
+# 4. free the disk once the results are safely in the database.
+curl -s -X DELETE "localhost:8500/batch/inbox/describe?done=true" -H "Authorization: Bearer $TOKEN"
+```
+
+Uploads land in `SHARED_ROOT/inbox/{job_name}/{ref}.jpg` and re-uploading a ref
+overwrites it, so a retried upload is harmless. Results append to
+`LOG_DIR/batches/{job_name}.ndjson` — **keyed by job_name, not a random id** — so a
+resumed run adds to the same file instead of starting a new one. `?done=true` only
+removes inputs that already have a result; a pending input is never touched.
+
+### It restarts itself
+
+Job state is recorded in `LOG_DIR/batches/queue.json`. On start-up the service looks
+for any job whose inbox still holds refs without results and picks it up with no
+client attached, in this order:
+
+`transcribe_backs` → `detect_faces` → `classify` → `describe` → `estimate_date`
+
+Backs are the highest-value evidence and faces are minutes; the descriptive work is
+days, so it goes last. Those five names map to endpoints automatically. Any other
+`job_name` works too — it just has to be started once with an explicit endpoint so
+the queue knows what to run.
+
+A power cut, a crash, `kill -9`, a reboot: the LaunchAgent brings the service back
+and the service brings the job back.
+
+### Standing down
+
+The mini is George's machine before it is a batch runner.
+
+```
+BATCH_BLACKOUT=Tue 04:30-07:30;Fri 04:30-07:30
+BATCH_MIN_FREE_GB=1.0
+```
+
+Inside a window, or when free RAM drops below `BATCH_MIN_FREE_GB`, the batch
+finishes the item in flight and then sleeps, re-checking every
+`BATCH_PAUSE_POLL_S`. **Interactive requests are never affected** — a blackout is
+about not competing for the machine overnight, not about refusing work. `/health`
+reports the windows, whether one is active, and when it lifts.
 
 ## Prompts
 

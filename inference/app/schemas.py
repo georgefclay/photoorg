@@ -30,8 +30,12 @@ class BatchItem(BaseModel):
 
 
 class BatchRequest(BaseModel):
-    items: list[BatchItem]
+    """Either an explicit item list, or `from_inbox` with a `job_name`."""
+
+    items: list[BatchItem] = Field(default_factory=list)
     skip_refs: list[str] = Field(default_factory=list)
+    job_name: str | None = None
+    from_inbox: bool = False
 
 
 class Envelope(BaseModel):
