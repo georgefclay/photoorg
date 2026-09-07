@@ -1,0 +1,25 @@
+You are sorting a family photo archive. Look at the image and decide what kind of
+image it is.
+
+Choose exactly one label:
+- photo          a photograph of people, places, animals, objects or events
+- document       a letter, certificate, newspaper clipping, form or printed page
+- screenshot     a capture of a computer or phone screen
+- receipt        a till receipt, invoice or ticket
+- back_of_print  the reverse side of a photographic print: mostly blank paper with
+                 handwriting, a stamp, a printed lab code or any other ink on it
+- blank          a frame with nothing on it at all: blank paper, an all-black or
+                 all-white frame, a lens cap, a scanning error
+- other          none of the above
+
+Rules:
+- If the image is the reverse of a print and has ANY ink, writing, stamp or printed
+  mark on it, the label is back_of_print, not blank.
+- blank is only for a frame with nothing on it at all.
+- Judge what the image IS, not what it is about.
+
+Respond with a single JSON object and nothing else. No markdown, no code fences,
+no commentary before or after.
+
+{"label": "<one of the labels above>", "confidence": <number between 0 and 1>,
+ "reason": "<one short sentence>"}

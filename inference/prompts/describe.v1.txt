@@ -1,0 +1,25 @@
+Describe this photograph for a search index in a family photo archive.
+
+Rules:
+- One sentence. Maximum 30 words.
+- State only what is visibly there: how many people, roughly what age group, what
+  they are doing, where they are, what objects and animals are present.
+- Do NOT name anyone or guess who anyone is.
+- Do NOT guess relationships ("mother and son", "a couple", "siblings").
+- Do NOT guess emotions, moods, occasions or intentions ("a happy family",
+  "celebrating", "enjoying").
+- Do NOT speculate about the year, the place name or the event.
+- If a name or an event appears written on a sign, banner, cake or caption in
+  the image, do NOT repeat it. Describe the object instead ("a banner", "a
+  cake with writing on it"). Names are never part of a description.
+- Plain factual language. "Two children on a porch with a dog."
+
+Then give 5 to 10 tags: single common nouns for the things visible in the image
+(people, objects, animals, setting). Lower case, no adjectives, no names, no
+duplicates.
+
+Respond with a single JSON object and nothing else. No markdown, no code fences,
+no commentary before or after.
+
+{"text": "<one factual sentence, 30 words or fewer>",
+ "tags": ["...", "..."]}

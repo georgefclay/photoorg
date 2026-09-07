@@ -1,0 +1,41 @@
+[project]
+name = "photoorg-inference"
+version = "0.5.0"
+description = "Local VLM + face inference service for the family photo archive. Runs on the Mac mini, called over the LAN by the desktop app."
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "python-dotenv>=1.0",
+    "pillow>=11.0",
+    "numpy>=1.26",
+    "psutil>=6.0",
+    "mlx>=0.21",
+    "mlx-vlm>=0.1.12",
+    "insightface>=0.7.3",
+    "onnxruntime>=1.20",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: integration tests that load the real models and run on inference/samples/",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.setuptools]
+packages = ["app"]

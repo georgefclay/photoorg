@@ -1,0 +1,27 @@
+Estimate when this photograph was taken, from visual evidence only.
+
+Look at: clothing and hemlines, hairstyles, glasses frames, car models and shapes,
+appliances and furniture, print border style, paper finish, film grain, colour cast
+and fading, black-and-white versus colour, image sharpness, and any visible signage
+or packaging.
+
+Rules:
+- Always answer with a RANGE of years, never a single year.
+- The range must span at least 3 years. If you are unsure, widen it to at least 10
+  years. It is far better to be wide and right than narrow and wrong.
+- year_min must be less than or equal to year_max.
+- confidence is 0 to 1 and describes how sure you are the true date falls inside
+  your range.
+- reasoning: one or two sentences naming the specific visual evidence you used.
+  Name the things you actually saw. Do not mention people by name.
+- is_scan_of_print: true if this looks like a scan of a physical print — a white or
+  patterned print border, rounded corners, paper texture, a date stamp printed by a
+  photo lab, or scanner artefacts. False for a native digital photograph.
+
+Respond with a single JSON object and nothing else. No markdown, no code fences,
+no commentary before or after.
+
+{"year_min": <integer year>, "year_max": <integer year>,
+ "confidence": <number between 0 and 1>,
+ "reasoning": "<one or two sentences of visual evidence>",
+ "is_scan_of_print": <true or false>}

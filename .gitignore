@@ -26,6 +26,7 @@ inference/samples/
 
 # Logs
 *.log
+inference/logs/
 
 # Claude local settings
 .claude/settings.local.json

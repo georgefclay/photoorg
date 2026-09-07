@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.photoorg.inference</string>
+
+    <!-- Run through the venv's python so no PATH setup is needed. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SERVICE_DIR__/.venv/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>app.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8500</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__SERVICE_DIR__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash. ThrottleInterval stops a crash loop from spinning. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- uvicorn's own stdout/stderr. The service's JSON log is LOG_DIR/inference.log. -->
+    <key>StandardOutPath</key>
+    <string>__SERVICE_DIR__/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__SERVICE_DIR__/logs/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <!-- The Hugging Face and InsightFace model caches live under HOME. -->
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,43 @@
+This image is the back of a photographic print from a family archive. Transcribe
+what is written on it.
+
+Rules — read these carefully:
+- Transcribe ONLY what is actually there. Never guess, complete, correct or invent
+  a word, a name or a date. If you cannot read something, write [illegible] in its
+  place.
+- Preserve the line breaks as they appear, top to bottom.
+- Keep the original spelling, punctuation and capitalisation, including mistakes.
+- Include printed marks as well as handwriting: lab stamps, paper brand names,
+  frame numbers, "THIS SIDE TOWARD LENS", and so on.
+- If there is nothing written at all, return an empty string for text.
+
+Then pull out, from the text you just transcribed and from nowhere else:
+
+dates: every date reference, however partial.
+  - text:      the date exactly as written ("Mar 62", "Easter 1962", "3/15/62")
+  - iso:       a full YYYY-MM-DD date padded to the FIRST day of the period the
+               writing refers to, or null if you cannot resolve one.
+               "3/15/62" -> "1962-03-15"; "Mar 62" -> "1962-03-01";
+               "1962" -> "1962-01-01"; "Easter 1962" -> "1962-01-01";
+               "the sixties" -> "1960-01-01"
+  - precision: exactly one of "exact", "month", "year", "decade", "unknown".
+               A day-level date is "exact". A month and year is "month". A bare
+               year is "year". A season, holiday or event plus a year is "year".
+               A decade is "decade". Anything you cannot place is "unknown".
+  - Two-digit years in a family archive are 19xx unless the writing says otherwise.
+
+names: every personal name as written, one string per name, in the order they
+  appear. Do not normalise nicknames, do not expand initials, do not add surnames
+  that are not written.
+
+confidence: how confident you are in the transcription as a whole, 0 to 1. Use a
+  low value when most of the writing is [illegible].
+
+Respond with a single JSON object and nothing else. No markdown, no code fences,
+no commentary before or after.
+
+{"text": "<verbatim transcription with \n between lines>",
+ "parsed_dates": [{"text": "...", "iso": "YYYY-MM-DD" or null,
+                   "precision": "exact|month|year|decade|unknown"}],
+ "names": ["..."],
+ "confidence": <number between 0 and 1>}
