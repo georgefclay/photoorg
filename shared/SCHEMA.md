@@ -84,6 +84,31 @@ The rule that governs the whole schema:
     — likely a print's back with only a date written on it. George presses
     B in Triage to promote it to a pending pairing.
 
+### Dedupe (migration 20)
+
+- **`dedupe_groups`** — one row per candidate near-duplicate group. `status`
+  is `pending | resolved | not_duplicates` (enum `dedupe_group_status`).
+  `size` and `min_distance` are cached at scan time so the UI can sort the
+  queue without joining. `resolved_at` / `resolved_by` set when the reviewer
+  accepts or marks not-duplicates. Pending groups are dropped and rebuilt
+  by every `dedupe_scan` run; resolved and not_duplicates groups are
+  left alone.
+- **`dedupe_members`** — the photos in each group. `is_keeper` (exactly
+  one per resolved group); `phash_dist` and `dhash_dist` nullable (only
+  the algo(s) that matched are populated); `matched_by` (`phash | dhash |
+  both`); `transform` (`identity | mirror | rot90 | rot180 | rot270 |
+  rot90+mirror | rot270+mirror`) records the alignment that made the pair
+  match; `distance_to_keeper` is min of phash/dhash to the eventual
+  keeper; `keeper_reason` is the human-readable reason chain shown in
+  the UI ("has EXIF > 2.0x pixels"). Unique `(group_id, photo_id)`.
+  At-most-one-pending-group-per-photo is enforced by the orchestrator
+  (partial unique indexes cannot cross tables).
+- **`dedupe_exclusions`** — pairs the reviewer has marked "not
+  duplicates". Stored `(least, greatest)` (check constraint enforces
+  `photo_a < photo_b`) with unique `(photo_a, photo_b)`. Dedupe scan
+  filters these out and never re-proposes them, even after new scans
+  add new photos.
+
 ### Audit and jobs
 
 - **`audit_log`** — id, `user_id` nullable, `actor` (`user email | 'desktop' | 'system'`), `action`, `entity_type`, `entity_id`, `previous_value` / `new_value` JSONB, `created_at`. Every state change writes one.

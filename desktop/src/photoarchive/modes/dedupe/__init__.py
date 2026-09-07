@@ -1,6 +1,8 @@
-from .._placeholder import PlaceholderPanel
+"""Phase 4 — Dedupe. Perceptual-hash near-duplicate detection with keeper
+review. The panel lives in `ui.py`; the scan orchestrator lives in `scan.py`.
+"""
+from __future__ import annotations
 
+from .ui import DedupePanel
 
-class DedupePanel(PlaceholderPanel):
-    def __init__(self) -> None:
-        super().__init__("Dedupe", "Phase 4.")
+__all__ = ["DedupePanel"]

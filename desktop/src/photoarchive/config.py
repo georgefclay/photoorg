@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     WEB_API_URL: str
     WEB_API_TOKEN: str
 
+    # Dedupe (Phase 4). Two 256-bit perceptual hashes; a pair is a candidate
+    # when either Hamming distance is at or below its threshold.
+    DEDUPE_PHASH_MAX: int = Field(default=10, ge=0, le=256)
+    DEDUPE_DHASH_MAX: int = Field(default=10, ge=0, le=256)
+
     @field_validator("MASTER_ROOTS")
     @classmethod
     def _non_empty(cls, v: str) -> str:

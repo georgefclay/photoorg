@@ -81,6 +81,50 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   and read by the UI to pick the default decision key. Hints never make a
   decision on their own; only a keypress does.
 
+## Dedupe (Phase 4 onwards)
+- **Scope:** operates on `triage_status in ('keep','private')` and
+  `is_deleted=false`. Private photos participate in dedupe; junk does not.
+  Back-shaped photos are excluded — any photo with a `possible_back`
+  triage hint or any `ingest_pairings.back_photo_id` row (regardless of
+  pairing status) is skipped. Near-blank scans cluster falsely otherwise.
+  Photos with `photo_backs` rows attached (they are fronts of a scanned
+  back) are NOT excluded — they are real photos.
+- **Detection:** 256-bit pHash and dHash (16×16) via multi-index Hamming
+  search — 16 bands of 16 bits, guaranteed exhaustive up to distance 15.
+  Thresholds `DEDUPE_PHASH_MAX` / `DEDUPE_DHASH_MAX` in `desktop/.env`
+  (default 10). Above 15 the scan falls back to brute force. Rotation and
+  mirror variants (7 total transforms) are hashed from the thumbnail at
+  scan time.
+- **Grouping tables (migration 20):** `dedupe_groups` (status pending /
+  resolved / not_duplicates), `dedupe_members` (per photo distance,
+  transform, keeper flag, keeper_reason), `dedupe_exclusions` (pairwise,
+  stored `(least, greatest)`, unique). Pending groups are re-built by
+  `dedupe_scan`; resolved and not_duplicates groups are left alone. At
+  most one pending group per photo is enforced procedurally by the
+  orchestrator (delete-and-rebuild).
+- **Keeper scoring** (in strict tuple order, lower id last):
+  EXIF DateTimeOriginal + camera > TIFF > pixels > file size > scan
+  over digital when neither has EXIF. Reason chain shown in the UI.
+- **Resolve rules** (`modes/dedupe/resolve.py`):
+  * losers go through `triage.apply_decision('junk',
+    hint='dedupe_loser_of <keeper>')` — a normal triage transition with a
+    dedupe-tagged audit row;
+  * a loser's scan-locator is appended to the keeper's
+    `physical_ref_note` (`| ` separator) when the loser is a scan and
+    the keeper is not — physical references are never lost;
+  * `photo_backs` re-pointed; `photo_masters` re-parented as
+    non-preferred (keeper's preferred master and `photos.sha256`
+    untouched); album memberships moved (skip if the keeper is already
+    in the album); suggestions moved (skip identical
+    `(kind, source, payload)`);
+  * if any group member is private, the keeper becomes `is_private=true`.
+- **Undo (Z, session-only):** reverses every carry-over from the
+  `dedupe.resolve` audit row's `new_value`, then restores losers via
+  `triage.apply_decision(prior_status)`. Cross-restart undo is by the
+  quarantine browser.
+- **Not duplicates (N):** inserts `(least, greatest)` exclusions for every
+  pair in the group; scan honours them forever.
+
 ## Web (CraftTags lessons — always apply)
 - Token links land on a POST-confirm page. GET on the token changes nothing.
 - `app.set('trust proxy', 1)` before any middleware that reads client IP.

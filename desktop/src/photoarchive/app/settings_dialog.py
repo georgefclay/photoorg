@@ -71,6 +71,11 @@ class SettingsDialog(QDialog):
         form.addRow("WEB_API_URL", self._web_url)
         form.addRow("WEB_API_TOKEN", self._web_token)
 
+        self._dedupe_phash_max = QLineEdit(str(settings.DEDUPE_PHASH_MAX))
+        self._dedupe_dhash_max = QLineEdit(str(settings.DEDUPE_DHASH_MAX))
+        form.addRow("DEDUPE_PHASH_MAX", self._dedupe_phash_max)
+        form.addRow("DEDUPE_DHASH_MAX", self._dedupe_dhash_max)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
@@ -97,6 +102,22 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "Invalid MASTER_ROOTS", str(e))
             return
 
+        for name, widget in (
+            ("DEDUPE_PHASH_MAX", self._dedupe_phash_max),
+            ("DEDUPE_DHASH_MAX", self._dedupe_dhash_max),
+        ):
+            raw = widget.text().strip()
+            try:
+                n = int(raw)
+                if n < 0 or n > 256:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.critical(
+                    self, f"Invalid {name}",
+                    f"{name} must be an integer 0–256; got {raw!r}.",
+                )
+                return
+
         values = {
             "MASTER_ROOTS": roots_text,
             "WORKING_DIR": self._working.text().strip(),
@@ -108,6 +129,8 @@ class SettingsDialog(QDialog):
             "INFERENCE_TOKEN": self._inference_token.text().strip(),
             "WEB_API_URL": self._web_url.text().strip(),
             "WEB_API_TOKEN": self._web_token.text().strip(),
+            "DEDUPE_PHASH_MAX": self._dedupe_phash_max.text().strip(),
+            "DEDUPE_DHASH_MAX": self._dedupe_dhash_max.text().strip(),
         }
         try:
             _rewrite_env(self._env_path, values)

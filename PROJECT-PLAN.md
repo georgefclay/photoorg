@@ -16,7 +16,11 @@ Surveyed 2026-09-01. The spec assumed ~5,000 images with ~3,000 scans. Reality:
 | `D:\Photos` | 11,589 JPG | Export from a photo app. Folders `_YYYY-MM` (2004-01 → 2024-11) plus one `Scanned` folder (19 files). All filenames are `f<number>.jpg`. No videos, no RAW. 2005–2010 hold ~10,800 of them. |
 | `D:\Scanned Photos` | 5,279 (5,112 JPG + 167 TIFF) | `Batch 00001`…`Batch 00045` plus named folders (`Chuck and Lola Wedding`, `Shannon and George Wedding`, `Carol and John Wedding`, `George Clay - Navy`, a `High Quality` subfolder). Three filename styles (`2025-10-29-07-11-0001.jpg`, `IMG004.JPG`, `IMG_20251111_0002.tif`). Scan resolution varies. Scanning continues. |
 
-Total ≈ 16,900 files, roughly 3× the spec's estimate. Consequences:
+Total ≈ 16,900 files, roughly 3× the spec's estimate.
+
+**Progress (2026-09-06):** Ingest complete — 1,944 files in `D:\Photos` were byte-identical to scans and recorded once under the scan's provenance. Triage complete — **12,821 keep, 1,016 junk, 0 private**. Back pairing review in progress (~350 proposals). Every phase from here operates on the 12,821 keep set. Phase 4 dedupe scan built and run: **153 pending groups** (141 pairs, 6 triples, 3 quads, 2 fives, 1 group of 13); min-distance histogram peaks at 0/2/6/8, tail to 10. Elapsed 3m32s over 12,821 photos. George's 30-group review pending.
+
+Consequences of the survey:
 
 - **Junk is common in `D:\Photos`** (sample: a phone photo of a Windows product-key sticker). A cull pass is required before anything expensive runs.
 - **Sensitive images exist** (keys, documents, IDs). They must never reach the web server.
