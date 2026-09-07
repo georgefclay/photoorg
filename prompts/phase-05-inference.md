@@ -76,3 +76,17 @@ Keep every VLM prompt in `prompts/*.txt`, one per endpoint, versioned by filenam
 11. **Commit and push** `Phase 5: inference service` to `origin/main` from the mini. Rule from now on: every phase pushes when it finishes, and every session starts with `git pull`. Two clones are fine under that rule.
 
 GO once the images are in place.
+
+---
+
+## Phase 5 follow-up — unattended batches (run on the mini, after `git pull`)
+
+George's laptop will not stay on for multi-day jobs. The mini must be able to hold the work and the results on its own.
+
+1. **Upload endpoint.** `POST /batch/upload/{job_name}` multipart, many files per request, each with a `ref` (photo id). Stored under `SHARED_ROOT/inbox/{job_name}/{ref}.jpg`. Returns the count and total bytes held. Idempotent (re-upload overwrites). `GET /batch/inbox/{job_name}` lists refs present. `DELETE /batch/inbox/{job_name}/{ref}` and a `?done=true` sweep that removes inputs whose results exist.
+2. **Start from inbox.** `POST /batch/{endpoint}` accepts `{"job_name": "...", "from_inbox": true}` and builds the item list from the inbox folder minus any refs already present in that job_name's results file. Results append to `LOG_DIR/batches/{job_name}.ndjson` — **keyed by job_name, not a random job id**, so a resumed run appends to the same file.
+3. **Collect.** `GET /batch/results/{job_name}?after=<line_no>` streams NDJSON from that line; the caller tracks its own cursor. `GET /batch/results/{job_name}/summary` gives done/failed/pending counts.
+4. **Persistent queue.** Jobs restart after a service restart: on boot, any job_name with inbox items lacking results is resumed automatically (order: transcribe_backs, detect_faces, classify, describe, estimate_date). Store queue state in `LOG_DIR/batches/queue.json`.
+5. **Blackout on the mini.** Look up what runs on this machine on Tuesday and Friday early mornings (`crontab -l`, `launchctl list`, `~/Library/LaunchAgents`, `/Library/LaunchDaemons`, and `log show --predicate 'eventMessage contains "cron"' --last 7d` if needed). Report what you find. Set `BATCH_BLACKOUT` in `.env` to cover it with 30 minutes of margin on each side, format `Tue 04:30-07:30;Fri 04:30-07:30` (local time). The batch loop finishes the current item and sleeps through the window; interactive requests are unaffected. Also pause when `system_available_gb < 1.0`.
+6. `MAX_IMAGE_EDGE` per endpoint: 1024 for classify/describe/estimate-date, 1536 for transcribe-back and detect-faces. Re-measure describe s/image at 1024 and report.
+7. Tests for upload/inbox/results/resume-after-restart. Update README. Commit and push: `Phase 5 follow-up: unattended batches`.

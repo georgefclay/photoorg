@@ -20,6 +20,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 
 **Progress (2026-09-07):** Ingest complete — 1,944 files in `D:\Photos` were byte-identical to scans and recorded once under the scan's provenance. Triage complete — **12,821 keep, 1,016 junk, 0 private**. Back pairing review complete (826 accepted, 570 rejected). Phase 4 dedupe built and running against the keep set with back-shaped photos excluded: **129 pending groups** over 12,232 eligible photos (119 pairs, 6 triples, 2 quads, 2 fives; min-distance histogram peaks at 0/6/8). Elapsed ~4 min. George's 30-group review pending.
 
+**Progress (2026-09-07):** Dedupe complete (129 groups resolved). Back pairing complete — **826 backs**. Phase 5 inference service live on the M4 (`Georges-Mac-mini.local:8500`, LaunchAgent, Qwen3-VL-8B-4bit + InsightFace buffalo_l). Measured throughput on the M4: classify 16.7 s, describe 17.4 s, transcribe-back 18.7 s, estimate-date 19.2 s, detect-faces 0.19 s per image. Full-archive VLM passes are ~60–68 h each on the M4; schedule: backs + faces now, describe + date on the M6 (arrives 2026-09-22). `MAX_IMAGE_EDGE` is the throughput lever (image tokens dominate).
+
 Consequences of the survey:
 
 - **Junk is common in `D:\Photos`** (sample: a phone photo of a Windows product-key sticker). A cull pass is required before anything expensive runs.
