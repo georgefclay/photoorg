@@ -66,4 +66,13 @@ Keep every VLM prompt in `prompts/*.txt`, one per endpoint, versioned by filenam
 ---
 
 ## Answers to Claude Code's questions
-(added as they come)
+
+1. **Images.** George will `scp` a folder from the laptop: `inference/samples/` (3 files) and `inference/samples/batch30/` (30 files). Gitignore `inference/samples/` entirely — family photos never go in the repo. Wait for George to say they are there before steps 2–4.
+2. **Shared folder.** Add `SHARED_ROOT=` (empty = path variant disabled, 400 on any `path` request). Reject anything that does not resolve inside it after symlink resolution. Phase 6 will use multipart uploads first; the share is a later optimisation, so no mount exists yet. For verification 3, put the 30 images in a local folder on the mini and point `SHARED_ROOT` at it.
+3. **Token.** Default: generate, write to `inference/.env`, print once.
+4. **Downloads.** Yes.
+5–9. **Defaults**, all of them. On 8: keep `year` for season/holiday references, `text` verbatim; no new precision.
+10. **launchd.** LaunchAgent. George: turn on automatic login for your user on the mini (System Settings → Users & Groups → Automatic login) so the service survives a power cut. Note it in GC.md.
+11. **Commit and push** `Phase 5: inference service` to `origin/main` from the mini. Rule from now on: every phase pushes when it finishes, and every session starts with `git pull`. Two clones are fine under that rule.
+
+GO once the images are in place.
