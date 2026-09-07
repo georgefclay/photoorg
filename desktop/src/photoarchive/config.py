@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     DEDUPE_PHASH_MAX: int = Field(default=10, ge=0, le=256)
     DEDUPE_DHASH_MAX: int = Field(default=10, ge=0, le=256)
 
+    # Faces (Phase 6). Agglomerative cosine-distance threshold for the
+    # in-memory clustering the Faces mode runs on unlabelled embeddings.
+    # 0.45 is the starting point; tune on real data.
+    FACE_CLUSTER_DIST: float = Field(default=0.45, ge=0.0, le=2.0)
+
     @field_validator("MASTER_ROOTS")
     @classmethod
     def _non_empty(cls, v: str) -> str:

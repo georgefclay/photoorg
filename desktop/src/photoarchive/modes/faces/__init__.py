@@ -1,6 +1,3 @@
-from .._placeholder import PlaceholderPanel
+from .ui import FacesPanel
 
-
-class FacesPanel(PlaceholderPanel):
-    def __init__(self) -> None:
-        super().__init__("Faces", "Phase 6.")
+__all__ = ["FacesPanel"]

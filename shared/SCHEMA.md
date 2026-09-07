@@ -30,7 +30,7 @@ The rule that governs the whole schema:
 
 ### Faces
 
-- **`faces`** — one detected face box per row. `photo_id` FK, `person_id` FK nullable (unlabelled faces are still stored), `bbox` JSONB (`{x,y,w,h}` in working-copy pixels), `embedding` `real[]` + `embedding_model` (InsightFace/ArcFace via ONNX; no pgvector needed). `source` (`ai|human`), `is_disputed` + `disputed_by` + `dispute_note` support family disputes; disputed faces are excluded from the face reference set. `created_by` records the user who labelled or confirmed.
+- **`faces`** — one detected face box per row. `photo_id` FK, `person_id` FK nullable (unlabelled faces are still stored), `bbox` JSONB (`{x,y,w,h}` in working-copy pixels), `embedding` `real[]` + `embedding_model` (InsightFace/ArcFace via ONNX; no pgvector needed). `source` (`ai|human`), `is_disputed` + `disputed_by` + `dispute_note` support family disputes; disputed faces are excluded from the face reference set. `created_by` records the user who labelled or confirmed. `is_deleted` + `deleted_at` + `delete_reason` (Phase 6 migration 21) hold "not a face" soft-deletes from the Faces mode; every selector filters `not is_deleted`.
 
 ### Places and albums
 
@@ -70,10 +70,14 @@ The rule that governs the whole schema:
 ### Triage hints (migration 17)
 
 - **`triage_hints`** — one row per photo (PK `photo_id`) written by the
-  `triage_presort` job (Phase 3). `hint` is one of `photo | screenshot |
-  document | blank_or_dark | possible_back | tiny | burst | exact_dup_of`
-  after the precedence cascade (`exact_dup_of` → `screenshot` →
-  `possible_back` → `blank_or_dark` → `tiny` → `document` → `burst`).
+  `triage_presort` job (Phase 3), with an additional value `ai_junk`
+  added by the Phase 6 `classify` writer. `hint` is one of `photo |
+  screenshot | document | blank_or_dark | possible_back | tiny | burst |
+  exact_dup_of | ai_junk` after the precedence cascade (`exact_dup_of` →
+  `screenshot` → `possible_back` → `blank_or_dark` → `tiny` → `document`
+  → `burst`). `ai_junk` is set only when no presort row exists — presort
+  wins; the AI label survives inside the existing row's
+  `details.also.ai_classify`.
   `confidence` 0–1. `details` JSONB carries per-hint evidence (e.g.
   dimensions, tone stats, sharpest peer in a burst group, ink fraction for
   `possible_back`) and a `details.also` key holding the losing hints so
@@ -114,7 +118,8 @@ The rule that governs the whole schema:
 - **`audit_log`** — id, `user_id` nullable, `actor` (`user email | 'desktop' | 'system'`), `action`, `entity_type`, `entity_id`, `previous_value` / `new_value` JSONB, `created_at`. Every state change writes one.
 - **`job_runs`** — one row per invocation of a batch job (classify, describe, detect-faces, …). `params` JSONB.
 - **`job_items`** — per-photo status within a run; PK `(job_run_id, photo_id)`.
-- **`photo_job_status`** — per-photo, per-job current state. `model` remembered so a model upgrade is `update photo_job_status set status='pending' where job_name='describe'` and the batch runner re-runs the whole set.
+- **`photo_job_status`** — per-photo, per-job current state. `model` and (as of Phase 6 migration 21) `prompt_version` remembered so an upgrade to either — new VLM weights *or* a new prompt template — is `update photo_job_status set status='pending' where job_name='describe'` and the batch runner re-runs the whole set at the current model+prompt_version. Selectors gate on this rather than on downstream row counts (so a legitimately zero-face photo isn't re-processed forever).
+- **`job_cursors`** (Phase 6, migration 21) — one row per job name; `line_no` is the last NDJSON line index consumed from the mini's per-job results file (`LOG_DIR/batches/{job_name}.ndjson` on the service). Collect reads strictly after this cursor, applies each writer idempotently in a transaction with the cursor advance, then sweeps the inbox with `?done=true`. Rewinding the cursor and re-collecting is safe — every writer checks for the row it would insert.
 
 ## Search
 

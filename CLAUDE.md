@@ -125,6 +125,77 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Not duplicates (N):** inserts `(least, greatest)` exclusions for every
   pair in the group; scan honours them forever.
 
+## Inference client / jobs (Phase 6 onwards)
+- **`INFERENCE_URL` / `INFERENCE_TOKEN`** in `desktop/.env`. The single-image
+  endpoints, `/health`, and the unattended-batch surface
+  (`/batch/upload/{job_name}`, `POST /batch/{endpoint}` with `from_inbox`,
+  `GET /batch/results/{job_name}?after=<cursor>`, `/summary`, sweep,
+  cancel) all live behind `inference_client.LanInferenceClient`.
+- **Client-side downscale + JPEG Q85** before every upload. Per-endpoint
+  edge: `classify`/`describe`/`estimate-date` at 1024, `transcribe-back` and
+  `detect-faces` at 1536. The multipart filename stem is the `ref` (photo id,
+  or `b<photo_backs.id>` for backs). 401 is fatal; connection errors and 503
+  retry with exponential backoff.
+- **Hand over, then collect.** The batch runner (`jobs/`) selects eligible
+  items, uploads in chunks of 50 with progress, then POSTs
+  `/batch/{endpoint}` with `from_inbox` — laptop can be closed after that.
+  Collect polls every 5 minutes (and on app start): reads NDJSON from the
+  mini's per-job results file after the stored cursor, applies the writer
+  once per line (idempotent), advances `job_cursors.line_no`, updates
+  `photo_job_status`, then sweeps `?done=true`.
+- **Selectors gate on `photo_job_status`, not on presence of downstream
+  rows.** A legitimately zero-face photo has no `faces` rows — but its
+  detect_faces status is 'done', so it isn't re-processed.
+- **Blackout lives on the mini** (Phase 5 follow-up). Laptop has no
+  blackout logic; the Jobs panel just reads `/health.blackout`.
+- **Queue order:** `transcribe_backs → detect_faces → classify → describe →
+  estimate_date`. Hand-overs run sequentially in that order.
+- **Everything the models produce is a suggestion.** Writers insert
+  `suggestions` rows with `source='ai'`, `model`, and `prompt_version`.
+  Fact columns (`photos.capture_date`, `photos.description_ai`,
+  `faces.person_id`, `photo_places`) are only written by an admin
+  promoting a suggestion — or by George's own decisions in the Faces mode
+  (which count as admin actions and get audit rows tagged `source='human'`).
+  The two facts the writers set directly are observational and low-risk:
+  `photo_backs.transcribed_text/transcription_confidence` (with
+  `transcription_confirmed=false`) and `faces` rows themselves.
+- **transcribe_backs low-confidence retry (< 0.5)** re-runs the flipped
+  and rot180 variants **inline via single-image calls**, not through the
+  batch queue. Keeps the writer's state machine simple; the retry rate is
+  small.
+- **classify → `back_of_print` on a scan** inserts a pending
+  `ingest_pairings` row exactly like the B key: `back_photo_id` = this
+  photo, `back_score` = confidence, `front_photo_id` = immediate
+  predecessor by `scan_sequence` (unless the predecessor is itself a
+  back / pending back → orphan), `details.source='ai_classify'`.
+- **AI-junk hint precedence: presort wins.** If a photo already has a
+  `triage_hints` row from the presort job, the AI's label goes into
+  `details.also.ai_classify`; the hint stays as-is. Only photos with no
+  presort hint get `hint='ai_junk'`.
+- **Private photos are sent to the mini.** LAN-only, no external egress;
+  the "private is private" rule is about the web VM. Sweep removes the
+  inbox copy once the result is in the DB.
+
+## Faces mode (Phase 6)
+- **Clustering is in-memory**, numpy agglomerative on cosine distance,
+  threshold `FACE_CLUSTER_DIST` (default 0.45). Recomputed on demand from
+  the button. Never stored in the DB.
+- **Reference embeddings exclude `is_disputed=true` faces.** One wrong tag
+  must not quietly poison every future match.
+- **"Not a face"** soft-deletes the row (`is_deleted=true`, `deleted_at`,
+  `delete_reason`) and writes an audit row. Every selector filters out
+  deleted rows.
+- **Face crops are precomputed** at collect time to
+  `THUMBS_DIR/faces/{face_id}.jpg` (padded ~15% around the box, 256 px
+  edge). The cluster grid renders straight from those files.
+- **George's assignments in Faces mode are facts** — `faces.person_id`
+  is set, `source='human'`, audit row `face.assign`. Accepting the AI's
+  suggestion is the same. Contributor-side suggestions from the web
+  arrive later in `suggestions` (Phase 9).
+- **Merge two people:** faces and name variants move onto the winner
+  (variants deduped by lower(variant)); loser is soft-deleted; audit rows
+  written both directions (`person.merge`, `person.merged_into`).
+
 ## Web (CraftTags lessons — always apply)
 - Token links land on a POST-confirm page. GET on the token changes nothing.
 - `app.set('trust proxy', 1)` before any middleware that reads client IP.
