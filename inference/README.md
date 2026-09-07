@@ -290,15 +290,32 @@ and the service brings the job back.
 The mini is George's machine before it is a batch runner.
 
 ```
-BATCH_BLACKOUT=Tue 04:30-07:30;Fri 04:30-07:30
+BATCH_BLACKOUT=Mon 23:30-01:30;Thu 23:30-01:30;Tue 09:30-10:45;Fri 09:30-10:45
 BATCH_MIN_FREE_GB=1.0
 ```
 
 Inside a window, or when free RAM drops below `BATCH_MIN_FREE_GB`, the batch
 finishes the item in flight and then sleeps, re-checking every
 `BATCH_PAUSE_POLL_S`. **Interactive requests are never affected** — a blackout is
-about not competing for the machine overnight, not about refusing work. `/health`
-reports the windows, whether one is active, and when it lifts.
+about not competing for the machine, not about refusing work. `/health` reports the
+windows, whether one is active, and when it lifts.
+
+The windows above are the Agentic Complete scheduled agents in
+`~/Documents/Claude/Scheduled`, which own this machine on Tuesdays and Fridays:
+
+| Job | Starts | Observed finish | Window |
+|---|---|---|---|
+| `ac-publish-cycle` | Tue/Fri ~00:00 | 00:16–00:48 | `Mon 23:30-01:30`, `Thu 23:30-01:30` |
+| `ac-linkedin-cycle` | Tue/Fri ~10:00 | ~10:11, drives Chrome | `Tue 09:30-10:45`, `Fri 09:30-10:45` |
+
+Thirty minutes of margin each side of the observed envelope. A window starting
+before midnight is written against the previous day, so `Mon 23:30-01:30` is the
+Tuesday publish cycle.
+
+Deliberately **not** blacked out: `ac-heartbeat` (05:08 and 17:08 daily),
+`ac-weekly-report` (Mon ~05:05) and `ac-email-check`. They run for a couple of
+minutes; reserving an hour a day for them would cost far more than it saves, and
+`BATCH_MIN_FREE_GB` already covers the case where one of them needs the memory.
 
 ## Prompts
 

@@ -140,3 +140,30 @@ async def test_a_running_batch_stands_down_and_comes_back(shared_root, mock_vlm,
     finally:
         if not task.done():
             task.cancel()
+
+
+SHIPPED = "Mon 23:30-01:30;Thu 23:30-01:30;Tue 09:30-10:45;Fri 09:30-10:45"
+
+
+@pytest.mark.parametrize(
+    "moment,blacked_out,why",
+    [
+        ("2026-09-08 00:00", True, "ac-publish-cycle starts, Tuesday"),
+        ("2026-09-08 00:48", True, "latest observed publish-cycle finish"),
+        ("2026-09-08 01:30", False, "publish window closes"),
+        ("2026-09-08 10:11", True, "ac-linkedin-cycle, Tuesday"),
+        ("2026-09-11 00:35", True, "ac-publish-cycle, Friday"),
+        ("2026-09-11 10:11", True, "ac-linkedin-cycle, Friday"),
+        ("2026-09-09 00:30", False, "Wednesday, nothing scheduled"),
+        ("2026-09-07 05:10", False, "Monday weekly report is not worth an hour"),
+        ("2026-09-08 03:00", False, "the old guessed window covered nothing real"),
+    ],
+)
+def test_the_windows_that_ship_cover_the_real_jobs(moment, blacked_out, why):
+    assert (blackout.active_window(SHIPPED, at(moment)) is not None) is blacked_out, why
+
+
+def test_a_window_opening_before_midnight_belongs_to_the_next_day():
+    # "Mon 23:30-01:30" is how the Tuesday 00:00 publish cycle gets its margin.
+    assert blackout.active_window(SHIPPED, at("2026-09-07 23:30")) is not None
+    assert blackout.active_window(SHIPPED, at("2026-09-07 23:29")) is None
