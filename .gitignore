@@ -21,6 +21,9 @@ quarantine/
 manual-fix/
 thumbs/
 
+# Inference test images — family photos, never committed
+inference/samples/
+
 # Logs
 *.log
 
