@@ -18,7 +18,7 @@ Surveyed 2026-09-01. The spec assumed ~5,000 images with ~3,000 scans. Reality:
 
 Total ≈ 16,900 files, roughly 3× the spec's estimate.
 
-**Progress (2026-09-06):** Ingest complete — 1,944 files in `D:\Photos` were byte-identical to scans and recorded once under the scan's provenance. Triage complete — **12,821 keep, 1,016 junk, 0 private**. Back pairing review in progress (~350 proposals). Every phase from here operates on the 12,821 keep set. Phase 4 dedupe scan built and run: **153 pending groups** (141 pairs, 6 triples, 3 quads, 2 fives, 1 group of 13); min-distance histogram peaks at 0/2/6/8, tail to 10. Elapsed 3m32s over 12,821 photos. George's 30-group review pending.
+**Progress (2026-09-07):** Ingest complete — 1,944 files in `D:\Photos` were byte-identical to scans and recorded once under the scan's provenance. Triage complete — **12,821 keep, 1,016 junk, 0 private**. Back pairing review complete (826 accepted, 570 rejected). Phase 4 dedupe built and running against the keep set with back-shaped photos excluded: **129 pending groups** over 12,232 eligible photos (119 pairs, 6 triples, 2 quads, 2 fives; min-distance histogram peaks at 0/6/8). Elapsed ~4 min. George's 30-group review pending.
 
 Consequences of the survey:
 
@@ -98,12 +98,13 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Junk → quarantine + soft delete. Private → flag only, stays in working set, excluded from sync.
 - Accept when: George triages 500 photos in one sitting without touching the mouse; counts in the DB match; quarantine browser restores one.
 
-### Phase 4 — Dedupe (Claude Code, Windows) — spec §4
+### Phase 4 — Dedupe (Claude Code, Windows) — spec §4 — **DONE 2026-09-07**
 - pHash/dHash candidate groups, configurable threshold. Cross-format matching (TIFF vs JPG, phone vs scan).
 - Keeper pre-selection: EXIF original > TIFF > higher resolution > larger file. Groups of 3+.
 - When the discarded copy is a scan, its batch/sequence is copied onto the keeper's `physical_ref_note` before quarantine. The physical reference is never lost.
 - Side-by-side synced zoom, keyboard flow, "not duplicates" memory, resumable progress.
 - Accept when: seeded test set of known pairs (including one TIFF/JPG pair) is all found; a false pair marked "not duplicates" never reappears.
+- **Delivered:** multi-index Hamming search (16 bands × 16 bits, exhaustive to D=15) with a brute-force fallback; 7 rotation/mirror variants hashed from the thumbnail; union-find grouping; keeper reason chain shown in the UI. Resolve reuses `triage.apply_decision`; carries `physical_ref_note`, `photo_backs`, non-preferred `photo_masters`, albums, and suggestions to the keeper; promotes `is_private`. Session undo reverses everything from the `dedupe.resolve` audit payload. Back-shaped photos (`possible_back` hint or any `ingest_pairings.back_photo_id`) are excluded from scan. New tables `dedupe_groups`, `dedupe_members`, `dedupe_exclusions`. First live run: **129 pending groups over 12,232 eligible photos in ~4 min**. Commit `6ac1769`.
 
 ### Phase 5 — Inference service (Claude Code, Mac) — spec §2
 - FastAPI, MLX, Qwen3-VL 8B (4-bit on the M4, larger on the M6), InsightFace for faces.
