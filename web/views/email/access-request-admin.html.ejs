@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <body style="font-family: system-ui, -apple-system, sans-serif; color: #1c1917;">
+    <p>Someone has requested access to the Photo Archive.</p>
+    <table cellpadding="4">
+      <tr><td><strong>From:</strong></td><td><%= requesterEmail %></td></tr>
+      <tr><td><strong>Name:</strong></td><td><%= requesterName || '(not provided)' %></td></tr>
+    </table>
+    <p><strong>Message:</strong><br />
+      <%= message || '(none)' %>
+    </p>
+    <p>
+      <a href="<%= approveUrl %>" style="display:inline-block;padding:10px 18px;background:#6d28d9;color:#fff;text-decoration:none;border-radius:6px;">Review to approve</a>
+      &nbsp;
+      <a href="<%= denyUrl %>" style="display:inline-block;padding:10px 18px;background:#b91c1c;color:#fff;text-decoration:none;border-radius:6px;">Review to deny</a>
+    </p>
+    <p>Both links land on a confirmation page; nothing happens until you click the button there.</p>
+    <p><a href="<%= adminListUrl %>">Open the admin list</a></p>
+  </body>
+</html>

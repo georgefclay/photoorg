@@ -1,0 +1,39 @@
+<%- include('../partials/head', { title: 'Access requests' }) %>
+<h1>Pending access requests</h1>
+
+<% if (!requests.length) { %>
+  <p class="muted">No pending requests. Nice and quiet.</p>
+<% } else { %>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Email</th>
+        <th>Name</th>
+        <th>Message</th>
+        <th>Requested</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% requests.forEach(function (r) { %>
+        <tr>
+          <td><%= r.email %></td>
+          <td><%= r.display_name || '' %></td>
+          <td class="muted"><%= r.message || '' %></td>
+          <td><%= new Date(r.created_at).toISOString().slice(0, 10) %></td>
+          <td>
+            <form method="post" action="/admin/access/<%= r.id %>/approve" style="display:inline">
+              <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+              <button class="button" type="submit">Approve</button>
+            </form>
+            <form method="post" action="/admin/access/<%= r.id %>/deny" style="display:inline">
+              <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+              <button class="button danger" type="submit">Deny</button>
+            </form>
+          </td>
+        </tr>
+      <% }); %>
+    </tbody>
+  </table>
+<% } %>
+<%- include('../partials/foot') %>

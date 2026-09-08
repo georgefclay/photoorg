@@ -1,0 +1,10 @@
+<%- include('partials/head', { title: 'Sign in' }) %>
+<h1>Sign in as <%= email %>?</h1>
+<p>Click <em>Continue</em> to sign in. This link works once.</p>
+<form method="post" action="/a/<%= token %>">
+  <div class="actions">
+    <button class="button" type="submit">Continue</button>
+    <a class="button secondary" href="/">Cancel</a>
+  </div>
+</form>
+<%- include('partials/foot') %>

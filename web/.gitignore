@@ -1,0 +1,2 @@
+# Local dev-mail sink (only used when POSTMARK_API_KEY is not set).
+tmp/

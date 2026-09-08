@@ -3,7 +3,7 @@
 Owner: George Clay. PM: Claude (this Cowork chat). Coding: Claude Code on the Windows laptop and on the Mac mini.
 Spec: `photo-archive-build-prompts.md` (the 12 build prompts). This file records what changed after looking at the real data, the decisions made, and the phase plan. Phase prompts are written one at a time from this file when each phase starts.
 
-Last updated: 2026-09-01
+Last updated: 2026-09-08
 
 ---
 
@@ -39,7 +39,7 @@ Consequences of the survey:
 | Database | Local Postgres on the laptop owns everything the desktop app does. The VM has its own Postgres, populated only by the manual Sync button. Same migrations on both. |
 | Web frontend | **Express + EJS + vanilla JS**, not React. Matches every other site George runs; no build step. |
 | Hosting | Existing AWS VM (Ubuntu, Caddy, systemd, Postgres, Node 24), same deploy pattern as CraftTags: `git pull` + `systemctl restart`. Main disk enlarged for the working set. |
-| Email | Postmark, new sender signature for the archive's domain. Domain TBD before Phase 8. |
+| Domain and email | **cyberdinosaurs.com** (George owns it). `BASE_URL=https://cyberdinosaurs.com` on the VM; Postmark sender signature + SPF/DKIM for the domain at Phase 14; from address `archive@cyberdinosaurs.com`. Site name in the UI: "Cyber Dinosaurs". |
 | Inference hardware | Develop on the M4 Mac mini (16 GB) now; move to the M6 (32 GB) on 2026-09-22. Model, host, and quantization are config, not code. |
 | Face embeddings | InsightFace (ArcFace) via ONNX. VLM is never used for identity. |
 | Privacy | `is_private` flag on photos. Sync skips private rows and files; the API refuses to serve them even if present. |
@@ -133,6 +133,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Express + EJS. Request-access form → admin email with Approve/Deny (POST-confirm pages, 72 h tokens) → magic links → long-lived HTTP-only session in Postgres.
 - Roles admin/contributor; suspension kills sessions, keeps contributions. Service-account token for the desktop app.
 - Accept when: full flow works locally with Postmark in dev-log mode; GET on a token link changes nothing; suspended user's session is dead on the next request.
+- **Done 2026-09-08.** All 22 tests green (`npm test`). Manual dev-mail smoke: request-access → admin email → POST approve → welcome email → magic-link sign-in. Audit rows produced in order: `auth.request_access` → `auth.approve` → `user.create` → `auth.magic_link.sent (welcome_after_approval)` → `auth.login` → `auth.magic_link.expired_attempt` on replay. Migration 22 adds `access_requests.display_name`. Env additions: `TEST_DATABASE_URL` (shares `photoorg_test`), `BASE_URL`, `ADMIN_EMAIL`, `SESSION_SECRET`, `SERVICE_TOKEN`, `POSTMARK_*`.
 
 ### Phase 9 — Web: core API + sync (Claude Code, Windows) — spec §8
 - Photos, suggestions, faces, people, comments, likes, albums, audit log, monthly activity report.
@@ -169,7 +170,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 
 1. Create the GitHub repo and push the skeleton (Phase 0).
 2. Confirm the masters have a backup.
-3. Pick the archive's domain name before Phase 8.
+3. ~~Pick the archive's domain name~~ — cyberdinosaurs.com.
 4. On 2026-09-22, move the inference service to the M6 (config change + model re-download).
 
 ## 6. Risks

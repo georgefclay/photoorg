@@ -1,0 +1,15 @@
+<%- include('partials/head', { title: 'Deny request' }) %>
+<h1>Deny this request?</h1>
+<div class="card">
+  <p><strong>Email:</strong> <%= request.email %></p>
+  <p><strong>Name:</strong> <%= request.display_name || '(not provided)' %></p>
+  <p><strong>Message:</strong><br /><%= request.message || '(none)' %></p>
+</div>
+<p>Denying marks the request as denied. The requester is <strong>not</strong> emailed.</p>
+<form method="post" action="/admin/access/<%= token %>/deny">
+  <div class="actions">
+    <button type="submit" class="button danger">Deny</button>
+    <a class="button secondary" href="/">Cancel</a>
+  </div>
+</form>
+<%- include('partials/foot') %>

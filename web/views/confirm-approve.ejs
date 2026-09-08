@@ -1,0 +1,15 @@
+<%- include('partials/head', { title: 'Approve request' }) %>
+<h1>Approve this request?</h1>
+<div class="card">
+  <p><strong>Email:</strong> <%= request.email %></p>
+  <p><strong>Name:</strong> <%= request.display_name || '(not provided)' %></p>
+  <p><strong>Message:</strong><br /><%= request.message || '(none)' %></p>
+</div>
+<p>Approving creates a user account (if one doesn't already exist) and emails them a first sign-in link.</p>
+<form method="post" action="/admin/access/<%= token %>/approve">
+  <div class="actions">
+    <button type="submit" class="button">Approve and email link</button>
+    <a class="button secondary" href="/">Cancel</a>
+  </div>
+</form>
+<%- include('partials/foot') %>

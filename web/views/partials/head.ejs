@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title><%= typeof title !== 'undefined' && title ? `${title} — Photo Archive` : 'Photo Archive' %></title>
+    <link rel="stylesheet" href="/css/site.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/">Photo Archive</a>
+      <% if (locals.user) { %>
+        <div class="who">
+          <span class="who-email"><%= user.email %></span>
+          <% if (user.role === 'admin') { %>
+            <a class="who-link" href="/admin/access">Access</a>
+            <a class="who-link" href="/admin/users">Users</a>
+          <% } %>
+          <form method="post" action="/logout" class="who-form">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+            <button type="submit" class="link-button">Sign out</button>
+          </form>
+        </div>
+      <% } %>
+    </header>
+    <main class="site-main">

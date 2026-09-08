@@ -202,6 +202,42 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - Register specific routes before wildcards.
 - Watch fail2ban when smoke-testing from a new IP.
 
+## Web auth (Phase 8 onwards)
+- **No signup.** Strangers use `/request-access` → George approves via an
+  emailed confirm-page link (or `/admin/access`) → the new user gets a
+  first magic link → session cookie. Only `tools/create-admin.js` creates
+  admins; there is no other path.
+- **Expiries are computed in SQL.** Access-request tokens
+  `token_expires_at = now() + interval '72 hours'`; magic-link
+  `expires_at = now() + interval '15 minutes'`. Never a JS `Date`.
+- **Magic-link tokens are stored hashed.** The raw 32-byte hex token
+  goes only into the emailed URL; `magic_links.token_hash` stores
+  `sha256(token)`. Lookups hash-then-compare.
+- **loadUser gates suspension.** On every request, if the user's status
+  is not `active`, `loadUser` destroys the session and treats them as
+  anonymous. Suspending in `/admin/users` also deletes their `session`
+  rows for tidiness.
+- **CSRF policy:** per-session `_csrf` token on every authed POST form
+  (`req.user` set). Pre-auth POSTs (`/request-access`, `/login`) rely on
+  the honeypot + rate limiter. Token-URL POSTs (`/a/:token`,
+  `/admin/access/:token/{approve,deny}`) rely on the unguessable token.
+- **Rate limiter:** 5 / 15 min per IP on both `/request-access` and
+  `/login`, with independent counters.
+- **Never reveal whether an email exists.** `POST /login` for a
+  suspended/unknown email returns the same "check your inbox" page and
+  sends no email; only the internal log records the miss.
+- **Audit namespace `auth.*`:** `auth.request_access`,
+  `auth.request_access.duplicate`, `auth.approve`, `auth.deny`,
+  `auth.login`, `auth.suspend`, `auth.reactivate`, `auth.role_change`,
+  `auth.magic_link.sent`, `auth.magic_link.expired_attempt`. `actor` is
+  the acting user's email (or `system` for automatic steps, `bootstrap`
+  for `create-admin.js`).
+- **Service token:** desktop → web sync uses
+  `Authorization: Bearer <SERVICE_TOKEN>` with constant-time compare and
+  no `users` row. `is_service` on `users` is unused for now.
+- **Dev mail** goes to `web/tmp/mail/` when `POSTMARK_API_KEY` is unset —
+  the sink is gitignored; sign-in links there are clickable.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site

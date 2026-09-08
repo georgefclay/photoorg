@@ -1,0 +1,14 @@
+Someone has requested access to the Photo Archive.
+
+From:    <%= requesterEmail %>
+Name:    <%= requesterName || '(not provided)' %>
+
+Message:
+<%= message || '(none)' %>
+
+Approve:  <%= approveUrl %>
+Deny:     <%= denyUrl %>
+
+Or open the admin list: <%= adminListUrl %>
+
+Both links land on a confirmation page; nothing happens until you click the button there.
