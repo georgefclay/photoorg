@@ -177,11 +177,32 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   inbox copy once the result is in the DB.
 
 ## Faces mode (Phase 6)
-- **Clustering is in-memory**, numpy agglomerative on cosine distance,
+- **Clustering is in-memory**, scipy **average-linkage** cosine distance
+  (fix-up 2 — single linkage chained ~3,500 faces into one blob),
   threshold `FACE_CLUSTER_DIST` (default 0.45). Recomputed on demand from
   the button. Never stored in the DB.
-- **Reference embeddings exclude `is_disputed=true` faces.** One wrong tag
-  must not quietly poison every future match.
+- **Quality gate before clustering AND before reference-set means.** Faces
+  with `det_score < FACE_MIN_SCORE` (0.7) or bbox short-edge <
+  `FACE_MIN_PX` (40) are excluded; rows kept, surfaced via the
+  "Include low-quality" toggle. Low-quality faces poison reference means
+  too, so the same gate applies there.
+- **Recursive split** for any cluster larger than `FACE_MAX_CLUSTER`
+  (300): re-cluster the members at threshold × 0.8, iteratively (cap 5
+  levels). Sub-clusters are tagged "split from a larger cluster" in the
+  header.
+- **Queue order**: big first, but clusters with < 3 faces push to the
+  back — the meaty ones get handled first; singletons are the long tail.
+- **Cluster grid ordering**: within each cluster, faces sort by cosine
+  distance from the cluster centroid (closest first). Outliers land at
+  the tail so a Shift-range-select picks off the "other person" in a
+  mixed-sibling cluster.
+- **B key — Split by nearest person.** For a cluster that mixes two
+  siblings, once both are labelled, `B` assigns every face to whichever
+  of the two nearest labelled people (measured against the cluster
+  centroid) it is closer to; preview + confirm before it commits.
+- **Reference embeddings exclude `is_disputed=true` AND low-quality
+  faces.** One wrong tag on a blurry crop must not quietly poison every
+  future match.
 - **"Not a face"** soft-deletes the row (`is_deleted=true`, `deleted_at`,
   `delete_reason`) and writes an audit row. Every selector filters out
   deleted rows.

@@ -83,3 +83,22 @@ GO.
 Commit: `Phase 6 fix-up 1: token health, quiet 404s`.
 
 3. **Hand-over read timeout.** `POST /batch/{endpoint}` with `from_inbox` streams NDJSON for the life of the batch; the client waited for the full body and hit `Read timed out` after 180 s even though the mini had started the job. Fix: open the request with `stream=True`, read the first line (job id / accepted count), record the hand-over, close the connection. Confirm via `/batch/results/{job}/summary` immediately after. Add a test with a mock server that never finishes streaming. Also: check `job_runs` for a hand-over row that was *not* written because of this timeout, and reconcile (the mini's summary is the source of truth for "handed over").
+
+---
+
+## Phase 6 fix-up 2 — clustering produced a 3,566-face cluster
+
+The largest cluster after the first Recompute is 3,566 faces. That is chaining, not a person. Do this, in order, and report the size distribution after each step:
+
+1. **Diagnose.** Print: total faces, det_score histogram, face box size histogram (short edge in px), and for the giant cluster its mean pairwise cosine distance and det_score/size distribution vs. the rest.
+2. **Quality gate.** Exclude from clustering (and from reference sets) faces with `det_score < 0.7` or short edge < 40 px. Keep the rows; show them later under a "low quality" bucket that George can ignore or review. Store the gate values in `.env` (`FACE_MIN_SCORE`, `FACE_MIN_PX`).
+3. **Linkage.** Use **average** (or complete) linkage, not single. With scipy available use `scipy.cluster.hierarchy.linkage(..., method='average', metric='cosine')` + `fcluster` at `FACE_CLUSTER_DIST`; otherwise implement average-linkage agglomerative directly. Single linkage is what chains.
+4. **Recursive split.** Any cluster larger than `FACE_MAX_CLUSTER` (default 300) is re-clustered on its own members at threshold × 0.8, repeated until nothing exceeds the cap. Record in the cluster header "split from a larger cluster".
+5. **Order** the queue by size but skip clusters with < 3 faces until the big ones are done (singletons are the long tail; George labels them from the per-photo view later).
+6. Tests: a synthetic set with two tight groups joined by a chain of intermediates must come out as two clusters under average linkage and one under single.
+
+Target after the fix: the largest cluster is a plausible single person (tens to a few hundred faces), and the top 20 clusters look clean to George.
+
+Commit: `Phase 6 fix-up 2: face clustering quality gate, average linkage, recursive split`.
+
+7. **Mixed-sibling clusters.** George's two sons as children land in the same clusters. In the cluster grid, order faces by distance from the cluster centroid (closest first) so the "other" person collects at the end and is easy to select with Shift-click / Shift-arrow ranges. Add a **"Split by nearest person"** action: once both people exist with a few labelled faces, one key (`B`) assigns every face in the cluster to whichever of the two nearest labelled people it is closer to, shows the proposed split as two groups, and George confirms or fixes before it commits. Also show each face's age-ish context: the photo's year (capture date or import folder) under the crop — brothers are easy to tell apart when you know the year.

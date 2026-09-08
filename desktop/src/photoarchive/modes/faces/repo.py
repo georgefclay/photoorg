@@ -27,6 +27,21 @@ class FaceRow:
     confidence: float | None
     is_disputed: bool
     is_deleted: bool
+    # Populated by unlabelled_faces_with_embeddings when we join the
+    # photos row for the year-context display in the cluster grid.
+    photo_capture_year: int | None = None
+    photo_source_folder: str | None = None
+
+    @property
+    def short_edge_px(self) -> float | None:
+        w = self.bbox.get("w") if isinstance(self.bbox, dict) else None
+        h = self.bbox.get("h") if isinstance(self.bbox, dict) else None
+        if w is None or h is None:
+            return None
+        try:
+            return float(min(w, h))
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass
@@ -47,18 +62,24 @@ class PersonRow:
 def unlabelled_faces_with_embeddings(
     conn: psycopg.Connection,
 ) -> list[FaceRow]:
+    """Every unlabelled, non-deleted face with an embedding, joined to
+    its photo for the year context shown under each crop."""
     rows = conn.execute(
         """
-        select id, photo_id, person_id, bbox, embedding, embedding_model,
-               confidence, is_disputed, is_deleted
-        from faces
-        where person_id is null
-          and not is_deleted
-          and embedding is not null
-        order by id
+        select f.id, f.photo_id, f.person_id, f.bbox, f.embedding,
+               f.embedding_model, f.confidence, f.is_disputed, f.is_deleted,
+               extract(year from p.capture_date)::int as capture_year,
+               p.source_folder
+        from faces f
+        join photos p on p.id = f.photo_id
+        where f.person_id is null
+          and not f.is_deleted
+          and not p.is_deleted
+          and f.embedding is not null
+        order by f.id
         """
     ).fetchall()
-    return [_face(row) for row in rows]
+    return [_face_with_photo(row) for row in rows]
 
 
 def faces_for_person(conn: psycopg.Connection, person_id: int) -> list[FaceRow]:
@@ -114,13 +135,20 @@ def get_person(conn: psycopg.Connection, person_id: int) -> PersonRow | None:
     return _person(row) if row else None
 
 
-def person_reference_means(conn: psycopg.Connection) -> dict[int, np.ndarray]:
-    """Mean embedding per non-deleted person, computed over their non-disputed,
-    non-deleted, embedded faces. The Faces UI uses this for the suggested
-    match on each cluster."""
+def person_reference_means(
+    conn: psycopg.Connection,
+    *,
+    min_score: float | None = None,
+    min_short_edge_px: float | None = None,
+) -> dict[int, np.ndarray]:
+    """Mean embedding per non-deleted person, computed over their
+    non-disputed, non-deleted, embedded faces. Faces below the quality
+    gate (fix-up 2) are excluded from the reference set — a wrong tag
+    on a blurry crop must not poison future matches. Pass min_score /
+    min_short_edge_px = None to get the raw un-gated mean."""
     rows = conn.execute(
         """
-        select person_id, embedding
+        select person_id, embedding, confidence, bbox
         from faces
         where person_id is not null
           and not is_disputed
@@ -129,14 +157,37 @@ def person_reference_means(conn: psycopg.Connection) -> dict[int, np.ndarray]:
         """
     ).fetchall()
     accum: dict[int, list[np.ndarray]] = {}
-    for pid, emb in rows:
+    for pid, emb, conf, bbox in rows:
         if emb is None:
             continue
+        if min_score is not None and conf is not None and conf < min_score:
+            continue
+        if min_short_edge_px is not None:
+            se = _short_edge(bbox)
+            if se is not None and se < min_short_edge_px:
+                continue
         accum.setdefault(pid, []).append(np.asarray(emb, dtype=np.float32))
     means: dict[int, np.ndarray] = {}
     for pid, embs in accum.items():
         means[pid] = np.mean(np.stack(embs), axis=0)
     return means
+
+
+def _short_edge(bbox) -> float | None:
+    if bbox is None:
+        return None
+    if not isinstance(bbox, dict):
+        try:
+            bbox = json.loads(bbox)
+        except Exception:
+            return None
+    w, h = bbox.get("w"), bbox.get("h")
+    if w is None or h is None:
+        return None
+    try:
+        return float(min(w, h))
+    except (TypeError, ValueError):
+        return None
 
 
 def create_person(
@@ -330,6 +381,20 @@ def _face(row) -> FaceRow:
         embedding=list(embedding) if embedding is not None else None,
         embedding_model=embedding_model, confidence=confidence,
         is_disputed=bool(is_disputed), is_deleted=bool(is_deleted),
+    )
+
+
+def _face_with_photo(row) -> FaceRow:
+    (id_, photo_id, person_id, bbox, embedding, embedding_model,
+     confidence, is_disputed, is_deleted, capture_year, source_folder) = row
+    return FaceRow(
+        id=int(id_), photo_id=int(photo_id), person_id=person_id,
+        bbox=bbox if isinstance(bbox, dict) else json.loads(bbox),
+        embedding=list(embedding) if embedding is not None else None,
+        embedding_model=embedding_model, confidence=confidence,
+        is_disputed=bool(is_disputed), is_deleted=bool(is_deleted),
+        photo_capture_year=int(capture_year) if capture_year is not None else None,
+        photo_source_folder=source_folder,
     )
 
 

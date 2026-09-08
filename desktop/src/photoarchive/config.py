@@ -52,10 +52,24 @@ class Settings(BaseSettings):
     DEDUPE_PHASH_MAX: int = Field(default=10, ge=0, le=256)
     DEDUPE_DHASH_MAX: int = Field(default=10, ge=0, le=256)
 
-    # Faces (Phase 6). Agglomerative cosine-distance threshold for the
-    # in-memory clustering the Faces mode runs on unlabelled embeddings.
-    # 0.45 is the starting point; tune on real data.
+    # Faces (Phase 6). Agglomerative average-linkage cosine-distance
+    # threshold for the in-memory clustering the Faces mode runs on
+    # unlabelled embeddings. 0.45 is the starting point; tune on real data.
     FACE_CLUSTER_DIST: float = Field(default=0.45, ge=0.0, le=2.0)
+
+    # Fix-up 2: quality gate. Faces below either threshold (InsightFace
+    # detection score / short-edge in pixels) are excluded from
+    # clustering AND from reference-set means so they don't chain the
+    # rest into one giant cluster. Rows are kept and reachable via the
+    # Faces mode's "Include low-quality" toggle.
+    FACE_MIN_SCORE: float = Field(default=0.7, ge=0.0, le=1.0)
+    FACE_MIN_PX: int = Field(default=40, ge=1)
+
+    # Fix-up 2: recursive split. Any cluster larger than this cap gets
+    # re-clustered on its own members at a tighter threshold
+    # (× 0.8 per level), iteratively, so a single mega-cluster becomes
+    # several plausible-sized ones.
+    FACE_MAX_CLUSTER: int = Field(default=300, ge=1)
 
     @field_validator("MASTER_ROOTS")
     @classmethod

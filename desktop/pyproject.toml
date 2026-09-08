@@ -19,6 +19,7 @@ dependencies = [
   "exifread",
   "piexif",
   "numpy",
+  "scipy",
   "opencv-python-headless<5",
   "requests",
 ]

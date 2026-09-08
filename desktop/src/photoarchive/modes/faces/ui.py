@@ -1,14 +1,20 @@
 """Faces mode — cluster view first, keyboard-driven.
 
-Cluster loop: unlabelled+non-deleted faces with embeddings, run
-in-memory agglomerative clustering on cosine distance (threshold
-FACE_CLUSTER_DIST). Show clusters largest first. For each cluster:
-  - Grid of face crop thumbnails from THUMBS_DIR/faces/{face_id}.jpg.
-  - Suggested match: nearest labelled-person mean embedding (excluding
-    is_disputed=true faces), with cosine distance.
+Cluster loop (post fix-up 2): unlabelled+non-deleted faces with
+embeddings, filter out low quality (det_score < FACE_MIN_SCORE OR bbox
+short-edge < FACE_MIN_PX), then average-linkage cosine clustering with
+recursive split above FACE_MAX_CLUSTER. Show clusters big-first, small
+(< 3) at the back. For each cluster:
+  - Grid of face crop thumbnails from THUMBS_DIR/faces/{face_id}.jpg,
+    ordered closest-to-centroid first (outliers land at the tail so
+    Shift-range-select picks up the "other person").
+  - Year context under each crop (capture-date year if known).
+  - Suggested match: nearest labelled person by mean embedding
+    (excluding is_disputed=true and low-quality faces).
   - Keys: Enter accept, N new person, X toggle selection under the
     cursor, S split selected into a brand-new cluster shown next, K
-    skip, Delete "not a face" on selected (soft delete + audit).
+    skip, Delete "not a face" on selected (soft delete + audit),
+    B split by nearest of two labelled people (mixed-sibling clusters).
 """
 
 from __future__ import annotations
@@ -20,8 +26,9 @@ from typing import Any
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -40,7 +47,16 @@ from PySide6.QtWidgets import (
 from ... import db as dbmod
 from ...config import load as load_settings
 from ...workers import BackgroundJob
-from .clustering import ClusteringResult, cluster_faces, nearest_person
+from .clustering import (
+    ClusterMeta,
+    ClusteringResult,
+    cluster_faces,
+    diagnose_faces,
+    mean_pairwise_cosine,
+    nearest_person,
+    nearest_two_people,
+    order_cluster_by_centroid_distance,
+)
 from .merge import merge_people
 from .person_dialog import MergePeopleDialog, PersonDialog
 from . import repo
@@ -59,8 +75,9 @@ class FacesPanel(QWidget):
         self._people_by_id: dict[int, repo.PersonRow] = {}
         self._people_means: dict[int, np.ndarray] = {}
         self._cluster_result: ClusteringResult | None = None
-        self._cluster_queue: list[list[int]] = []
+        self._cluster_queue: list[ClusterMeta] = []
         self._cluster_index: int = -1
+        self._low_quality_faces: list[repo.FaceRow] = []
 
         outer = QVBoxLayout(self)
 
@@ -69,6 +86,13 @@ class FacesPanel(QWidget):
         self.status_label.setStyleSheet("font-weight: bold")
         toolbar.addWidget(self.status_label)
         toolbar.addStretch(1)
+
+        self.include_low_q_check = QCheckBox("Include low-quality")
+        self.include_low_q_check.setToolTip(
+            "By default faces below FACE_MIN_SCORE or FACE_MIN_PX are excluded "
+            "from clustering. Tick to include them on the next Recompute."
+        )
+        toolbar.addWidget(self.include_low_q_check)
 
         self.recompute_btn = QPushButton("Recompute clusters")
         self.recompute_btn.clicked.connect(self._recompute_clicked)
@@ -125,6 +149,15 @@ class FacesPanel(QWidget):
         self.split_btn.clicked.connect(self._split_selected)
         side_layout.addWidget(self.split_btn)
 
+        self.split_by_nearest_btn = QPushButton("Split by nearest person (B)")
+        self.split_by_nearest_btn.setToolTip(
+            "Mixed-sibling clusters: for each face, assign to whichever of "
+            "the two nearest labelled people (by cluster centroid) it is "
+            "closer to. Preview + confirm before it commits."
+        )
+        self.split_by_nearest_btn.clicked.connect(self._split_by_nearest_person)
+        side_layout.addWidget(self.split_by_nearest_btn)
+
         self.skip_btn = QPushButton("Skip (K)")
         self.skip_btn.clicked.connect(self._skip_cluster)
         side_layout.addWidget(self.skip_btn)
@@ -146,6 +179,7 @@ class FacesPanel(QWidget):
         QShortcut(QKeySequence(Qt.Key_N), self, self._assign_new)
         QShortcut(QKeySequence(Qt.Key_K), self, self._skip_cluster)
         QShortcut(QKeySequence(Qt.Key_S), self, self._split_selected)
+        QShortcut(QKeySequence(Qt.Key_B), self, self._split_by_nearest_person)
         QShortcut(QKeySequence(Qt.Key_Delete), self, self._delete_selected)
         # X toggles selection under the cursor
         QShortcut(QKeySequence(Qt.Key_X), self, self._toggle_current)
@@ -155,23 +189,82 @@ class FacesPanel(QWidget):
     def _recompute_clicked(self) -> None:
         self.status_label.setText("Loading faces and clustering…")
         self.recompute_btn.setEnabled(False)
+        include_low_q = self.include_low_q_check.isChecked()
 
         def _target(progress_cb, cancel_token):
+            settings = load_settings()
             with dbmod.connection() as conn:
                 conn.autocommit = True
                 faces = repo.unlabelled_faces_with_embeddings(conn)
                 people = repo.list_people(conn)
-                people_means = repo.person_reference_means(conn)
-            if not faces:
-                return {"faces": [], "people": people, "means": people_means, "result": None}
-            face_ids = [f.id for f in faces]
-            embeddings = np.array([f.embedding for f in faces], dtype=np.float32)
-            settings = load_settings()
+                # Reference set also honours the quality gate — a wrong
+                # tag on a blurry crop must not poison future matches.
+                people_means = repo.person_reference_means(
+                    conn,
+                    min_score=settings.FACE_MIN_SCORE,
+                    min_short_edge_px=settings.FACE_MIN_PX,
+                )
+
+            det_scores = [f.confidence for f in faces]
+            short_edges = [f.short_edge_px for f in faces]
+            all_ids = [f.id for f in faces]
+            all_embs = (
+                np.array([f.embedding for f in faces], dtype=np.float32)
+                if faces else np.zeros((0, 0), dtype=np.float32)
+            )
+            diagnostics = diagnose_faces(all_ids, all_embs, det_scores, short_edges)
+
+            if include_low_q:
+                keepers = faces
+                low_q: list[repo.FaceRow] = []
+            else:
+                keepers = []
+                low_q = []
+                for f in faces:
+                    score_ok = (f.confidence or 0.0) >= settings.FACE_MIN_SCORE
+                    se = f.short_edge_px
+                    size_ok = se is None or se >= settings.FACE_MIN_PX
+                    if score_ok and size_ok:
+                        keepers.append(f)
+                    else:
+                        low_q.append(f)
+            diagnostics["kept_for_clustering"] = len(keepers)
+            diagnostics["low_quality_excluded"] = len(low_q)
+
+            if not keepers:
+                return {
+                    "faces": faces, "people": people, "means": people_means,
+                    "result": None, "diagnostics": diagnostics,
+                    "low_quality": low_q,
+                }
+            face_ids = [f.id for f in keepers]
+            embeddings = np.array([f.embedding for f in keepers], dtype=np.float32)
             result = cluster_faces(
                 face_ids, embeddings,
                 max_cosine_distance=settings.FACE_CLUSTER_DIST,
+                max_cluster=settings.FACE_MAX_CLUSTER,
             )
-            return {"faces": faces, "people": people, "means": people_means, "result": result}
+
+            # Diagnose the biggest cluster: mean pairwise cosine + score
+            # / size stats. Numbers are what we present to George when a
+            # cluster looks huge.
+            if result.clusters:
+                biggest = result.clusters[0]
+                if len(biggest.face_ids) > 50:
+                    big_embs = np.array(
+                        [dict((f.id, f.embedding) for f in keepers)[fid]
+                         for fid in biggest.face_ids],
+                        dtype=np.float32,
+                    )
+                    diagnostics["biggest_cluster_size"] = len(biggest.face_ids)
+                    diagnostics["biggest_cluster_mean_cosine"] = round(
+                        mean_pairwise_cosine(big_embs), 4
+                    )
+            return {
+                "faces": faces, "people": people, "means": people_means,
+                "result": result, "diagnostics": diagnostics,
+                "low_quality": low_q,
+            }
 
         job = BackgroundJob(_target)
         job.signals.finished.connect(self._on_cluster_finished)
@@ -185,9 +278,16 @@ class FacesPanel(QWidget):
         self._face_index = {f.id: f for f in faces}
         self._people_by_id = {p.id: p for p in s.get("people", [])}
         self._people_means = s.get("means", {})
+        self._low_quality_faces = s.get("low_quality", [])
+        diagnostics = s.get("diagnostics", {})
+        log.info("faces: cluster diagnostics = %s", diagnostics)
         result: ClusteringResult | None = s.get("result")
         if result is None or not result.clusters:
-            self.status_label.setText("No unlabelled faces to cluster.")
+            summary = (
+                f"No clusterable faces. Diagnostics: total={diagnostics.get('total_faces', 0)}"
+                f" · low-quality excluded={diagnostics.get('low_quality_excluded', 0)}"
+            )
+            self.status_label.setText(summary)
             self.grid.clear()
             self._cluster_queue = []
             self._cluster_index = -1
@@ -197,9 +297,20 @@ class FacesPanel(QWidget):
         self._cluster_queue = list(result.clusters)
         self._cluster_index = 0
         hist = result.size_histogram()
+        low_q_line = (
+            f" · low-quality excluded={diagnostics.get('low_quality_excluded', 0)}"
+            if diagnostics.get('low_quality_excluded') else ""
+        )
+        big_line = ""
+        if "biggest_cluster_mean_cosine" in diagnostics:
+            big_line = (
+                f" · biggest={diagnostics['biggest_cluster_size']} "
+                f"faces mean-cos {diagnostics['biggest_cluster_mean_cosine']}"
+            )
         self.status_label.setText(
             f"{len(result.clusters)} clusters over {result.total_faces} faces "
-            f"(threshold {result.threshold:.2f}). Sizes: {hist}"
+            f"(threshold {result.threshold:.2f}, avg-linkage). "
+            f"Sizes: {hist}{low_q_line}{big_line}"
         )
         self._show_current_cluster()
 
@@ -217,20 +328,52 @@ class FacesPanel(QWidget):
             self.cluster_label.setText("All clusters processed.")
             self._paint_side(None)
             return
-        cluster = self._cluster_queue[self._cluster_index]
+        meta = self._cluster_queue[self._cluster_index]
+        cluster = meta.face_ids
+        # Fix-up 2 item 7: order closest-to-centroid first so the "other"
+        # person in a mixed-sibling cluster collects at the tail — easy
+        # to Shift-select and split off.
+        emb_map = {
+            fid: np.asarray(self._face_index[fid].embedding, dtype=np.float32)
+            for fid in cluster
+            if fid in self._face_index and self._face_index[fid].embedding is not None
+        }
+        ordered = order_cluster_by_centroid_distance(cluster, emb_map) if emb_map else list(cluster)
+        # Persist the ordered face_ids back so subsequent actions (split,
+        # split-by-nearest) work on the same order George is looking at.
+        meta.face_ids = ordered
+
         thumbs_dir = self._settings.THUMBS_DIR / "faces"
-        for face_id in cluster:
+        for face_id in ordered:
             face = self._face_index.get(face_id)
-            item = QListWidgetItem(str(face_id))
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, face_id)
+            year_label = (
+                str(face.photo_capture_year)
+                if face and face.photo_capture_year else ""
+            )
+            item.setText(year_label)
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
             pix = _load_pixmap(thumbs_dir / f"{face_id}.jpg", THUMB_TILE_PX)
             if pix is not None:
                 item.setIcon(QIcon(pix))
-            item.setToolTip(f"face {face_id}\nphoto {face.photo_id if face else '?'}")
+            tt_bits = [f"face {face_id}"]
+            if face:
+                tt_bits.append(f"photo {face.photo_id}")
+                if face.confidence is not None:
+                    tt_bits.append(f"score {face.confidence:.2f}")
+                se = face.short_edge_px
+                if se is not None:
+                    tt_bits.append(f"short edge {int(se)}px")
+                if face.photo_capture_year:
+                    tt_bits.append(f"year {face.photo_capture_year}")
+            item.setToolTip("\n".join(tt_bits))
             self.grid.addItem(item)
+        split_note = " · split from a larger cluster" if meta.split_from_larger else ""
         self.cluster_label.setText(
             f"Cluster {self._cluster_index + 1} of {len(self._cluster_queue)} "
             f"— {len(cluster)} face{'s' if len(cluster) != 1 else ''}"
+            f"{split_note}"
         )
         self._paint_side(cluster)
 
@@ -267,6 +410,10 @@ class FacesPanel(QWidget):
     # --- actions ----------------------------------------------------------
 
     def _current_cluster(self) -> list[int] | None:
+        meta = self._current_meta()
+        return meta.face_ids if meta is not None else None
+
+    def _current_meta(self) -> ClusterMeta | None:
         if not self._cluster_queue or not (0 <= self._cluster_index < len(self._cluster_queue)):
             return None
         return self._cluster_queue[self._cluster_index]
@@ -349,9 +496,10 @@ class FacesPanel(QWidget):
         self._advance_cluster()
 
     def _split_selected(self) -> None:
-        cluster = self._current_cluster()
-        if cluster is None:
+        meta = self._current_meta()
+        if meta is None:
             return
+        cluster = meta.face_ids
         picked = set(self._selected_face_ids())
         if not picked or picked == set(cluster):
             QMessageBox.information(self, "Split",
@@ -361,8 +509,15 @@ class FacesPanel(QWidget):
         new_cluster = [fid for fid in cluster if fid in picked]
         # Replace current cluster with the "rest" and insert the new cluster
         # immediately after so George sees it next.
-        self._cluster_queue[self._cluster_index] = rest
-        self._cluster_queue.insert(self._cluster_index + 1, new_cluster)
+        meta.face_ids = rest
+        self._cluster_queue.insert(
+            self._cluster_index + 1,
+            ClusterMeta(
+                face_ids=new_cluster,
+                split_from_larger=True,
+                threshold_used=meta.threshold_used,
+            ),
+        )
         self._show_current_cluster()
 
     def _skip_cluster(self) -> None:
@@ -388,10 +543,10 @@ class FacesPanel(QWidget):
                 conn.rollback()
                 raise
         # Remove from current cluster in-place.
-        cluster = self._current_cluster()
-        if cluster is not None:
-            remaining = [fid for fid in cluster if fid not in set(picked)]
-            self._cluster_queue[self._cluster_index] = remaining
+        meta = self._current_meta()
+        if meta is not None:
+            remaining = [fid for fid in meta.face_ids if fid not in set(picked)]
+            meta.face_ids = remaining
             if not remaining:
                 self._advance_cluster()
                 return
@@ -404,6 +559,80 @@ class FacesPanel(QWidget):
         if item is None:
             return
         item.setSelected(not item.isSelected())
+
+    def _split_by_nearest_person(self) -> None:
+        """B key. For each face in the current cluster, assign to whichever
+        of the two nearest labelled people (measured against the cluster
+        centroid) it is closer to. Show a preview, George confirms."""
+        meta = self._current_meta()
+        if meta is None:
+            return
+        cluster = meta.face_ids
+        if len(cluster) < 2:
+            QMessageBox.information(self, "Split by nearest",
+                                    "Need at least two faces in the cluster.")
+            return
+        if len(self._people_means) < 2:
+            QMessageBox.information(self, "Split by nearest",
+                                    "Need at least two labelled people to split against.")
+            return
+
+        emb_map = {
+            fid: np.asarray(self._face_index[fid].embedding, dtype=np.float32)
+            for fid in cluster
+            if fid in self._face_index and self._face_index[fid].embedding is not None
+        }
+        if not emb_map:
+            return
+        centroid = np.mean(np.stack(list(emb_map.values())), axis=0)
+        two = nearest_two_people(centroid, self._people_means)
+        if len(two) < 2:
+            QMessageBox.information(self, "Split by nearest",
+                                    "Could not find two nearby people.")
+            return
+        (pid_a, dist_a), (pid_b, dist_b) = two
+        mean_a = self._people_means[pid_a]
+        mean_b = self._people_means[pid_b]
+
+        group_a: list[int] = []
+        group_b: list[int] = []
+        for fid in cluster:
+            e = emb_map.get(fid)
+            if e is None:
+                group_a.append(fid)  # can't decide — default to the closer overall
+                continue
+            en = e / max(float(np.linalg.norm(e)), 1e-9)
+            da = 1.0 - float(np.dot(en, mean_a / max(float(np.linalg.norm(mean_a)), 1e-9)))
+            db_ = 1.0 - float(np.dot(en, mean_b / max(float(np.linalg.norm(mean_b)), 1e-9)))
+            (group_a if da <= db_ else group_b).append(fid)
+
+        name_a = self._people_by_id[pid_a].display_name if pid_a in self._people_by_id else f"person {pid_a}"
+        name_b = self._people_by_id[pid_b].display_name if pid_b in self._people_by_id else f"person {pid_b}"
+        confirm = QMessageBox.question(
+            self, "Split by nearest person",
+            f"Assign {len(group_a)} face(s) to {name_a} (distance {dist_a:.3f}) "
+            f"and {len(group_b)} face(s) to {name_b} (distance {dist_b:.3f})?\n\n"
+            "Both groups will be committed to their respective people.",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                for fid in group_a:
+                    repo.assign_face(conn, face_id=fid, person_id=pid_a,
+                                     source="human", audit_reason="split_by_nearest_person")
+                for fid in group_b:
+                    repo.assign_face(conn, face_id=fid, person_id=pid_b,
+                                     source="human", audit_reason="split_by_nearest_person")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        for fid in cluster:
+            self._face_index.pop(fid, None)
+        self._advance_cluster()
 
     def _advance_cluster(self) -> None:
         self._cluster_index += 1
