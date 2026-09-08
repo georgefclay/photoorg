@@ -180,3 +180,110 @@ def test_health_absorbs_unreachable_service_without_raising():
     h = client.health()
     assert isinstance(h, HealthStatus)
     assert h.ok is False
+
+
+# ---- fix-up 1 -----------------------------------------------------------
+
+
+def test_health_token_ok_true_when_probe_accepts():
+    """Fix-up 1.1: /health passes AND authenticated probe doesn't 401
+    → token_ok=True."""
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _resp(200, {"model_name": "vlm-1"}),   # /health
+        _resp(404, "no such job"),             # /batch/inbox/_probe
+    ]
+    client = _client_with_session(session)
+    h = client.health()
+    assert h.ok is True
+    assert h.token_ok is True
+
+
+def test_health_token_ok_false_when_probe_401s():
+    """Fix-up 1.1: /health passes, probe 401s → token_ok=False (amber dot)."""
+    session = MagicMock(spec=requests.Session)
+    session.get.side_effect = [
+        _resp(200, {"model_name": "vlm-1"}),   # /health
+        _resp(401, "unauthorised"),            # /batch/inbox/_probe
+    ]
+    client = _client_with_session(session)
+    h = client.health()
+    assert h.ok is True
+    assert h.token_ok is False
+
+
+def test_results_after_swallows_404_as_empty():
+    """Fix-up 1.2: 404 on the results endpoint means "no results file yet"
+    — yield nothing, don't raise."""
+    class Resp404:
+        status_code = 404
+        def raise_for_status(self): pass
+        def iter_lines(self, decode_unicode=True):
+            return iter([])
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        request = MagicMock(method="GET"); url = "http://mock/x"; text = "no such job"
+
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = Resp404()
+    client = _client_with_session(session)
+    out = list(client.results_after("classify", after=0))
+    assert out == []
+
+
+def test_start_from_inbox_reads_only_first_line():
+    """Fix-up 1.3: POST /batch/{endpoint} streams NDJSON for the life of the
+    batch. The client must read exactly the header line and close the
+    connection — not wait for the whole body."""
+    lines_yielded: list[str] = []
+
+    class StreamResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def iter_lines(self, decode_unicode=True):
+            first = json.dumps({"job_id": "abc123", "endpoint": "classify",
+                                 "total": 500, "skipped": 0})
+            lines_yielded.append(first)
+            yield first
+            # Second line "never arrives" — simulate the streaming hang.
+            # If the client wrongly consumes past the header, the test
+            # times out here.
+            raise AssertionError(
+                "client tried to read past the header line — it must stop after the first line"
+            )
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        request = MagicMock(method="POST"); url = "http://mock/x"; text = ""
+
+    session = MagicMock(spec=requests.Session)
+    session.request.return_value = StreamResp()
+    client = _client_with_session(session)
+    result = client.start_from_inbox("classify", "classify")
+    assert result.accepted is True
+    assert result.raw["job_id"] == "abc123"
+    assert lines_yielded == [
+        json.dumps({"job_id": "abc123", "endpoint": "classify",
+                    "total": 500, "skipped": 0}),
+    ]
+    # And it did so over a streaming request.
+    call = session.request.call_args
+    assert call.kwargs.get("stream") is True
+
+
+def test_start_from_inbox_401_still_fatal():
+    """Retry semantics: 401 on the streaming POST is fatal, same as
+    everywhere else."""
+    class Resp401:
+        status_code = 401
+        def raise_for_status(self): pass
+        def iter_lines(self, decode_unicode=True):
+            return iter([])
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        request = MagicMock(method="POST"); url = "http://mock/x"; text = ""
+
+    session = MagicMock(spec=requests.Session)
+    session.request.return_value = Resp401()
+    client = _client_with_session(session)
+    with pytest.raises(FatalAuthError):
+        client.start_from_inbox("classify", "classify")

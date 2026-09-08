@@ -72,3 +72,14 @@ Minimal management inside Faces mode: create, edit names (given, middle, surname
 11. **Hand-over**: sequential, one uploader, queue order.
 
 GO.
+
+---
+
+## Phase 6 fix-up 1 — two small things seen on first run
+
+1. The health dot was green while every call returned 401 (health is unauthenticated). Make `health()` also do one authenticated no-op (e.g. `GET /batch/inbox/_probe`) and show **amber with "bad token"** when that fails. Also validate at startup: if `INFERENCE_TOKEN` is `CHANGEME` or empty, banner in the Jobs panel.
+2. `auto_collect` warns "HTTP 404: No results for job" for every job that has never been handed over. Treat 404 on results as "nothing yet" — debug log, not a warning — and skip jobs with no `job_runs` hand-over row.
+
+Commit: `Phase 6 fix-up 1: token health, quiet 404s`.
+
+3. **Hand-over read timeout.** `POST /batch/{endpoint}` with `from_inbox` streams NDJSON for the life of the batch; the client waited for the full body and hit `Read timed out` after 180 s even though the mini had started the job. Fix: open the request with `stream=True`, read the first line (job id / accepted count), record the hand-over, close the connection. Confirm via `/batch/results/{job}/summary` immediately after. Add a test with a mock server that never finishes streaming. Also: check `job_runs` for a hand-over row that was *not* written because of this timeout, and reconcile (the mini's summary is the source of truth for "handed over").

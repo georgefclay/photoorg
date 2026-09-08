@@ -73,7 +73,8 @@ class ServiceUnavailable(InferenceError):
 
 @dataclass(frozen=True)
 class HealthStatus:
-    ok: bool
+    ok: bool               # /health reachable and returned 200
+    token_ok: bool         # authenticated probe did not 401 (True if unknown)
     model_name: str | None
     faces_model: str | None
     memory_free_gb: float | None

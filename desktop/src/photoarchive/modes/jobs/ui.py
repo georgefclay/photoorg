@@ -27,9 +27,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...config import load as load_settings
 from ...inference_client import QUEUE_ORDER, shared
 from ...jobs import all_jobs, get_job
-from ...jobs.base import JobContext, collect, hand_over
+from ...jobs.base import JobContext, collect, hand_over, has_handover, reconcile_handovers
 from ...workers import BackgroundJob, CancelToken
 from . import stats as stats_mod
 
@@ -48,6 +49,14 @@ class JobsPanel(QWidget):
         self._active_worker: BackgroundJob | None = None
 
         outer = QVBoxLayout(self)
+
+        # Startup banner — flags the two common misconfigurations before a
+        # single call goes out. Populated in _refresh_token_banner().
+        self.banner = QLabel("")
+        self.banner.setWordWrap(True)
+        self.banner.setVisible(False)
+        outer.addWidget(self.banner)
+        self._refresh_token_banner()
 
         # Header row: health indicator + Run-all / Collect-now buttons.
         header = QHBoxLayout()
@@ -140,6 +149,7 @@ class JobsPanel(QWidget):
         # Fire once after the event loop is up.
         QTimer.singleShot(0, self._refresh_health)
         QTimer.singleShot(0, self._refresh_local_stats)
+        QTimer.singleShot(200, self._reconcile_handovers_bg)
         QTimer.singleShot(500, self._auto_collect)
 
     # --- health --------------------------------------------------------------
@@ -161,12 +171,15 @@ class JobsPanel(QWidget):
 
     def _on_health(self, summary: dict[str, Any]) -> None:
         if not summary.get("ok"):
-            self._paint_health(False, summary.get("error", "down"))
+            self._paint_health("red", summary.get("error", "down"))
             return
         hs = summary["health"]
+        if not hs.token_ok:
+            self._paint_health("amber", "bad token (401 on authenticated probe)")
+            return
         name = hs.model_name or "unknown"
         blackout = " · BLACKOUT" if hs.blackout_active else ""
-        self._paint_health(True, f"{name}{blackout}")
+        self._paint_health("green", f"{name}{blackout}")
         if name and self.model_combo.findText(name) < 0:
             self.model_combo.addItem(name)
         if not self.model_combo.currentText():
@@ -183,17 +196,64 @@ class JobsPanel(QWidget):
                 QTableWidgetItem("BLACKOUT" if hs.blackout_active else "off"),
             )
 
-    def _paint_health(self, ok: bool, label: str) -> None:
+    def _paint_health(self, state: str, label: str) -> None:
+        """state ∈ 'green' (reachable + token accepted) | 'amber' (reachable
+        but token rejected) | 'red' (unreachable / other error)."""
+        colour = {
+            "green": "#2fbf2f",
+            "amber": "#e0a020",
+            "red":   "#d43f3f",
+        }.get(state, "#d43f3f")
         pm = QPixmap(14, 14)
         pm.fill(Qt.transparent)
         from PySide6.QtGui import QPainter
         p = QPainter(pm)
-        p.setBrush(QColor("#2fbf2f") if ok else QColor("#d43f3f"))
+        p.setBrush(QColor(colour))
         p.setPen(Qt.NoPen)
         p.drawEllipse(0, 0, 14, 14)
         p.end()
         self.health_dot.setPixmap(pm)
         self.health_label.setText(f"Inference: {label}")
+
+    def _reconcile_handovers_bg(self) -> None:
+        def _target(progress_cb, cancel_token):
+            try:
+                return {"result": reconcile_handovers(shared.client())}
+            except Exception as e:
+                return {"error": str(e)}
+        job = BackgroundJob(_target)
+        def _on_done(summary):
+            outcomes = summary.get("result") or {}
+            promoted = [k for k, v in outcomes.items() if v == "promoted"]
+            if promoted:
+                log.info("reconciled hand-overs from mini summary: %s", promoted)
+                self._refresh_local_stats()
+        job.signals.finished.connect(_on_done)
+        job.signals.failed.connect(lambda tb: log.debug("reconcile: %s", tb))
+        self._reconcile_worker = job
+        job.start()
+
+    def _refresh_token_banner(self) -> None:
+        try:
+            settings = load_settings()
+        except Exception as e:
+            self.banner.setStyleSheet("color: white; background: #d43f3f; padding: 6px")
+            self.banner.setText(f"Configuration error: {e}")
+            self.banner.setVisible(True)
+            return
+        token = (settings.INFERENCE_TOKEN or "").strip()
+        if not token or token == "CHANGEME":
+            self.banner.setStyleSheet(
+                "color: black; background: #ffe08a; padding: 6px; font-weight: bold"
+            )
+            self.banner.setText(
+                "INFERENCE_TOKEN is not set (still 'CHANGEME'). "
+                "Copy the value from the Mac mini's inference/.env into "
+                "desktop/.env and restart the app."
+            )
+            self.banner.setVisible(True)
+        else:
+            self.banner.setVisible(False)
 
     # --- local stats ---------------------------------------------------------
 
@@ -302,6 +362,10 @@ class JobsPanel(QWidget):
             for name in QUEUE_ORDER:
                 if cancel_token.is_set():
                     break
+                if not has_handover(name):
+                    log.debug("auto_collect: skipping %s (no hand-over yet)", name)
+                    summaries.append({"job": name, "skipped": "no_handover"})
+                    continue
                 try:
                     job = get_job(name)
                     s = collect(job, ctx, progress_cb=progress_cb, sweep_when_done=sweep)

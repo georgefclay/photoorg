@@ -54,7 +54,10 @@ class LanInferenceClient(InferenceClient):
     # --- public API -----------------------------------------------------------
 
     def health(self) -> HealthStatus:
-        # No token needed for /health (see README).
+        # /health itself is unauthenticated (see README) — a green dot
+        # while the token is wrong is the exact case that made fix-up 1
+        # necessary, so combine the anonymous check with an authenticated
+        # no-op probe and expose `token_ok` separately.
         try:
             r = self._session.get(
                 f"{self._base_url}/health",
@@ -62,19 +65,22 @@ class LanInferenceClient(InferenceClient):
             )
         except requests.RequestException as e:
             return HealthStatus(
-                ok=False, model_name=None, faces_model=None,
+                ok=False, token_ok=True,
+                model_name=None, faces_model=None,
                 memory_free_gb=None, inbox={}, blackout_active=False,
                 blackout_until=None, raw={"error": str(e)},
             )
         if r.status_code != 200:
             return HealthStatus(
-                ok=False, model_name=None, faces_model=None,
+                ok=False, token_ok=True,
+                model_name=None, faces_model=None,
                 memory_free_gb=None, inbox={}, blackout_active=False,
                 blackout_until=None, raw={"status": r.status_code, "body": r.text},
             )
         body = r.json()
         return HealthStatus(
             ok=True,
+            token_ok=self._probe_token(),
             model_name=_get(body, "vlm", "model") or body.get("model_name"),
             faces_model=_get(body, "faces", "model") or body.get("faces_model"),
             memory_free_gb=_get(body, "memory", "free_gb"),
@@ -83,6 +89,20 @@ class LanInferenceClient(InferenceClient):
             blackout_until=_get(body, "blackout", "until"),
             raw=body,
         )
+
+    def _probe_token(self) -> bool:
+        """Cheap authenticated call — any 2xx/4xx that isn't 401 counts as
+        "the token was accepted". Connection errors during the probe don't
+        say anything about the token, so treat as True."""
+        try:
+            r = self._session.get(
+                f"{self._base_url}/batch/inbox/_probe",
+                headers=self._headers(),
+                timeout=self._health_timeout_s,
+            )
+        except requests.RequestException:
+            return True
+        return r.status_code != 401
 
     def call_endpoint(
         self,
@@ -142,16 +162,26 @@ class LanInferenceClient(InferenceClient):
         )
 
     def start_from_inbox(self, job_name: str, endpoint: str) -> BatchStartResult:
-        body = self._request_json(
-            "POST",
-            f"/batch/{endpoint}",
+        # `POST /batch/{endpoint}` with from_inbox streams NDJSON for the
+        # life of the batch: one header line, then one line per item, then
+        # a summary line. The header lands within milliseconds. Reading
+        # the whole body would block for hours, so we stream the response,
+        # read only the first non-blank line, and close (fix-up 1).
+        body = self._stream_first_json(
+            method="POST",
+            path=f"/batch/{endpoint}",
             json_body={"job_name": job_name, "from_inbox": True},
             timeout=self._health_timeout_s,
+        )
+        accepted = (
+            "job_id" in body
+            or bool(body.get("accepted", False))
+            or body.get("total") is not None
         )
         return BatchStartResult(
             job_name=job_name,
             endpoint=endpoint,
-            accepted=bool(body.get("accepted", True)),
+            accepted=bool(accepted),
             already_running=bool(body.get("already_running", False)),
             raw=body,
         )
@@ -164,6 +194,12 @@ class LanInferenceClient(InferenceClient):
         with self._session.get(
             url, params=params, headers=headers, stream=True, timeout=60.0
         ) as r:
+            if r.status_code == 404:
+                # The service returns 404 for a job that has never been
+                # handed over. That's "nothing to collect yet", not an
+                # error — swallow quietly (fix-up 1).
+                log.debug("results_after: no results file yet for %s", job_name)
+                return
             self._raise_for_status(r)
             line_no = after
             for raw_line in r.iter_lines(decode_unicode=True):
@@ -296,6 +332,65 @@ class LanInferenceClient(InferenceClient):
                 ) from e
         # unreachable
         raise ServiceUnavailable(f"{method} {url}: exhausted retries; last error {last_exc}")
+
+    def _stream_first_json(
+        self,
+        *,
+        method: str,
+        path: str,
+        json_body: Any = None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Open a streaming request, parse the first non-blank NDJSON line,
+        close the response. Retries on connection errors / 503; 401 fatal."""
+        url = f"{self._base_url}{path}"
+        headers = self._headers()
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                with self._session.request(
+                    method, url,
+                    headers=headers,
+                    json=json_body,
+                    stream=True,
+                    timeout=timeout,
+                ) as r:
+                    if r.status_code == 401:
+                        raise FatalAuthError("401 from inference service: bad token")
+                    if r.status_code in RETRIABLE_STATUS:
+                        if attempt >= self._max_retries:
+                            raise ServiceUnavailable(
+                                f"{method} {url}: HTTP {r.status_code} after {attempt + 1} attempts"
+                            )
+                        # fall through to sleep+retry
+                    elif not (200 <= r.status_code < 300):
+                        # Best-effort surface a bit of the body for context.
+                        try:
+                            body_snippet = next(r.iter_lines(decode_unicode=True), "")
+                        except Exception:
+                            body_snippet = ""
+                        raise InferenceError(
+                            f"{method} {url}: HTTP {r.status_code}: {body_snippet[:200]}"
+                        )
+                    else:
+                        for raw_line in r.iter_lines(decode_unicode=True):
+                            if not raw_line:
+                                continue
+                            try:
+                                return json.loads(raw_line)
+                            except json.JSONDecodeError as e:
+                                raise InferenceError(
+                                    f"{method} {url}: first line not JSON: {raw_line[:200]!r}"
+                                ) from e
+                        return {}
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_exc = e
+                if attempt >= self._max_retries:
+                    raise ServiceUnavailable(f"{method} {url}: {e}") from e
+            self._sleep(attempt)
+        raise ServiceUnavailable(
+            f"{method} {url}: exhausted retries; last error {last_exc}"
+        )
 
     def _raise_for_status(self, r: requests.Response) -> None:
         if r.status_code == 401:

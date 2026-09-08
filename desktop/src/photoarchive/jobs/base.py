@@ -179,6 +179,7 @@ def hand_over(
     uploaded = 0
     error: str | None = None
     started = False
+    cancelled = False
     try:
         for chunk_index, chunk in enumerate(_chunks(items, ctx.chunk_size), start=1):
             if ctok.is_set():
@@ -202,18 +203,35 @@ def hand_over(
             "started": started, "already_running": start.already_running,
         })
     except Cancelled:
+        cancelled = True
         error = "cancelled"
         raise
     except Exception as e:
         log.exception("hand_over: %s failed", job.name)
         error = str(e)
-        raise
+        # Fix-up 1: `start_from_inbox` used to timeout while the mini had
+        # already started the job. If the mini's /summary now says there's
+        # data for this job, treat it as handed over.
+        try:
+            summary = ctx.client.summary(job.name)
+            if (summary.total or 0) > 0 or summary.running:
+                log.info(
+                    "hand_over: %s start_from_inbox raised %r, but mini "
+                    "/summary reports total=%s running=%s — reconciling as handed_over",
+                    job.name, e, summary.total, summary.running,
+                )
+                error = None
+                started = True
+        except Exception as reconcile_err:
+            log.debug("hand_over: reconcile failed for %s: %s", job.name, reconcile_err)
+        if error is not None:
+            raise
     finally:
         with dbmod.connection() as conn:
             conn.autocommit = True
             dbmod.finish_job_run(
                 conn, job_run_id=job_run_id,
-                status="failed" if error else "handed_over",
+                status="cancelled" if cancelled else ("failed" if error else "handed_over"),
                 stats={"selected": total, "uploaded": uploaded, "started": started, "error": error},
             )
 
@@ -334,6 +352,91 @@ def _load_cursor(job_name: str) -> int:
             "select line_no from job_cursors where job_name = %s", (job_name,)
         ).fetchone()
     return int(row[0]) if row else 0
+
+
+def has_handover(job_name: str) -> bool:
+    """True if this job has any hand-over row in job_runs (any status). The
+    auto-collect loop uses this to skip jobs that were never handed over
+    (fix-up 1)."""
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        row = conn.execute(
+            "select 1 from job_runs where job_name = %s limit 1", (job_name,)
+        ).fetchone()
+    return row is not None
+
+
+def has_successful_handover(job_name: str) -> bool:
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        row = conn.execute(
+            """
+            select 1 from job_runs
+            where job_name = %s and status = 'handed_over'
+            limit 1
+            """,
+            (job_name,),
+        ).fetchone()
+    return row is not None
+
+
+def reconcile_handovers(
+    client,
+    *,
+    job_names: list[str] | None = None,
+) -> dict[str, str]:
+    """Fix-up 1: `POST /batch/{endpoint}` used to time out reading the
+    streaming body — the mini had started the job but the client wrote
+    `status='failed'` to job_runs. The mini's `/summary` is the source of
+    truth for "handed over": if it reports items for a job whose local
+    row is failed, upgrade the row.
+
+    Also promotes jobs the mini is running that we never wrote a row for
+    at all (should not happen with the streaming fix, but is defensive).
+
+    Returns {job_name: outcome} where outcome is one of 'promoted',
+    'ok' (already handed_over locally), 'no_data' (mini has nothing),
+    'unreachable' (couldn't ask the mini), or 'skipped'.
+    """
+    from ..inference_client import QUEUE_ORDER
+    names = job_names or list(QUEUE_ORDER)
+    out: dict[str, str] = {}
+    for name in names:
+        try:
+            summary = client.summary(name)
+        except Exception as e:
+            log.debug("reconcile: /summary(%s) unreachable: %s", name, e)
+            out[name] = "unreachable"
+            continue
+        mini_has_data = (summary.total or 0) > 0 or summary.running
+        if not mini_has_data:
+            out[name] = "no_data"
+            continue
+        if has_successful_handover(name):
+            out[name] = "ok"
+            continue
+        # Mini has data but no local handed_over row — write a synthetic one.
+        with dbmod.connection() as conn:
+            conn.autocommit = True
+            dbmod.start_job_run(
+                conn, job_name=name,
+                params={"phase": "reconciled_from_summary",
+                        "mini_total": summary.total,
+                        "mini_done": summary.done,
+                        "mini_running": summary.running},
+            )
+            row = conn.execute(
+                "select id from job_runs where job_name = %s order by id desc limit 1",
+                (name,),
+            ).fetchone()
+            if row is not None:
+                dbmod.finish_job_run(
+                    conn, job_run_id=int(row[0]),
+                    status="handed_over",
+                    stats={"source": "reconcile_handovers"},
+                )
+        out[name] = "promoted"
+    return out
 
 
 def _advance_cursor(conn: psycopg.Connection, job_name: str, line_no: int) -> None:
