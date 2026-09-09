@@ -77,6 +77,7 @@ class PhotoCanvas(QWidget):
         self._context: repo.PhotoContext | None = None
         self._current_face_id: int | None = None
         self._overlays: list[_Overlay] = []
+        self._load_error: str | None = None
 
     def set_photo(
         self,
@@ -86,9 +87,21 @@ class PhotoCanvas(QWidget):
         self._context = context
         self._current_face_id = current_face_id
         self._image = None
+        self._load_error: str | None = None
         if context.working_path:
             path = Path(context.working_path)
-            if path.exists():
+            abs_path = str(path.resolve()) if path.exists() else str(path)
+            if not path.exists():
+                # Fix-up 7: never report "missing" without the exact
+                # path we tried, so the log dock (and the banner) makes
+                # `tools/check_working_files.py` an obvious next step.
+                log.warning(
+                    "PhotoCanvas: working file missing for photo %d at %s "
+                    "(consider `python -m photoarchive.tools.check_working_files`)",
+                    context.photo_id, abs_path,
+                )
+                self._load_error = f"working file missing:\n{abs_path}"
+            else:
                 try:
                     with Image.open(path) as im:
                         im = ImageOps.exif_transpose(im)
@@ -101,7 +114,8 @@ class PhotoCanvas(QWidget):
                         ).copy()
                         self._image_w, self._image_h = im.width, im.height
                 except Exception as e:
-                    log.warning("PhotoCanvas: could not load %s: %s", path, e)
+                    log.warning("PhotoCanvas: could not load %s: %s", abs_path, e)
+                    self._load_error = f"could not load working file:\n{abs_path}\n{e}"
         # If we couldn't read pixel dims from the file, fall back to the DB row.
         if self._image is None:
             self._image_w = context.width or 1
@@ -133,10 +147,14 @@ class PhotoCanvas(QWidget):
         else:
             p.setPen(QPen(QColor("#666")))
             p.drawRect(ox, oy, draw_w, draw_h)
+            banner = self._load_error or (
+                f"Working file missing:\n{self._context.working_path}"
+                if self._context else "No preview."
+            )
             p.drawText(
                 QRect(ox, oy, draw_w, draw_h),
-                Qt.AlignCenter,
-                f"Working file missing:\n{self._context.working_path}",
+                Qt.AlignCenter | Qt.TextWordWrap,
+                banner,
             )
 
         # Overlays

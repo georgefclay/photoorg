@@ -149,3 +149,24 @@ George's example: a portrait phone photo (girl beside a statue). The face crop a
 4. Test: synthetic image with orientation 6 → detection on transposed image → box drawn on the transposed image lands on the synthetic face.
 
 Commit: `Phase 6 fix-up 6: EXIF orientation for face boxes`.
+
+---
+
+## Phase 6 fix-up 7 — preview says "working file missing" after repair_face_boxes
+
+Right after running `repair_face_boxes`, the full-photo preview draws the boxes but shows "working file missing" instead of the image. Before the repair it showed the photo.
+
+1. Diagnose on one affected photo: `photos.working_path` in the DB, whether that path exists on disk, `quarantine_path`, `is_deleted`, `triage_status`, and the exact path the preview tried to open (log it). Check whether the repair tool touched `working_path` (it must not have), whether it ran with a different `.env`/cwd so `WORKING_DIR` resolved differently, or whether the preview builds its path from `photos.width/height`/orientation in a way that broke when dims were swapped. Also check whether affected photos are exactly the orientation ≠ 1 set.
+2. Fix the root cause. If any DB rows were altered wrongly by the repair, repair them from `photo_masters`/the file on disk and say how many.
+3. The preview must never report "missing" without logging the absolute path it tried; put the path in the banner too.
+4. Add a test: repair tool leaves `working_path` untouched and the file resolvable.
+
+Commit: `Phase 6 fix-up 7: preview working-file resolution after repair`.
+
+Update: George reports it is **every** photo, not only rotated ones. So it is not the repair data; look at the preview's image-loading path that fix-up 6 changed (`exif_transpose` before drawing / `probe_image`). Likely an exception on open (or a wrong `WORKING_DIR` resolution) being caught and reported as "working file missing". Reproduce with the offscreen UI test on a known-good photo; assert the pane shows pixels, not the banner.
+
+Correction: it is per-photo, not universal — one cluster all fine, another ~75% "missing". Correlate the failing set with `photos.orientation`, `source_root`, mime (HEIC?), and file extension before anything else; the likely split is digital photos with orientation ≠ 1 (or HEIC needing pillow-heif in the preview's loader) vs. scans. Report the correlation table, then fix.
+
+Second correction from George: camera photos always work; **scans** fail, most of them in some clusters. Prime suspect: scans that were held in `_staging/` as proposed backs in Phase 2 and later released (rebuild drops, rejections, fix-up 1's "folded back into photos"). Check for `photos.working_path` still pointing under `_staging/` while the file was moved to the final name, or the reverse, or the staging file swept. Run an integrity scan over ALL photos: `working_path` exists on disk? If not, does `WORKING_DIR/{id:08d}_{sha[:8]}.{ext}` exist, or `_staging/{sha}.{ext}`, or the master? Report counts by category and repair `working_path` where the file is found under a known alternative name (audit row per repair); list any truly missing and re-derive them from the master (masters are read-only — copy, never move). Add this integrity scan as `tools/check_working_files.py` and run it in the Phase 9 push pre-flight.
+
+Timing clue: the face crops for these photos exist (cut from the working file when detect_faces results were collected), so the working file was resolvable at collect time. Whatever broke `working_path` or moved the file happened **after** that — check the audit log and file mtimes for those photos between the detect_faces collect and now (Phase 2 fix-up 5/6 accept/reject paths, dedupe resolve, repair_face_boxes, or the review grid's reject-as-normal path).

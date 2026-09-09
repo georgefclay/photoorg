@@ -234,6 +234,18 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   stored bbox by (H_raw/W_raw, W_raw/H_raw)).
   `python -m photoarchive.tools.diagnose_face_box PHOTO_ID` prints
   everything relevant for one photo in one report.
+- **Working-file integrity** (fix-up 7). Some scans went through
+  `_staging/` in Phase 2 and later got released via rebuilds /
+  rejections, leaving `photos.working_path` stale. Every non-deleted
+  photo's `working_path` should be `WORKING_DIR/{id:08d}_{sha[:8]}.{ext}`
+  and the file must exist. `python -m photoarchive.tools.check_working_files`
+  scans every photo; for anything missing it looks under the standard
+  name (updates the pointer only), then under `_staging/{sha}.{ext}`
+  (moves into place, bumps `file_version`), then copies from the
+  preferred master as a last resort (masters are read-only — copy,
+  never move). Audit row per repair; truly-missing photo ids are
+  listed. `--dry-run` for a report. Run this in the Phase 9 push
+  pre-flight and after any `_staging/` reshuffle.
 - **"Not a face"** soft-deletes the row (`is_deleted=true`, `deleted_at`,
   `delete_reason`) and writes an audit row. Every selector filters out
   deleted rows.
