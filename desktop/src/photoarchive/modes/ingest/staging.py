@@ -41,8 +41,11 @@ def insert_photo_and_master(
     sha256_hex: str,
     phash: str | None,
     dhash: str | None,
-    width: int | None,
+    width: int | None,             # DISPLAY dims — what photos.width/height mean since fix-up 6
     height: int | None,
+    orientation: int | None = None,
+    master_width: int | None = None,   # RAW file dims — what photo_masters carries
+    master_height: int | None = None,
     mime: str,
     file_size: int | None,
     is_scan: bool,
@@ -63,22 +66,35 @@ def insert_photo_and_master(
 ) -> tuple[int, int]:
     """Insert photos + photo_masters (preferred=true). working_path is set
     later by update_photo_working_path once the file has been copied.
-    Returns (photo_id, photo_master_id)."""
+    Returns (photo_id, photo_master_id).
+
+    Fix-up 6: `width`/`height` are DISPLAY dims (post EXIF-transpose) —
+    this is what the face writer and preview consume. `master_width`/
+    `master_height` (default to display) are the raw file dims stored on
+    the photo_masters row. `orientation` is the EXIF value 1..8 (or None).
+    """
+    if master_width is None:
+        master_width = width
+    if master_height is None:
+        master_height = height
     row = conn.execute(
         """
         insert into photos
-          (working_path, sha256, phash, dhash, width, height, mime, file_size,
+          (working_path, sha256, phash, dhash, width, height, orientation,
+           mime, file_size,
            is_scan, capture_date, capture_date_precision, capture_date_confirmed,
            exif_taken_at, exif_camera, exif_gps_lat, exif_gps_lon,
            source_root, source_folder, source_filename, scan_batch, scan_sequence)
-        values (%s, %s, %s, %s, %s, %s, %s, %s,
+        values (%s, %s, %s, %s, %s, %s, %s,
+                %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s, %s)
         returning id
         """,
         (
-            None, sha256_hex, phash, dhash, width, height, mime, file_size,
+            None, sha256_hex, phash, dhash, width, height, orientation,
+            mime, file_size,
             is_scan, capture_date, capture_date_precision, capture_date_confirmed,
             exif_taken_at, exif_camera, exif_gps_lat, exif_gps_lon,
             source_root, source_folder, source_filename, scan_batch, scan_sequence,
@@ -93,7 +109,7 @@ def insert_photo_and_master(
         values (%s, %s, %s, %s, %s, %s, %s, %s, true)
         returning id
         """,
-        (photo_id, master_path, sha256_hex, width, height, dpi, mime, file_size),
+        (photo_id, master_path, sha256_hex, master_width, master_height, dpi, mime, file_size),
     ).fetchone()
     master_id: int = row[0]
     return photo_id, master_id

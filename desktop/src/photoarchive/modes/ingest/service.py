@@ -214,12 +214,17 @@ def _process_file(
             raise
 
     # Decode + features (outside DB txn; we hold no locks yet).
+    from .image_io import probe_image
     with open_image(f.master_path) as img:
         img.load()
         phash, dhash = perceptual_hashes(img)
-        width, height = img.size
+        dims = probe_image(img)
         back_feat = back_detect.analyse(img) if root.kind == "scan" else None
         # Re-open for thumb (some formats disallow re-use after transpose).
+    # Fix-up 6: photos.width/height are DISPLAY dims (post EXIF-transpose)
+    # so the face writer, preview, and per-photo view all read the same
+    # coordinate frame. Master row keeps the raw file dims.
+    width, height = dims.display_width, dims.display_height
     exif = read_exif(f.master_path)
 
     file_size = f.master_path.stat().st_size
@@ -278,7 +283,7 @@ def _process_file(
 
     _commit_normal(
         settings=settings, root=root, f=f, sha=sha,
-        phash=phash, dhash=dhash, width=width, height=height,
+        phash=phash, dhash=dhash, width=width, height=height, dims=dims,
         file_size=file_size, mime=mime, exif=exif,
         back_aspect=(back_feat.aspect_ratio if back_feat else (width / max(height, 1))),
         counts=counts, job_run_id=job_run_id, per_folder_prev=per_folder_prev,
@@ -286,7 +291,7 @@ def _process_file(
 
 
 def _commit_normal(
-    *, settings, root, f, sha, phash, dhash, width, height, file_size, mime, exif,
+    *, settings, root, f, sha, phash, dhash, width, height, dims, file_size, mime, exif,
     back_aspect, counts, job_run_id, per_folder_prev,
 ) -> None:
     is_scan_flag = (root.kind == "scan") or (
@@ -309,7 +314,10 @@ def _commit_normal(
             photo_id, master_id = staging.insert_photo_and_master(
                 conn,
                 sha256_hex=sha, phash=phash, dhash=dhash,
-                width=width, height=height, mime=mime, file_size=file_size,
+                width=width, height=height,
+                orientation=exif.orientation,
+                master_width=dims.master_width, master_height=dims.master_height,
+                mime=mime, file_size=file_size,
                 is_scan=is_scan_flag,
                 capture_date=capture_date_val,
                 capture_date_precision=precision,

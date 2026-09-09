@@ -221,6 +221,19 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   if held > 300 ms); Space-tap locks it open. Clicking another face in
   the preview jumps to that face's cluster (unlabelled) or opens the
   person editor (labelled).
+- **Face coordinate frame** (fix-up 6). Every face bbox in `faces.bbox`
+  is in the EXIF-transposed (display) orientation of the working copy
+  at full resolution. `photos.width/height` are display dims;
+  `photo_masters.width/height` are the raw file dims. Ingest reads
+  EXIF via `image_io.probe_image()` and stores `photos.orientation`
+  (1..8). Client-side downscale, face-crop generation, and the preview
+  all `ImageOps.exif_transpose` before drawing so coordinates match.
+  Pre-fix-up-6 rows are repaired by
+  `python -m photoarchive.tools.repair_face_boxes`
+  (backfills orientation, swaps dims for {5,6,7,8}, and rescales every
+  stored bbox by (H_raw/W_raw, W_raw/H_raw)).
+  `python -m photoarchive.tools.diagnose_face_box PHOTO_ID` prints
+  everything relevant for one photo in one report.
 - **"Not a face"** soft-deletes the row (`is_deleted=true`, `deleted_at`,
   `delete_reason`) and writes an audit row. Every selector filters out
   deleted rows.

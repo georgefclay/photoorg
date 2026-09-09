@@ -381,12 +381,12 @@ def reject_pairing(
             # Insert as a plain scan photo — we already have sha and metadata.
             # Read master details fresh (dimensions) via Pillow on the staging
             # copy so we don't touch the master again.
-            from .image_io import mime_for_ext, open_image
+            from .image_io import mime_for_ext, open_image, probe_image
             from .hasher import perceptual_hashes
             ext = Path(back_path).suffix.lstrip(".").lower()
             with open_image(Path(staging_wpath)) as img:
                 img.load()
-                width, height = img.size
+                dims = probe_image(img)
                 phash, dhash = perceptual_hashes(img)
             file_size = Path(back_path).stat().st_size
             mime = mime_for_ext(ext)
@@ -394,7 +394,10 @@ def reject_pairing(
             top = folder.split("/", 1)[0] if folder else None
             photo_id, _ = staging.insert_photo_and_master(
                 conn, sha256_hex=sha, phash=phash, dhash=dhash,
-                width=width, height=height, mime=mime, file_size=file_size,
+                width=dims.display_width, height=dims.display_height,
+                orientation=dims.orientation,
+                master_width=dims.master_width, master_height=dims.master_height,
+                mime=mime, file_size=file_size,
                 is_scan=True,
                 capture_date=None, capture_date_precision="unknown",
                 capture_date_confirmed=False,
@@ -577,14 +580,18 @@ def reject_rescan(
                 raise ValueError(f"rescan {rescan_id} is {status}, not pending")
 
             from .hasher import perceptual_hashes
-            from .image_io import open_image
+            from .image_io import open_image, probe_image
             with open_image(Path(staging_wpath)) as img:
                 img.load()
                 phash, dhash = perceptual_hashes(img)
+                dims = probe_image(img)
 
             photo_id, _ = staging.insert_photo_and_master(
                 conn, sha256_hex=sha, phash=phash, dhash=dhash,
-                width=w, height=h, mime=mime, file_size=size,
+                width=dims.display_width, height=dims.display_height,
+                orientation=dims.orientation,
+                master_width=dims.master_width, master_height=dims.master_height,
+                mime=mime, file_size=size,
                 is_scan=True,
                 capture_date=None, capture_date_precision="unknown",
                 capture_date_confirmed=False,

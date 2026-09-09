@@ -136,3 +136,16 @@ In the cluster grid and the person view, a face crop is often not enough to deci
 4. The same preview is reachable from the per-photo view and the Person view.
 
 Commit: `Phase 6 fix-up 5: full-photo preview from faces`.
+
+---
+
+## Phase 6 fix-up 6 — face boxes land in the wrong place on some photos
+
+George's example: a portrait phone photo (girl beside a statue). The face crop and the preview outline are on the statue's collar; the face is lower-left. Clustering was still correct, so the mini saw the right pixels — only the box mapping back to working-copy coordinates is wrong. Several photos show this; all are likely phone photos with EXIF orientation 6/8 (stored landscape, displayed portrait).
+
+1. **Diagnose on this photo.** Print: EXIF orientation tag of the working copy; raw pixel dims; dims after `ImageOps.exif_transpose`; what the client sent (transposed or raw, and at what edge); `image_w/image_h` the service returned; the stored bbox; the bbox the preview draws; how the thumbnail/preview load the image (transposed or not). One of these disagrees.
+2. **One rule everywhere:** all face coordinates are in the **EXIF-transposed (display) orientation** of the working copy at full resolution. Client: `exif_transpose` before downscale and record the transposed dims; scale boxes back using those. Crops, preview, and per-photo view: `exif_transpose` before drawing. Store `photos.orientation` (the EXIF value, migration) so nothing has to re-read EXIF later.
+3. **Repair existing rows.** For every photo with orientation ≠ 1 that has faces, recompute the bbox from the raw box under the known transform (do not re-run detection) and regenerate the face crops. Report how many photos/faces were fixed. If the raw box cannot be recovered from what was stored, re-queue those photos for `detect_faces` (they are cheap).
+4. Test: synthetic image with orientation 6 → detection on transposed image → box drawn on the transposed image lands on the synthetic face.
+
+Commit: `Phase 6 fix-up 6: EXIF orientation for face boxes`.
