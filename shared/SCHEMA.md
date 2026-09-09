@@ -23,7 +23,7 @@ The rule that governs the whole schema:
 
 ### People, names, relationships
 
-- **`people`** — one row per person. `given_name`, `middle_name`, `surname`, `maiden_name`, `nickname`, `birth_year`, `death_year`, `notes`, `is_deleted`. `display_name` is trigger-maintained from the parts: e.g. `Margaret "Peggy" Clay (née Schmidt)`.
+- **`people`** — one row per person. `given_name`, `middle_name`, `surname`, `maiden_name`, `nickname`, `suffix` (Jr./II/III…, Phase 6 fix-up 4), `birth_year`, `death_year`, `notes`, `is_deleted`. `display_name` is trigger-maintained from the parts: e.g. `Margaret "Peggy" Clay (née Schmidt)`, `George Clay Jr.`, `John "Jack" Smith III`.
 - **`person_name_variants`** — hand-curated aliases per person (nickname / misspelling / alternate_spelling). Unique `(person_id, lower(variant))`; GIN trigram index on `variant` for fuzzy match.
 - **`relationships`** — pairwise, typed `parent|spouse|sibling`. Check `person_a_id <> person_b_id`; unique on `(person_a_id, person_b_id, type)`. Grandparent / cousin are derived by traversal at query time, never stored.
 - **`nickname_dictionary`** — canonical→variant pairs shared across everyone (Rick→Richard, Peggy→Margaret, …). Populated from `seed/nicknames.csv` (Apache-2.0 list from carltonnorthern/nicknames). Phase 11 search joins against this; it is NOT per-person data.

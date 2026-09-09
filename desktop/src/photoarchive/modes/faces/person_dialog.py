@@ -29,6 +29,9 @@ class PersonDialog(QDialog):
         self.given = QLineEdit(existing.given_name if existing else "")
         self.middle = QLineEdit(existing.middle_name if existing else "")
         self.surname = QLineEdit(existing.surname if existing else "")
+        # Fix-up 4: name suffix (Jr./II/III), between surname and maiden.
+        self.suffix = QLineEdit(existing.suffix if existing else "")
+        self.suffix.setPlaceholderText("Jr., II, III…")
         self.maiden = QLineEdit(existing.maiden_name if existing else "")
         self.nickname = QLineEdit(existing.nickname if existing else "")
         self.birth = QSpinBox()
@@ -45,6 +48,7 @@ class PersonDialog(QDialog):
         form.addRow("Given", self.given)
         form.addRow("Middle", self.middle)
         form.addRow("Surname", self.surname)
+        form.addRow("Suffix", self.suffix)
         form.addRow("Maiden", self.maiden)
         form.addRow("Nickname", self.nickname)
         form.addRow("Birth year", self.birth)
@@ -78,6 +82,7 @@ class PersonDialog(QDialog):
             "given_name": _txt(self.given),
             "middle_name": _txt(self.middle),
             "surname": _txt(self.surname),
+            "suffix": _txt(self.suffix),
             "maiden_name": _txt(self.maiden),
             "nickname": _txt(self.nickname),
             "birth_year": _year(self.birth),

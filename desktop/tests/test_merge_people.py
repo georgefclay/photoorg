@@ -3,6 +3,8 @@ loser is soft-deleted, audit rows are written for both directions."""
 
 from __future__ import annotations
 
+import pytest
+
 from photoarchive import db as dbmod
 from photoarchive.modes.faces import repo
 from photoarchive.modes.faces.merge import merge_people
@@ -105,6 +107,39 @@ def test_merge_moves_faces_and_dedupes_variants_and_audits(phase6):
             "select action from audit_log where entity_type='person'"
         ).fetchall()}
         assert {"person.create", "person.merge", "person.merged_into"} <= actions
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    (dict(given_name="Margaret", surname="Clay", maiden_name="Schmidt",
+          nickname="Peggy"), 'Margaret "Peggy" Clay (née Schmidt)'),
+    (dict(given_name="George", surname="Clay", suffix="Jr."), "George Clay Jr."),
+    (dict(given_name="John", surname="Smith", nickname="Jack", suffix="III"),
+     'John "Jack" Smith III'),
+    (dict(given_name="John", surname="Smith", nickname="Jack", suffix="III",
+          maiden_name="Doe"), 'John "Jack" Smith III (née Doe)'),
+    (dict(given_name="Anon"), "Anon"),
+])
+def test_display_name_trigger_includes_suffix(phase6, kwargs, expected):
+    """Fix-up 4: the trigger-maintained display_name interpolates
+    suffix between surname and maiden."""
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        pid = repo.create_person(
+            conn,
+            given_name=kwargs.get("given_name"),
+            middle_name=kwargs.get("middle_name"),
+            surname=kwargs.get("surname"),
+            maiden_name=kwargs.get("maiden_name"),
+            nickname=kwargs.get("nickname"),
+            birth_year=None, death_year=None, notes=None,
+            suffix=kwargs.get("suffix"),
+        )
+        conn.commit()
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        person = repo.get_person(conn, pid)
+    assert person is not None
+    assert person.display_name == expected
 
 
 def test_person_prototypes_falls_back_to_mean_for_small_sample(phase6):

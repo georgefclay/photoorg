@@ -57,6 +57,7 @@ class PersonRow:
     death_year: int | None
     notes: str | None
     is_deleted: bool
+    suffix: str | None = None  # Phase 6 fix-up 4: Jr./II/III/…
 
 
 def unlabelled_faces_with_embeddings(
@@ -114,7 +115,8 @@ def list_people(conn: psycopg.Connection) -> list[PersonRow]:
     rows = conn.execute(
         """
         select id, display_name, given_name, middle_name, surname,
-               maiden_name, nickname, birth_year, death_year, notes, is_deleted
+               maiden_name, nickname, birth_year, death_year, notes,
+               is_deleted, suffix
         from people
         where not is_deleted
         order by lower(coalesce(display_name, ''))
@@ -127,7 +129,8 @@ def get_person(conn: psycopg.Connection, person_id: int) -> PersonRow | None:
     row = conn.execute(
         """
         select id, display_name, given_name, middle_name, surname,
-               maiden_name, nickname, birth_year, death_year, notes, is_deleted
+               maiden_name, nickname, birth_year, death_year, notes,
+               is_deleted, suffix
         from people where id = %s
         """,
         (person_id,),
@@ -274,17 +277,18 @@ def create_person(
     birth_year: int | None,
     death_year: int | None,
     notes: str | None,
+    suffix: str | None = None,
 ) -> int:
     row = conn.execute(
         """
         insert into people
           (given_name, middle_name, surname, maiden_name, nickname,
-           birth_year, death_year, notes, is_deleted)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, false)
+           birth_year, death_year, notes, suffix, is_deleted)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, false)
         returning id
         """,
         (given_name, middle_name, surname, maiden_name, nickname,
-         birth_year, death_year, notes),
+         birth_year, death_year, notes, suffix),
     ).fetchone()
     person_id = int(row[0])
     dbmod.audit(
@@ -293,6 +297,7 @@ def create_person(
         new_value={
             "given_name": given_name, "surname": surname,
             "nickname": nickname, "birth_year": birth_year,
+            "suffix": suffix,
         },
     )
     return person_id
@@ -473,11 +478,11 @@ def _face_with_photo(row) -> FaceRow:
 
 def _person(row) -> PersonRow:
     (id_, display_name, given_name, middle_name, surname, maiden_name,
-     nickname, birth_year, death_year, notes, is_deleted) = row
+     nickname, birth_year, death_year, notes, is_deleted, suffix) = row
     return PersonRow(
         id=int(id_), display_name=display_name or "",
         given_name=given_name, middle_name=middle_name, surname=surname,
         maiden_name=maiden_name, nickname=nickname,
         birth_year=birth_year, death_year=death_year, notes=notes,
-        is_deleted=bool(is_deleted),
+        is_deleted=bool(is_deleted), suffix=suffix,
     )
