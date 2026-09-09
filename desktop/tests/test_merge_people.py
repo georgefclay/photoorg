@@ -215,6 +215,78 @@ def test_person_prototypes_honours_quality_gate(phase6):
     assert (protos[pid][0][:8] > 0.5).all()
 
 
+def test_load_photo_context_returns_faces_and_back_transcription(phase6):
+    """Fix-up 5: the preview needs photo dims, faces + person names,
+    year/batch context, and back transcription in one call."""
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        # Two people: one labelled, one for the second face.
+        p_a = repo.create_person(
+            conn, given_name="Adam", middle_name=None, surname="A",
+            maiden_name=None, nickname=None, suffix=None,
+            birth_year=None, death_year=None, notes=None,
+        )
+        photo = insert_photo(
+            conn, width=1200, height=800, source_folder="Batch 0007",
+            scan_sequence=42,
+        )
+        conn.execute(
+            """
+            update photos set capture_date = '1962-06-01',
+                              capture_date_confirmed = true,
+                              scan_batch = 'Batch 0007'
+            where id = %s
+            """,
+            (photo,),
+        )
+        # Two faces on the same photo: labelled + unlabelled.
+        conn.execute(
+            """
+            insert into faces
+              (photo_id, person_id, bbox, embedding, embedding_model,
+               confidence, source, is_disputed, is_deleted)
+            values
+              (%s, %s, '{"x":100,"y":100,"w":80,"h":80}'::jsonb,
+                %s, 'buffalo_l', 0.95, 'human', false, false),
+              (%s, NULL, '{"x":300,"y":200,"w":90,"h":90}'::jsonb,
+                %s, 'buffalo_l', 0.90, 'ai', false, false)
+            """,
+            (photo, p_a, [0.1] * 512, photo, [0.2] * 512),
+        )
+        # One back with transcription.
+        conn.execute(
+            """
+            insert into photo_backs
+              (photo_id, master_path, sha256, working_path,
+               transcribed_text, transcription_confidence)
+            values (%s, %s, %s, null, 'Summer 1962 · beach', 0.9)
+            """,
+            (photo, f"backs/{photo}.jpg", "b" * 64),
+        )
+        conn.commit()
+
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        context = repo.load_photo_context(conn, photo)
+    assert context is not None
+    assert context.width == 1200 and context.height == 800
+    assert context.capture_year == 1962
+    assert context.scan_batch == "Batch 0007"
+    assert context.scan_sequence == 42
+    assert context.back_transcription == "Summer 1962 · beach"
+    assert len(context.faces) == 2
+    labelled = [f for f in context.faces if f.person_id is not None]
+    assert len(labelled) == 1
+    assert labelled[0].person_name == "Adam A"
+
+
+def test_load_photo_context_returns_none_for_missing_photo(phase6):
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        context = repo.load_photo_context(conn, 999999)
+    assert context is None
+
+
 def test_person_reference_means_excludes_disputed(phase6):
     with dbmod.connection() as conn:
         conn.autocommit = False

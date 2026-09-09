@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, Qt, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -62,6 +62,7 @@ from .clustering import (
 )
 from .merge import merge_people
 from .person_dialog import MergePeopleDialog, PersonDialog
+from .photo_preview import PEEK_HOLD_MS, PhotoPreviewWidget
 from . import repo
 
 log = logging.getLogger(__name__)
@@ -116,6 +117,7 @@ class FacesPanel(QWidget):
         outer.addLayout(toolbar)
 
         splitter = QSplitter(Qt.Horizontal)
+        self._splitter = splitter
 
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.IconMode)
@@ -175,10 +177,28 @@ class FacesPanel(QWidget):
 
         side_layout.addStretch(1)
         splitter.addWidget(side)
+
+        # Fix-up 5: full-photo preview pane. Hidden by default; Space or
+        # double-click on a face tile opens it, arrow keys step through
+        # the cluster, Esc closes.
+        self.preview = PhotoPreviewWidget()
+        self.preview.face_clicked.connect(self._on_preview_face_clicked)
+        self.preview.setVisible(False)
+        splitter.addWidget(self.preview)
+
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 4)
+        splitter.setSizes([600, 220, 0])  # preview collapsed to start
 
         outer.addWidget(splitter, 1)
+
+        self.grid.itemDoubleClicked.connect(
+            lambda item: self._open_preview_for_face(int(item.data(Qt.UserRole)))
+        )
+        self._peek_timer = QElapsedTimer()
+        self._space_press_active = False
+        self.grid.installEventFilter(self)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence(Qt.Key_Return), self, self._accept_suggestion)
@@ -190,6 +210,8 @@ class FacesPanel(QWidget):
         QShortcut(QKeySequence(Qt.Key_Delete), self, self._delete_selected)
         # X toggles selection under the cursor
         QShortcut(QKeySequence(Qt.Key_X), self, self._toggle_current)
+        # Fix-up 5: Esc closes the preview even when it's the focused widget
+        QShortcut(QKeySequence(Qt.Key_Escape), self, self._close_preview)
 
     # --- clustering -------------------------------------------------------
 
@@ -688,6 +710,163 @@ class FacesPanel(QWidget):
         for fid in cluster:
             self._face_index.pop(fid, None)
         self._advance_cluster()
+
+    # --- fix-up 5: full-photo preview -------------------------------------
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 — Qt override
+        # Space press/release on the grid drives peek-vs-lock behaviour.
+        # We do NOT bind Space as a QShortcut because we need press+release
+        # timing to distinguish a tap from a hold.
+        if obj is self.grid and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+                self._on_space_pressed()
+                return True
+            if event.key() in (Qt.Key_Right, Qt.Key_Left) and self.preview.isVisible():
+                if event.key() == Qt.Key_Right:
+                    self._preview_step(+1)
+                else:
+                    self._preview_step(-1)
+                return True
+            if event.key() == Qt.Key_Escape and self.preview.isVisible():
+                self._close_preview()
+                return True
+        elif obj is self.grid and event.type() == QEvent.KeyRelease:
+            if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+                self._on_space_released()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _on_space_pressed(self) -> None:
+        self._peek_timer.restart()
+        self._space_press_active = True
+        item = self.grid.currentItem() or (
+            self.grid.item(0) if self.grid.count() else None
+        )
+        if item is not None:
+            fid = int(item.data(Qt.UserRole))
+            self._open_preview_for_face(fid)
+
+    def _on_space_released(self) -> None:
+        if not self._space_press_active:
+            return
+        self._space_press_active = False
+        held = self._peek_timer.elapsed()
+        # A short tap leaves the preview open (lock). A long hold treats
+        # the whole gesture as a peek and closes on release.
+        if held >= PEEK_HOLD_MS and self.preview.isVisible():
+            self._close_preview()
+
+    def _open_preview_for_face(self, face_id: int) -> None:
+        face = self._face_index.get(face_id)
+        if face is None:
+            # Might be an already-labelled face (Person view). Read fresh.
+            with dbmod.connection() as conn:
+                conn.autocommit = True
+                context = repo.load_photo_context(conn, self._photo_for_face(face_id))
+        else:
+            with dbmod.connection() as conn:
+                conn.autocommit = True
+                context = repo.load_photo_context(conn, face.photo_id)
+        if context is None:
+            self.status_label.setText(f"No photo context for face {face_id}.")
+            return
+        self.preview.show_photo(context, face_id)
+        if not self.preview.isVisible():
+            self.preview.setVisible(True)
+            sizes = self._splitter.sizes()
+            if len(sizes) == 3 and sizes[2] == 0:
+                total = sum(sizes) or self.width()
+                # Give the preview ~55% of the width.
+                new_preview = max(400, int(total * 0.55))
+                new_grid = max(200, int(total * 0.3))
+                new_side = max(150, total - new_preview - new_grid)
+                self._splitter.setSizes([new_grid, new_side, new_preview])
+        # Keep grid focused so subsequent keys still route to it.
+        self.grid.setFocus()
+
+    def _close_preview(self) -> None:
+        if not self.preview.isVisible():
+            return
+        self.preview.setVisible(False)
+        sizes = self._splitter.sizes()
+        if len(sizes) == 3:
+            self._splitter.setSizes([sizes[0] + sizes[2], sizes[1], 0])
+
+    def _preview_step(self, delta: int) -> None:
+        cluster = self._current_cluster()
+        if not cluster:
+            return
+        # Which face is currently shown?
+        item = self.grid.currentItem()
+        current_fid = int(item.data(Qt.UserRole)) if item is not None else cluster[0]
+        try:
+            idx = cluster.index(current_fid)
+        except ValueError:
+            idx = 0
+        new_idx = max(0, min(len(cluster) - 1, idx + delta))
+        if new_idx == idx:
+            return
+        new_fid = cluster[new_idx]
+        new_item = None
+        for i in range(self.grid.count()):
+            it = self.grid.item(i)
+            if int(it.data(Qt.UserRole)) == new_fid:
+                new_item = it
+                break
+        if new_item is not None:
+            self.grid.setCurrentItem(new_item)
+        self._open_preview_for_face(new_fid)
+
+    def _on_preview_face_clicked(self, face_id: int, is_labelled: bool) -> None:
+        """User clicked another face box inside the preview: jump to its
+        cluster if unlabelled, or open the person editor if labelled."""
+        if is_labelled:
+            # Look up the person and open their editor.
+            with dbmod.connection() as conn:
+                conn.autocommit = True
+                # Find the person via the face.
+                row = conn.execute(
+                    "select person_id from faces where id = %s", (face_id,)
+                ).fetchone()
+                if not row or row[0] is None:
+                    return
+                pid = int(row[0])
+                person = repo.get_person(conn, pid)
+            if person is None:
+                return
+            dlg = PersonDialog(existing=person, parent=self)
+            if dlg.exec() == QDialog.Accepted:
+                with dbmod.connection() as conn:
+                    conn.autocommit = False
+                    try:
+                        repo.update_person(conn, pid, **dlg.values())
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+            return
+        # Unlabelled: jump the grid cursor to that face's cluster.
+        for idx, meta in enumerate(self._cluster_queue):
+            if face_id in meta.face_ids:
+                self._cluster_index = idx
+                self._show_current_cluster()
+                for i in range(self.grid.count()):
+                    it = self.grid.item(i)
+                    if int(it.data(Qt.UserRole)) == face_id:
+                        self.grid.setCurrentItem(it)
+                        break
+                self._open_preview_for_face(face_id)
+                return
+        # Not in any cluster (e.g. low-quality bucket): just show its preview.
+        self._open_preview_for_face(face_id)
+
+    def _photo_for_face(self, face_id: int) -> int:
+        with dbmod.connection() as conn:
+            conn.autocommit = True
+            row = conn.execute(
+                "select photo_id from faces where id = %s", (face_id,)
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def _advance_cluster(self) -> None:
         self._cluster_index += 1

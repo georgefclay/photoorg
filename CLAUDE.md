@@ -203,6 +203,24 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Reference embeddings exclude `is_disputed=true` AND low-quality
   faces.** One wrong tag on a blurry crop must not quietly poison every
   future match.
+- **Multi-prototype references** (fix-up 3). Each labelled person's
+  reference set is up to 5 prototypes produced by scipy k-means over
+  their non-disputed, quality-gated faces (fewer for tiny samples;
+  single-mean fallback for < 3 faces). Suggested match is nearest
+  prototype, not the mean, so a lifetime doesn't split across age
+  bands. Under the primary suggestion the side pane also shows the
+  next 2 candidates ("Also probably: …"). Unlabelled clusters within
+  `FACE_CLUSTER_DIST` of any labelled person's nearest prototype are
+  badged "likely <name>" in the cluster header.
+- **Full-photo preview** (fix-up 5). Space or double-click on a face
+  tile opens a right-hand pane with the whole photo, the current face
+  outlined in yellow, every other detected face outlined and labelled
+  with its person name where known, plus year / batch#sequence /
+  folder / back transcription in the caption. Left/Right step through
+  the cluster; Esc closes. Space-and-hold is a peek (release closes
+  if held > 300 ms); Space-tap locks it open. Clicking another face in
+  the preview jumps to that face's cluster (unlabelled) or opens the
+  person editor (labelled).
 - **"Not a face"** soft-deletes the row (`is_deleted=true`, `deleted_at`,
   `delete_reason`) and writes an audit row. Every selector filters out
   deleted rows.

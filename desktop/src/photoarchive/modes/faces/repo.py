@@ -97,6 +97,91 @@ def faces_for_person(conn: psycopg.Connection, person_id: int) -> list[FaceRow]:
     return [_face(row) for row in rows]
 
 
+@dataclass
+class PhotoContext:
+    """Everything the fix-up 5 preview needs about one photo in one round-trip."""
+    photo_id: int
+    working_path: str | None
+    width: int | None
+    height: int | None
+    capture_year: int | None
+    source_folder: str | None
+    scan_batch: str | None
+    scan_sequence: int | None
+    back_transcription: str | None
+    faces: list["PhotoFaceOverlay"]
+
+
+@dataclass
+class PhotoFaceOverlay:
+    face_id: int
+    bbox: dict
+    person_id: int | None
+    person_name: str | None
+    is_disputed: bool
+
+
+def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext | None:
+    """Photo row + faces (with person names) + one back transcription.
+    Returns None if the photo row is missing or deleted."""
+    prow = conn.execute(
+        """
+        select p.working_path, p.width, p.height,
+               extract(year from p.capture_date)::int as capture_year,
+               p.source_folder, p.scan_batch, p.scan_sequence
+        from photos p
+        where p.id = %s and not p.is_deleted
+        """,
+        (photo_id,),
+    ).fetchone()
+    if prow is None:
+        return None
+    working_path, width, height, capture_year, source_folder, scan_batch, scan_sequence = prow
+
+    face_rows = conn.execute(
+        """
+        select f.id, f.bbox, f.person_id, pe.display_name, f.is_disputed
+        from faces f
+        left join people pe on pe.id = f.person_id and not pe.is_deleted
+        where f.photo_id = %s and not f.is_deleted
+        order by f.id
+        """,
+        (photo_id,),
+    ).fetchall()
+    faces = []
+    for fid, bbox, person_id, display_name, is_disputed in face_rows:
+        faces.append(PhotoFaceOverlay(
+            face_id=int(fid),
+            bbox=bbox if isinstance(bbox, dict) else json.loads(bbox),
+            person_id=int(person_id) if person_id is not None else None,
+            person_name=display_name,
+            is_disputed=bool(is_disputed),
+        ))
+
+    back_row = conn.execute(
+        """
+        select transcribed_text from photo_backs
+        where photo_id = %s and transcribed_text is not null
+        order by id limit 1
+        """,
+        (photo_id,),
+    ).fetchone()
+    back_text = back_row[0] if back_row else None
+
+    return PhotoContext(
+        photo_id=photo_id,
+        working_path=working_path,
+        width=int(width) if width is not None else None,
+        height=int(height) if height is not None else None,
+        capture_year=int(capture_year) if capture_year is not None else None,
+        source_folder=source_folder,
+        scan_batch=scan_batch,
+        scan_sequence=int(scan_sequence) if scan_sequence is not None else None,
+        back_transcription=back_text,
+        faces=faces,
+    )
+
+
 def faces_for_photo(conn: psycopg.Connection, photo_id: int) -> list[FaceRow]:
     rows = conn.execute(
         """
