@@ -105,7 +105,12 @@ class PhotoCanvas(QWidget):
                 try:
                     with Image.open(path) as im:
                         im = ImageOps.exif_transpose(im)
-                        if im.mode not in ("RGB", "L"):
+                        # Always coerce to RGB — grayscale scans (mode 'L')
+                        # don't have a Pillow packer to 'RGB', so
+                        # `tobytes("raw","RGB")` on an L-mode image raises
+                        # "No packer found from L to RGB". Palette ('P')
+                        # and CMYK need convert too.
+                        if im.mode != "RGB":
                             im = im.convert("RGB")
                         data = im.tobytes("raw", "RGB")
                         self._image = QImage(

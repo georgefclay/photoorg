@@ -174,6 +174,36 @@ def test_check_dry_run_touches_nothing(phase6):
     assert _wp(pid) == "/does/not/exist.jpg"
 
 
+def test_preview_canvas_loads_grayscale_jpeg(tmp_path):
+    """Regression: Pillow has no packer 'L' → 'RGB', so the preview
+    canvas has to convert L-mode grayscale scans to RGB before calling
+    tobytes('raw','RGB'). Without this, every grayscale scan bounces off
+    the preview with "No packer found from L to RGB"."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+
+    from photoarchive.modes.faces.photo_preview import PhotoCanvas
+    from photoarchive.modes.faces.repo import PhotoContext
+
+    p = tmp_path / "grayscale.jpg"
+    Image.new("L", (80, 60), 200).save(p, format="JPEG", quality=90)
+
+    canvas = PhotoCanvas()
+    context = PhotoContext(
+        photo_id=1, working_path=str(p), width=80, height=60,
+        capture_year=None, source_folder=None, scan_batch=None,
+        scan_sequence=None, back_transcription=None, faces=[],
+    )
+    canvas.set_photo(context, current_face_id=None)
+    assert canvas._image is not None, (
+        f"grayscale JPEG failed to load; load_error={canvas._load_error!r}"
+    )
+    assert canvas._load_error is None
+    _ = app  # keep reference
+
+
 def test_repair_face_boxes_never_touches_working_path(phase6):
     """Fix-up 7 item 4: the fix-up 6 repair tool must leave working_path
     alone even when it swaps dims and rescales bboxes."""
