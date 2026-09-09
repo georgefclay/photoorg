@@ -176,11 +176,16 @@ class PhotoCanvas(QWidget):
             fh = float(bbox.get("h", 0)) * scale
             rect = QRectF(fx, fy, fw, fh)
             is_current = (face.face_id == self._current_face_id)
-            # Yellow for the current face, red for disputed, white for others.
+            # Yellow for the current face, red for disputed, grey for
+            # ignore, cyan for unknown, white for the rest.
             if is_current:
                 colour = QColor("#ffd94d")
             elif face.is_disputed:
                 colour = QColor("#e35555")
+            elif face.review_status == "ignore":
+                colour = QColor("#7f7f7f")
+            elif face.review_status == "unknown":
+                colour = QColor("#66d9ef")
             else:
                 colour = QColor("#ffffff")
             pen = QPen(colour)
@@ -188,8 +193,17 @@ class PhotoCanvas(QWidget):
             p.setPen(pen)
             p.drawRect(rect)
 
-            # Label: person name if known, else "unknown".
-            label = face.person_name or ("unknown" if face.person_id is None else f"person {face.person_id}")
+            # Label: person name if known, else the review status.
+            if face.person_name:
+                label = face.person_name
+            elif face.review_status == "unknown":
+                label = "unknown"
+            elif face.review_status == "ignore":
+                label = "ignore"
+            elif face.person_id is None:
+                label = "unlabelled"
+            else:
+                label = f"person {face.person_id}"
             text_w = fm.horizontalAdvance(label) + 8
             text_h = fm.height() + 2
             lx = int(rect.left())

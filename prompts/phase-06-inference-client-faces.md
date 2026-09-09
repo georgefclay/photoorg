@@ -170,3 +170,18 @@ Correction: it is per-photo, not universal — one cluster all fine, another ~75
 Second correction from George: camera photos always work; **scans** fail, most of them in some clusters. Prime suspect: scans that were held in `_staging/` as proposed backs in Phase 2 and later released (rebuild drops, rejections, fix-up 1's "folded back into photos"). Check for `photos.working_path` still pointing under `_staging/` while the file was moved to the final name, or the reverse, or the staging file swept. Run an integrity scan over ALL photos: `working_path` exists on disk? If not, does `WORKING_DIR/{id:08d}_{sha[:8]}.{ext}` exist, or `_staging/{sha}.{ext}`, or the master? Report counts by category and repair `working_path` where the file is found under a known alternative name (audit row per repair); list any truly missing and re-derive them from the master (masters are read-only — copy, never move). Add this integrity scan as `tools/check_working_files.py` and run it in the Phase 9 push pre-flight.
 
 Timing clue: the face crops for these photos exist (cut from the working file when detect_faces results were collected), so the working file was resolvable at collect time. Whatever broke `working_path` or moved the file happened **after** that — check the audit log and file mtimes for those photos between the detect_faces collect and now (Phase 2 fix-up 5/6 accept/reject paths, dedupe resolve, repair_face_boxes, or the review grid's reject-as-normal path).
+
+---
+
+## Phase 6 fix-up 8 — "unknown" and "ignore" for faces
+
+George needs to dismiss a cluster he cannot name without it coming back. Two distinct outcomes:
+
+1. Migration: `faces.review_status text not null default 'pending'` with CHECK in (`pending`, `unknown`, `ignore`), plus `review_note text`, `reviewed_at`. (Assigned faces keep `pending`→ they are identified by `person_id`; the status is about unassigned faces.)
+2. Keys in the cluster view: **U** = unknown (whole cluster, or the selection if any), **I** = ignore (same). Both write audit rows (`face.review`), advance to the next cluster, and never re-appear in the labelling queue. Undo (Z) reverts the last one.
+3. Clustering and reference sets exclude `ignore` faces entirely. `unknown` faces are still clustered — so if George later labels a person who matches, the "likely <name>" badge can surface them — but they are shown in a separate "Unknown" queue behind everything else, not in the main flow.
+4. Person view / per-photo view: an unknown or ignored face shows a small badge; clicking it can re-open it (`pending`) or assign it directly.
+5. Sync (Phase 9) will push `review_status`; the web will show `unknown` faces as "Who is this?" prompts to contributors. Note this in `shared/SCHEMA.md`.
+6. Tests: U/I set status + audit; queue excludes them; ignore excluded from references; undo restores.
+
+Commit: `Phase 6 fix-up 8: unknown / ignore faces`.

@@ -234,6 +234,19 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   stored bbox by (H_raw/W_raw, W_raw/H_raw)).
   `python -m photoarchive.tools.diagnose_face_box PHOTO_ID` prints
   everything relevant for one photo in one report.
+- **`unknown` / `ignore`** (fix-up 8). `faces.review_status` (migration
+  24) is one of `pending | unknown | ignore` and applies to unassigned
+  faces (assigned faces stay `pending`; their identity comes from
+  `person_id`). In the cluster view **U** marks the whole cluster (or
+  the current selection) as `unknown` — a real person, not one George
+  can name yet; those clusters drop to the "Unknown queue" at the back
+  of the pass and stay in clustering so a later labelled person's
+  prototype can match them. **I** marks as `ignore` — noise; excluded
+  from clustering AND from reference sets entirely. **Z** undoes the
+  last U/I (session-scoped stack). Every action writes a `face.review`
+  audit row; undo writes `face.review.undo`. Sync (Phase 9) pushes
+  `review_status`; the web will surface `unknown` faces as
+  "Who is this?" prompts.
 - **Working-file integrity** (fix-up 7). Some scans went through
   `_staging/` in Phase 2 and later got released via rebuilds /
   rejections, leaving `photos.working_path` stale. Every non-deleted

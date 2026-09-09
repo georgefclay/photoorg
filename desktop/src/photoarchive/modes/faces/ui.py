@@ -86,6 +86,11 @@ class FacesPanel(QWidget):
         self._cluster_queue: list[ClusterMeta] = []
         self._cluster_index: int = -1
         self._low_quality_faces: list[repo.FaceRow] = []
+        # Session-scoped undo stack for U/I (fix-up 8). Each entry is a
+        # list of (face_id, previous_status) tuples so Z restores exactly
+        # what was there before the action.
+        self._review_undo_stack: list[list[tuple[int, str]]] = []
+        self._unknown_queue_start: int = 0
 
         outer = QVBoxLayout(self)
 
@@ -175,6 +180,25 @@ class FacesPanel(QWidget):
         self.delete_btn.clicked.connect(self._delete_selected)
         side_layout.addWidget(self.delete_btn)
 
+        self.unknown_btn = QPushButton("Unknown person (U)")
+        self.unknown_btn.setToolTip(
+            "Mark the current cluster (or the selected faces) as unknown — a "
+            "real person George cannot name yet. They stop appearing in the "
+            "main labelling flow but still cluster, so a later 'likely X' "
+            "match can bring them back."
+        )
+        self.unknown_btn.clicked.connect(self._mark_unknown)
+        side_layout.addWidget(self.unknown_btn)
+
+        self.ignore_btn = QPushButton("Ignore (I)")
+        self.ignore_btn.setToolTip(
+            "Mark the current cluster (or the selected faces) as ignore — noise "
+            "(reflection, painting, statue). Excluded from clustering and "
+            "reference sets."
+        )
+        self.ignore_btn.clicked.connect(self._mark_ignore)
+        side_layout.addWidget(self.ignore_btn)
+
         side_layout.addStretch(1)
         splitter.addWidget(side)
 
@@ -212,6 +236,11 @@ class FacesPanel(QWidget):
         QShortcut(QKeySequence(Qt.Key_X), self, self._toggle_current)
         # Fix-up 5: Esc closes the preview even when it's the focused widget
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._close_preview)
+        # Fix-up 8: U/I mark the cluster (or selection) as unknown/ignore;
+        # Z undoes the last U/I within the session.
+        QShortcut(QKeySequence(Qt.Key_U), self, self._mark_unknown)
+        QShortcut(QKeySequence(Qt.Key_I), self, self._mark_ignore)
+        QShortcut(QKeySequence(Qt.Key_Z), self, self._undo_review)
 
     # --- clustering -------------------------------------------------------
 
@@ -343,7 +372,20 @@ class FacesPanel(QWidget):
             self._paint_side(None)
             return
         self._cluster_result = result
-        self._cluster_queue = list(result.clusters)
+        # Fix-up 8: send any cluster whose faces are ALL marked 'unknown'
+        # to the back so the main queue is only clusters that still need
+        # a first-pass decision.
+        main_q, unknown_q = [], []
+        for meta in result.clusters:
+            if meta.face_ids and all(
+                (self._face_index[fid].review_status == "unknown")
+                for fid in meta.face_ids if fid in self._face_index
+            ):
+                unknown_q.append(meta)
+            else:
+                main_q.append(meta)
+        self._cluster_queue = main_q + unknown_q
+        self._unknown_queue_start = len(main_q)
         self._cluster_index = 0
         hist = result.size_histogram()
         low_q_line = (
@@ -416,6 +458,8 @@ class FacesPanel(QWidget):
                     tt_bits.append(f"short edge {int(se)}px")
                 if face.photo_capture_year:
                     tt_bits.append(f"year {face.photo_capture_year}")
+                if face.review_status and face.review_status != "pending":
+                    tt_bits.append(f"review: {face.review_status}")
             item.setToolTip("\n".join(tt_bits))
             self.grid.addItem(item)
         split_note = " · split from a larger cluster" if meta.split_from_larger else ""
@@ -426,10 +470,13 @@ class FacesPanel(QWidget):
             likely_note = (
                 f" · <b>likely {likely_name}</b> ({meta.likely_person_distance:.3f})"
             )
+        queue_note = ""
+        if self._cluster_index >= self._unknown_queue_start:
+            queue_note = " · <i>Unknown queue</i>"
         self.cluster_label.setText(
             f"Cluster {self._cluster_index + 1} of {len(self._cluster_queue)} "
             f"— {len(cluster)} face{'s' if len(cluster) != 1 else ''}"
-            f"{split_note}{likely_note}"
+            f"{split_note}{likely_note}{queue_note}"
         )
         self._paint_side(cluster)
 
@@ -619,6 +666,78 @@ class FacesPanel(QWidget):
         for fid in picked:
             self._face_index.pop(fid, None)
         self._show_current_cluster()
+
+    # --- fix-up 8: unknown / ignore / undo ---------------------------------
+
+    def _target_face_ids(self) -> list[int] | None:
+        """U/I act on the selection if any, else the whole current cluster."""
+        selected = self._selected_face_ids()
+        if selected:
+            return selected
+        return list(self._current_cluster() or [])
+
+    def _mark_unknown(self) -> None:
+        self._apply_review("unknown")
+
+    def _mark_ignore(self) -> None:
+        self._apply_review("ignore")
+
+    def _apply_review(self, status: str) -> None:
+        face_ids = self._target_face_ids()
+        if not face_ids:
+            return
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                prior = repo.set_review_status(
+                    conn, face_ids=face_ids, new_status=status,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        # Undo stack keeps a snapshot of the previous statuses.
+        self._review_undo_stack.append(prior)
+
+        # Remove reviewed faces from the current cluster / face index so
+        # they don't reappear in this pass. If the whole cluster was
+        # marked, advance; else keep the remaining faces in view.
+        meta = self._current_meta()
+        cluster_face_set = set(meta.face_ids) if meta is not None else set()
+        touched = set(int(fid) for fid, _ in prior)
+        for fid in touched:
+            self._face_index.pop(fid, None)
+        if meta is not None:
+            remaining = [fid for fid in meta.face_ids if fid not in touched]
+            meta.face_ids = remaining
+            if not remaining:
+                self._advance_cluster()
+                return
+        self._show_current_cluster()
+        self.status_label.setText(
+            f"Marked {len(touched)} face(s) as {status}."
+        )
+
+    def _undo_review(self) -> None:
+        if not self._review_undo_stack:
+            self.status_label.setText("No review action to undo.")
+            return
+        entry = self._review_undo_stack.pop()
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                for face_id, previous_status in entry:
+                    repo.restore_review_status(
+                        conn, face_id=int(face_id), status=previous_status,
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.status_label.setText(
+            f"Undid the last review action ({len(entry)} face(s)). "
+            "Recompute to bring them back into the queue."
+        )
 
     def _toggle_current(self) -> None:
         item = self.grid.currentItem()

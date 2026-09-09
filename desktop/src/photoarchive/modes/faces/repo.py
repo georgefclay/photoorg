@@ -27,6 +27,8 @@ class FaceRow:
     confidence: float | None
     is_disputed: bool
     is_deleted: bool
+    # Fix-up 8: for unassigned faces, one of 'pending' | 'unknown' | 'ignore'.
+    review_status: str = "pending"
     # Populated by unlabelled_faces_with_embeddings when we join the
     # photos row for the year-context display in the cluster grid.
     photo_capture_year: int | None = None
@@ -64,11 +66,15 @@ def unlabelled_faces_with_embeddings(
     conn: psycopg.Connection,
 ) -> list[FaceRow]:
     """Every unlabelled, non-deleted face with an embedding, joined to
-    its photo for the year context shown under each crop."""
+    its photo for the year context shown under each crop. Excludes
+    faces marked `ignore` (fix-up 8) — those are noise and never come
+    back into the labelling flow. `unknown` faces ARE included so their
+    clusters can later match against a labelled person's prototype."""
     rows = conn.execute(
         """
         select f.id, f.photo_id, f.person_id, f.bbox, f.embedding,
                f.embedding_model, f.confidence, f.is_disputed, f.is_deleted,
+               f.review_status,
                extract(year from p.capture_date)::int as capture_year,
                p.source_folder
         from faces f
@@ -77,6 +83,7 @@ def unlabelled_faces_with_embeddings(
           and not f.is_deleted
           and not p.is_deleted
           and f.embedding is not null
+          and f.review_status <> 'ignore'
         order by f.id
         """
     ).fetchall()
@@ -119,6 +126,7 @@ class PhotoFaceOverlay:
     person_id: int | None
     person_name: str | None
     is_disputed: bool
+    review_status: str = "pending"
 
 
 def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext | None:
@@ -140,7 +148,8 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
 
     face_rows = conn.execute(
         """
-        select f.id, f.bbox, f.person_id, pe.display_name, f.is_disputed
+        select f.id, f.bbox, f.person_id, pe.display_name, f.is_disputed,
+               f.review_status
         from faces f
         left join people pe on pe.id = f.person_id and not pe.is_deleted
         where f.photo_id = %s and not f.is_deleted
@@ -149,13 +158,14 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
         (photo_id,),
     ).fetchall()
     faces = []
-    for fid, bbox, person_id, display_name, is_disputed in face_rows:
+    for fid, bbox, person_id, display_name, is_disputed, review_status in face_rows:
         faces.append(PhotoFaceOverlay(
             face_id=int(fid),
             bbox=bbox if isinstance(bbox, dict) else json.loads(bbox),
             person_id=int(person_id) if person_id is not None else None,
             person_name=display_name,
             is_disputed=bool(is_disputed),
+            review_status=review_status or "pending",
         ))
 
     back_row = conn.execute(
@@ -230,6 +240,11 @@ def person_prototypes(
     min_score: float | None = None,
     min_short_edge_px: float | None = None,
 ) -> dict[int, list[np.ndarray]]:
+    # Note: `review_status` is orthogonal to `person_id` — an assigned
+    # face keeps `pending` status per spec — so no explicit filter here.
+    # `ignore` faces are always unassigned, so they can't feed into
+    # `person_id is not null` queries anyway. Defensive filter kept
+    # below for clarity.
     """Per-person K-means (up to `max_prototypes` centroids) over their
     non-disputed, non-deleted, quality-gated embeddings. Faces are
     partitioned across age / hairstyle / lighting bands so a single mean
@@ -247,6 +262,7 @@ def person_prototypes(
           and not is_disputed
           and not is_deleted
           and embedding is not null
+          and review_status <> 'ignore'
         """
     ).fetchall()
     per_person: dict[int, list[np.ndarray]] = {}
@@ -315,6 +331,7 @@ def person_reference_means(
           and not is_disputed
           and not is_deleted
           and embedding is not null
+          and review_status <> 'ignore'
         """
     ).fetchall()
     accum: dict[int, list[np.ndarray]] = {}
@@ -463,6 +480,77 @@ def dispute_face(
     )
 
 
+def set_review_status(
+    conn: psycopg.Connection,
+    *,
+    face_ids: list[int],
+    new_status: str,
+    note: str | None = None,
+) -> list[tuple[int, str]]:
+    """Set faces.review_status on a batch of faces (fix-up 8). Returns
+    a list of (face_id, previous_status) so an undo can restore. Writes
+    one `face.review` audit row per face.
+    """
+    if new_status not in ("pending", "unknown", "ignore"):
+        raise ValueError(f"invalid review status {new_status!r}")
+    if not face_ids:
+        return []
+    rows = conn.execute(
+        "select id, review_status from faces where id = ANY(%s)",
+        (list(face_ids),),
+    ).fetchall()
+    previous = {int(r[0]): (r[1] or "pending") for r in rows}
+    conn.execute(
+        """
+        update faces
+        set review_status = %s,
+            review_note = coalesce(%s, review_note),
+            reviewed_at = case when %s = 'pending' then null else now() end
+        where id = ANY(%s)
+        """,
+        (new_status, note, new_status, list(face_ids)),
+    )
+    for fid in face_ids:
+        prev = previous.get(int(fid), "pending")
+        dbmod.audit(
+            conn, actor="desktop", action="face.review",
+            entity_type="face", entity_id=int(fid),
+            previous_value={"review_status": prev},
+            new_value={"review_status": new_status, "note": note},
+        )
+    return [(fid, previous.get(int(fid), "pending")) for fid in face_ids]
+
+
+def restore_review_status(
+    conn: psycopg.Connection,
+    *,
+    face_id: int,
+    status: str,
+) -> None:
+    """Set faces.review_status back to `status` (used by the Faces
+    mode's Z key on a U/I action). Writes a `face.review.undo` audit
+    row."""
+    current = conn.execute(
+        "select review_status from faces where id = %s", (face_id,)
+    ).fetchone()
+    prev = (current[0] if current else None) or "pending"
+    conn.execute(
+        """
+        update faces
+        set review_status = %s,
+            reviewed_at = case when %s = 'pending' then null else now() end
+        where id = %s
+        """,
+        (status, status, face_id),
+    )
+    dbmod.audit(
+        conn, actor="desktop", action="face.review.undo",
+        entity_type="face", entity_id=face_id,
+        previous_value={"review_status": prev},
+        new_value={"review_status": status},
+    )
+
+
 def soft_delete_face(
     conn: psycopg.Connection,
     *,
@@ -549,13 +637,15 @@ def _face(row) -> FaceRow:
 
 def _face_with_photo(row) -> FaceRow:
     (id_, photo_id, person_id, bbox, embedding, embedding_model,
-     confidence, is_disputed, is_deleted, capture_year, source_folder) = row
+     confidence, is_disputed, is_deleted, review_status,
+     capture_year, source_folder) = row
     return FaceRow(
         id=int(id_), photo_id=int(photo_id), person_id=person_id,
         bbox=bbox if isinstance(bbox, dict) else json.loads(bbox),
         embedding=list(embedding) if embedding is not None else None,
         embedding_model=embedding_model, confidence=confidence,
         is_disputed=bool(is_disputed), is_deleted=bool(is_deleted),
+        review_status=review_status or "pending",
         photo_capture_year=int(capture_year) if capture_year is not None else None,
         photo_source_folder=source_folder,
     )
