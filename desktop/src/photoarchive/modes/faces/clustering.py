@@ -37,6 +37,11 @@ class ClusterMeta:
     split_from_larger: bool = False       # True if produced by recursive split
     threshold_used: float = 0.0           # cosine cutoff that produced this cluster
     ordered_by_centroid: bool = False
+    # Fix-up 3: if the cluster's centroid falls within FACE_CLUSTER_DIST of
+    # any labelled person's nearest prototype, we badge it in the header —
+    # George presses Enter to accept the suggestion without opening it.
+    likely_person_id: int | None = None
+    likely_person_distance: float | None = None
 
 
 @dataclass
@@ -224,6 +229,63 @@ def nearest_two_people(
     return dists[:2]
 
 
+# --- multi-prototype references (fix-up 3) --------------------------------
+
+
+def _min_distance_to_prototypes(
+    q_normed: np.ndarray,
+    prototypes: list[np.ndarray],
+) -> float:
+    best = float("inf")
+    for p in prototypes:
+        pn = _l2_normalise_one(p)
+        d = 1.0 - float(np.dot(q_normed, pn))
+        if d < best:
+            best = d
+    return best
+
+
+def nearest_person_by_prototype(
+    query_embedding: np.ndarray,
+    people_prototypes: dict[int, list[np.ndarray]],
+) -> tuple[int | None, float]:
+    """Closest person by the distance to their NEAREST prototype. Once a
+    person has both adult and child prototypes stored, either age is one
+    step away."""
+    if not people_prototypes:
+        return None, float("inf")
+    q = _l2_normalise_one(query_embedding)
+    best_pid: int | None = None
+    best_dist = float("inf")
+    for pid, protos in people_prototypes.items():
+        if not protos:
+            continue
+        d = _min_distance_to_prototypes(q, protos)
+        if d < best_dist:
+            best_dist = d
+            best_pid = pid
+    return best_pid, best_dist
+
+
+def topk_persons_by_prototype(
+    query_embedding: np.ndarray,
+    people_prototypes: dict[int, list[np.ndarray]],
+    k: int = 3,
+) -> list[tuple[int, float]]:
+    """Top-k people ranked by distance to their nearest prototype. Used
+    for the "also probably this person" list under the primary suggestion."""
+    if not people_prototypes:
+        return []
+    q = _l2_normalise_one(query_embedding)
+    dists: list[tuple[int, float]] = []
+    for pid, protos in people_prototypes.items():
+        if not protos:
+            continue
+        dists.append((int(pid), _min_distance_to_prototypes(q, protos)))
+    dists.sort(key=lambda t: t[1])
+    return dists[:k]
+
+
 # --- centroid / diagnostics ------------------------------------------------
 
 
@@ -253,6 +315,28 @@ def order_cluster_by_centroid_distance(
         en = _l2_normalise_one(e)
         return 1.0 - float(np.dot(cn, en))
     return sorted(face_ids, key=_dist)
+
+
+def annotate_clusters_with_likely_person(
+    clusters: list[ClusterMeta],
+    face_id_to_embedding: dict[int, np.ndarray],
+    people_prototypes: dict[int, list[np.ndarray]],
+    *,
+    match_threshold: float,
+) -> None:
+    """For every cluster, if its centroid is within `match_threshold` of a
+    labelled person's nearest prototype, tag the cluster's
+    `likely_person_id` / `likely_person_distance`. In-place mutation."""
+    if not people_prototypes:
+        return
+    for cm in clusters:
+        centroid = cluster_centroid(cm.face_ids, face_id_to_embedding)
+        if centroid is None:
+            continue
+        pid, dist = nearest_person_by_prototype(centroid, people_prototypes)
+        if pid is not None and dist <= match_threshold:
+            cm.likely_person_id = pid
+            cm.likely_person_distance = dist
 
 
 def mean_pairwise_cosine(embeddings: np.ndarray) -> float:

@@ -16,11 +16,14 @@ import numpy as np
 
 from photoarchive.modes.faces.clustering import (
     ClusterMeta,
+    annotate_clusters_with_likely_person,
     cluster_faces,
     diagnose_faces,
     nearest_person,
+    nearest_person_by_prototype,
     nearest_two_people,
     order_cluster_by_centroid_distance,
+    topk_persons_by_prototype,
 )
 
 
@@ -244,6 +247,96 @@ def test_nearest_two_people_returns_best_two():
     assert pids == {1, 2}
     # Distances sorted ascending.
     assert two[0][1] <= two[1][1]
+
+
+def test_multi_prototype_beats_single_mean_across_age_bands():
+    """Fix-up 3: one person, two age-band blobs. A single-mean reference
+    lands halfway between the blobs and misses both — a nearest-prototype
+    match still finds them."""
+    d = 32
+    # Two orthogonal directions — represent adult vs child, cosine ≈ 1.0.
+    adult = np.zeros(d, dtype=np.float32); adult[0] = 1.0
+    child = np.zeros(d, dtype=np.float32); child[1] = 1.0
+
+    rng = np.random.default_rng(19)
+    adult_faces = []
+    for _ in range(10):
+        v = adult + 0.02 * _rand_unit(d, rng)
+        adult_faces.append(v / np.linalg.norm(v))
+    child_faces = []
+    for _ in range(10):
+        v = child + 0.02 * _rand_unit(d, rng)
+        child_faces.append(v / np.linalg.norm(v))
+
+    means_only = {1: np.mean(np.stack(adult_faces + child_faces), axis=0)}
+    prototypes = {1: [np.mean(np.stack(adult_faces), axis=0),
+                       np.mean(np.stack(child_faces), axis=0)]}
+
+    # A brand-new adult query — close to the adult prototype, far from the child one.
+    q = adult + 0.03 * _rand_unit(d, rng)
+    q = q / np.linalg.norm(q)
+
+    _, mean_dist = nearest_person(q, means_only)
+    _, proto_dist = nearest_person_by_prototype(q, prototypes)
+    # The mean sits ~halfway between the two blobs, so its cosine
+    # distance to any real face is much larger than the near-prototype
+    # distance.
+    assert mean_dist > 0.20
+    assert proto_dist < 0.05
+    assert proto_dist * 3 < mean_dist  # meaningfully closer
+
+
+def test_topk_persons_by_prototype_returns_sorted():
+    d = 16
+    v_a = np.zeros(d, dtype=np.float32); v_a[0] = 1.0
+    v_b = np.zeros(d, dtype=np.float32); v_b[1] = 1.0
+    v_c = np.zeros(d, dtype=np.float32); v_c[2] = 1.0
+    prototypes = {1: [v_a], 2: [v_b], 3: [v_c]}
+    # Query biased toward A, then B.
+    q = 3 * v_a + v_b
+    q = q / np.linalg.norm(q)
+    ranked = topk_persons_by_prototype(q, prototypes, k=3)
+    assert [pid for pid, _ in ranked] == [1, 2, 3]
+    # Distances ascending.
+    assert ranked[0][1] < ranked[1][1] < ranked[2][1]
+
+
+def test_annotate_clusters_badges_likely_person():
+    d = 16
+    rng = np.random.default_rng(2)
+    centre = _rand_unit(d, rng)
+    ids = [1, 2, 3, 4]
+    embs = {}
+    for i in ids:
+        v = centre + 0.02 * _rand_unit(d, rng)
+        embs[i] = v / np.linalg.norm(v)
+    # The person's prototype IS this cluster's centre.
+    prototypes = {42: [centre]}
+    clusters = [ClusterMeta(face_ids=ids)]
+    annotate_clusters_with_likely_person(
+        clusters, embs, prototypes, match_threshold=0.10,
+    )
+    assert clusters[0].likely_person_id == 42
+    assert clusters[0].likely_person_distance is not None
+    assert clusters[0].likely_person_distance < 0.05
+
+
+def test_annotate_clusters_leaves_far_clusters_alone():
+    d = 16
+    rng = np.random.default_rng(3)
+    centre = _rand_unit(d, rng)
+    other = _rand_unit(d, rng)  # random, likely far in high-d
+    ids = [1, 2, 3, 4]
+    embs = {i: (centre + 0.02 * _rand_unit(d, rng)) for i in ids}
+    for i in ids:
+        embs[i] = embs[i] / np.linalg.norm(embs[i])
+    prototypes = {42: [other]}
+    clusters = [ClusterMeta(face_ids=ids)]
+    annotate_clusters_with_likely_person(
+        clusters, embs, prototypes, match_threshold=0.10,
+    )
+    assert clusters[0].likely_person_id is None
+    assert clusters[0].likely_person_distance is None
 
 
 def test_diagnose_faces_bucket_shapes():

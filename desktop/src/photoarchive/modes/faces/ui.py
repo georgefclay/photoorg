@@ -50,12 +50,15 @@ from ...workers import BackgroundJob
 from .clustering import (
     ClusterMeta,
     ClusteringResult,
+    annotate_clusters_with_likely_person,
     cluster_faces,
     diagnose_faces,
     mean_pairwise_cosine,
     nearest_person,
+    nearest_person_by_prototype,
     nearest_two_people,
     order_cluster_by_centroid_distance,
+    topk_persons_by_prototype,
 )
 from .merge import merge_people
 from .person_dialog import MergePeopleDialog, PersonDialog
@@ -74,6 +77,10 @@ class FacesPanel(QWidget):
         self._face_index: dict[int, repo.FaceRow] = {}
         self._people_by_id: dict[int, repo.PersonRow] = {}
         self._people_means: dict[int, np.ndarray] = {}
+        # Fix-up 3: per-person K-means prototypes (up to 5). Suggestions
+        # use nearest-prototype distance instead of a single mean so one
+        # person's lifetime doesn't split across age bands.
+        self._people_prototypes: dict[int, list[np.ndarray]] = {}
         self._cluster_result: ClusteringResult | None = None
         self._cluster_queue: list[ClusterMeta] = []
         self._cluster_index: int = -1
@@ -204,6 +211,14 @@ class FacesPanel(QWidget):
                     min_score=settings.FACE_MIN_SCORE,
                     min_short_edge_px=settings.FACE_MIN_PX,
                 )
+                # Fix-up 3: multi-prototype references. Same quality
+                # gate. Only used if a person has enough faces to
+                # partition; otherwise falls back to their mean.
+                people_prototypes = repo.person_prototypes(
+                    conn,
+                    min_score=settings.FACE_MIN_SCORE,
+                    min_short_edge_px=settings.FACE_MIN_PX,
+                )
 
             det_scores = [f.confidence for f in faces]
             short_edges = [f.short_edge_px for f in faces]
@@ -234,6 +249,7 @@ class FacesPanel(QWidget):
             if not keepers:
                 return {
                     "faces": faces, "people": people, "means": people_means,
+                    "prototypes": people_prototypes,
                     "result": None, "diagnostics": diagnostics,
                     "low_quality": low_q,
                 }
@@ -243,6 +259,15 @@ class FacesPanel(QWidget):
                 face_ids, embeddings,
                 max_cosine_distance=settings.FACE_CLUSTER_DIST,
                 max_cluster=settings.FACE_MAX_CLUSTER,
+            )
+            # Fix-up 3 item 3: tag clusters that already look like a
+            # labelled person so George can Enter through them.
+            emb_by_id = {fid: emb for fid, emb in zip(face_ids, embeddings)}
+            annotate_clusters_with_likely_person(
+                result.clusters,
+                emb_by_id,
+                people_prototypes,
+                match_threshold=settings.FACE_CLUSTER_DIST,
             )
 
             # Diagnose the biggest cluster: mean pairwise cosine + score
@@ -262,6 +287,7 @@ class FacesPanel(QWidget):
                     )
             return {
                 "faces": faces, "people": people, "means": people_means,
+                "prototypes": people_prototypes,
                 "result": result, "diagnostics": diagnostics,
                 "low_quality": low_q,
             }
@@ -278,6 +304,7 @@ class FacesPanel(QWidget):
         self._face_index = {f.id: f for f in faces}
         self._people_by_id = {p.id: p for p in s.get("people", [])}
         self._people_means = s.get("means", {})
+        self._people_prototypes = s.get("prototypes", {})
         self._low_quality_faces = s.get("low_quality", [])
         diagnostics = s.get("diagnostics", {})
         log.info("faces: cluster diagnostics = %s", diagnostics)
@@ -370,10 +397,17 @@ class FacesPanel(QWidget):
             item.setToolTip("\n".join(tt_bits))
             self.grid.addItem(item)
         split_note = " · split from a larger cluster" if meta.split_from_larger else ""
+        likely_note = ""
+        if meta.likely_person_id is not None:
+            likely_person = self._people_by_id.get(meta.likely_person_id)
+            likely_name = likely_person.display_name if likely_person else f"person {meta.likely_person_id}"
+            likely_note = (
+                f" · <b>likely {likely_name}</b> ({meta.likely_person_distance:.3f})"
+            )
         self.cluster_label.setText(
             f"Cluster {self._cluster_index + 1} of {len(self._cluster_queue)} "
             f"— {len(cluster)} face{'s' if len(cluster) != 1 else ''}"
-            f"{split_note}"
+            f"{split_note}{likely_note}"
         )
         self._paint_side(cluster)
 
@@ -383,27 +417,37 @@ class FacesPanel(QWidget):
             self.accept_btn.setEnabled(False)
             self.accept_btn.setProperty("suggested_person_id", None)
             return
-        # Mean embedding for this cluster, then nearest labelled person.
         embs = []
         for fid in cluster:
             face = self._face_index.get(fid)
             if face and face.embedding is not None:
                 embs.append(np.asarray(face.embedding, dtype=np.float32))
-        if not embs or not self._people_means:
+        if not embs or not self._people_prototypes:
             self.suggest_label.setText("No labelled people yet — press N to name this cluster.")
             self.accept_btn.setEnabled(False)
             self.accept_btn.setProperty("suggested_person_id", None)
             return
-        mean = np.mean(np.stack(embs), axis=0)
-        pid, dist = nearest_person(mean, self._people_means)
-        if pid is None:
+        centroid = np.mean(np.stack(embs), axis=0)
+        # Fix-up 3: nearest-prototype suggestion, plus the next two
+        # candidates below it so a near-miss is one click away.
+        topk = topk_persons_by_prototype(centroid, self._people_prototypes, k=3)
+        if not topk:
             self.suggest_label.setText("No suggestion.")
             self.accept_btn.setEnabled(False)
             self.accept_btn.setProperty("suggested_person_id", None)
             return
+        pid, dist = topk[0]
         person = self._people_by_id.get(pid)
         pname = person.display_name if person else f"person {pid}"
-        self.suggest_label.setText(f"Suggested: <b>{pname}</b>\ncosine distance: {dist:.3f}")
+        lines = [f"Suggested: <b>{pname}</b> · cosine {dist:.3f}"]
+        also = [t for t in topk[1:] if t[0] != pid]
+        if also:
+            lines.append("Also probably:")
+            for other_pid, other_dist in also:
+                other = self._people_by_id.get(other_pid)
+                oname = other.display_name if other else f"person {other_pid}"
+                lines.append(f" · {oname} — {other_dist:.3f}")
+        self.suggest_label.setText("<br>".join(lines))
         self.accept_btn.setEnabled(True)
         self.accept_btn.setProperty("suggested_person_id", pid)
 
@@ -572,7 +616,7 @@ class FacesPanel(QWidget):
             QMessageBox.information(self, "Split by nearest",
                                     "Need at least two faces in the cluster.")
             return
-        if len(self._people_means) < 2:
+        if len(self._people_prototypes) < 2:
             QMessageBox.information(self, "Split by nearest",
                                     "Need at least two labelled people to split against.")
             return
@@ -585,14 +629,26 @@ class FacesPanel(QWidget):
         if not emb_map:
             return
         centroid = np.mean(np.stack(list(emb_map.values())), axis=0)
-        two = nearest_two_people(centroid, self._people_means)
-        if len(two) < 2:
+        # Rank labelled people by nearest-prototype distance to the centroid,
+        # then take the two best (fix-up 3 harmony).
+        ranked = topk_persons_by_prototype(centroid, self._people_prototypes, k=2)
+        if len(ranked) < 2:
             QMessageBox.information(self, "Split by nearest",
                                     "Could not find two nearby people.")
             return
-        (pid_a, dist_a), (pid_b, dist_b) = two
-        mean_a = self._people_means[pid_a]
-        mean_b = self._people_means[pid_b]
+        (pid_a, dist_a), (pid_b, dist_b) = ranked[0], ranked[1]
+        protos_a = self._people_prototypes[pid_a]
+        protos_b = self._people_prototypes[pid_b]
+
+        def _min_dist(e: np.ndarray, protos: list[np.ndarray]) -> float:
+            en = e / max(float(np.linalg.norm(e)), 1e-9)
+            best = float("inf")
+            for p in protos:
+                pn = p / max(float(np.linalg.norm(p)), 1e-9)
+                d = 1.0 - float(np.dot(en, pn))
+                if d < best:
+                    best = d
+            return best
 
         group_a: list[int] = []
         group_b: list[int] = []
@@ -601,9 +657,8 @@ class FacesPanel(QWidget):
             if e is None:
                 group_a.append(fid)  # can't decide — default to the closer overall
                 continue
-            en = e / max(float(np.linalg.norm(e)), 1e-9)
-            da = 1.0 - float(np.dot(en, mean_a / max(float(np.linalg.norm(mean_a)), 1e-9)))
-            db_ = 1.0 - float(np.dot(en, mean_b / max(float(np.linalg.norm(mean_b)), 1e-9)))
+            da = _min_dist(e, protos_a)
+            db_ = _min_dist(e, protos_b)
             (group_a if da <= db_ else group_b).append(fid)
 
         name_a = self._people_by_id[pid_a].display_name if pid_a in self._people_by_id else f"person {pid_a}"

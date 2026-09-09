@@ -135,6 +135,79 @@ def get_person(conn: psycopg.Connection, person_id: int) -> PersonRow | None:
     return _person(row) if row else None
 
 
+def person_prototypes(
+    conn: psycopg.Connection,
+    *,
+    max_prototypes: int = 5,
+    min_score: float | None = None,
+    min_short_edge_px: float | None = None,
+) -> dict[int, list[np.ndarray]]:
+    """Per-person K-means (up to `max_prototypes` centroids) over their
+    non-disputed, non-deleted, quality-gated embeddings. Faces are
+    partitioned across age / hairstyle / lighting bands so a single mean
+    can't cover the whole lifetime (fix-up 3). Persons with < 10 faces
+    get `min(k, faces)` prototypes; < 2 faces just return their
+    embedding as one prototype.
+    """
+    from scipy.cluster.vq import kmeans2
+
+    rows = conn.execute(
+        """
+        select person_id, embedding, confidence, bbox
+        from faces
+        where person_id is not null
+          and not is_disputed
+          and not is_deleted
+          and embedding is not null
+        """
+    ).fetchall()
+    per_person: dict[int, list[np.ndarray]] = {}
+    for pid, emb, conf, bbox in rows:
+        if emb is None:
+            continue
+        if min_score is not None and conf is not None and conf < min_score:
+            continue
+        if min_short_edge_px is not None:
+            se = _short_edge(bbox)
+            if se is not None and se < min_short_edge_px:
+                continue
+        per_person.setdefault(pid, []).append(np.asarray(emb, dtype=np.float32))
+
+    out: dict[int, list[np.ndarray]] = {}
+    for pid, embs in per_person.items():
+        arr = np.stack(embs)
+        n = arr.shape[0]
+        if n <= 2:
+            out[pid] = [np.mean(arr, axis=0)]
+            continue
+        # Full k when the person has enough faces; scale down otherwise
+        # so tiny sample sizes don't get one-face-per-prototype clusters.
+        k = min(max_prototypes, max(2, n // 4))
+        try:
+            centroids, _labels = kmeans2(
+                arr, k, minit="++", seed=0, missing="warn",
+            )
+        except Exception as e:
+            log.warning("person_prototypes: kmeans2 failed for %d (%s); "
+                        "falling back to single mean", pid, e)
+            out[pid] = [np.mean(arr, axis=0)]
+            continue
+        # kmeans2 with 'warn' can leave empty centroids — drop the ones
+        # that are all-zero (uninitialised) or NaN.
+        good = []
+        for c in centroids:
+            if np.any(np.isnan(c)):
+                continue
+            if float(np.linalg.norm(c)) < 1e-9:
+                continue
+            good.append(c.astype(np.float32))
+        if not good:
+            out[pid] = [np.mean(arr, axis=0)]
+        else:
+            out[pid] = good
+    return out
+
+
 def person_reference_means(
     conn: psycopg.Connection,
     *,

@@ -107,6 +107,79 @@ def test_merge_moves_faces_and_dedupes_variants_and_audits(phase6):
         assert {"person.create", "person.merge", "person.merged_into"} <= actions
 
 
+def test_person_prototypes_falls_back_to_mean_for_small_sample(phase6):
+    """Fix-up 3: a person with fewer than 3 non-disputed embeddings gets
+    a single-prototype fallback (their mean) rather than a k-means
+    partition."""
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        pid = repo.create_person(
+            conn, given_name="Solo", middle_name=None, surname="Face",
+            maiden_name=None, nickname=None,
+            birth_year=None, death_year=None, notes=None,
+        )
+        photo = insert_photo(conn)
+        conn.execute(
+            """
+            insert into faces
+              (photo_id, person_id, bbox, embedding, embedding_model,
+               confidence, source, is_disputed, is_deleted)
+            values (%s, %s, '{"x":0,"y":0,"w":80,"h":80}'::jsonb,
+                    %s, 'buffalo_l', 0.9, 'human', false, false)
+            """,
+            (photo, pid, [0.1] * 512),
+        )
+        conn.commit()
+
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        protos = repo.person_prototypes(conn)
+    assert pid in protos
+    assert len(protos[pid]) == 1  # not enough to k-means; one mean
+
+
+def test_person_prototypes_honours_quality_gate(phase6):
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        pid = repo.create_person(
+            conn, given_name="Gated", middle_name=None, surname="X",
+            maiden_name=None, nickname=None,
+            birth_year=None, death_year=None, notes=None,
+        )
+        photo = insert_photo(conn)
+        # One good face, one below the score threshold, one below the
+        # short-edge threshold. Only the good one should feed the mean.
+        conn.execute(
+            """
+            insert into faces
+              (photo_id, person_id, bbox, embedding, embedding_model,
+               confidence, source, is_disputed, is_deleted)
+            values
+              (%s, %s, '{"x":0,"y":0,"w":80,"h":80}'::jsonb,
+                %s, 'buffalo_l', 0.95, 'human', false, false),
+              (%s, %s, '{"x":0,"y":0,"w":80,"h":80}'::jsonb,
+                %s, 'buffalo_l', 0.30, 'human', false, false),
+              (%s, %s, '{"x":0,"y":0,"w":20,"h":20}'::jsonb,
+                %s, 'buffalo_l', 0.95, 'human', false, false)
+            """,
+            (
+                photo, pid, [1.0] * 512,
+                photo, pid, [-1.0] * 512,
+                photo, pid, [-1.0] * 512,
+            ),
+        )
+        conn.commit()
+
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        protos = repo.person_prototypes(
+            conn, min_score=0.7, min_short_edge_px=40,
+        )
+    assert pid in protos
+    # Only the +1 face survives the gate; the mean is dominated by +1.
+    assert (protos[pid][0][:8] > 0.5).all()
+
+
 def test_person_reference_means_excludes_disputed(phase6):
     with dbmod.connection() as conn:
         conn.autocommit = False

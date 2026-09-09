@@ -102,3 +102,37 @@ Target after the fix: the largest cluster is a plausible single person (tens to 
 Commit: `Phase 6 fix-up 2: face clustering quality gate, average linkage, recursive split`.
 
 7. **Mixed-sibling clusters.** George's two sons as children land in the same clusters. In the cluster grid, order faces by distance from the cluster centroid (closest first) so the "other" person collects at the end and is easy to select with Shift-click / Shift-arrow ranges. Add a **"Split by nearest person"** action: once both people exist with a few labelled faces, one key (`B`) assigns every face in the cluster to whichever of the two nearest labelled people it is closer to, shows the proposed split as two groups, and George confirms or fixes before it commits. Also show each face's age-ish context: the photo's year (capture date or import folder) under the crop — brothers are easy to tell apart when you know the year.
+
+---
+
+## Phase 6 fix-up 3 — suggestions across ages
+
+Average linkage (fix-up 2) correctly stops chaining but splits one person's lifetime into age bands (George's mother, ages 5–85, was one cluster under single linkage; now several). Keep average linkage. Make the suggestion step bridge the ages instead:
+
+1. **Multi-prototype references.** For each labelled person, instead of one mean embedding, keep up to K prototypes (K = 5): k-means over that person's non-disputed, quality-gated faces (fewer if they have < 10 faces). The suggested match for a cluster is the person whose *nearest prototype* is closest to the cluster centroid. Once Mom has adult faces labelled and one childhood face assigned, her child prototype pulls in the rest.
+2. **"Also probably this person" list.** Under the main suggestion, show the next 2 candidates with distances, so a near-miss is one click away.
+3. **Same-person merge hints.** After Recompute, for every unlabelled cluster whose centroid is within `FACE_CLUSTER_DIST` of a labelled person's nearest prototype, badge it "likely <name>" in the queue header so George can Enter through them quickly.
+4. Tests: synthetic person with two age-band blobs; single-mean suggestion misses the second blob, multi-prototype finds it.
+
+Commit: `Phase 6 fix-up 3: multi-prototype references`.
+
+---
+
+## Phase 6 fix-up 4 — name suffix
+
+George's family has Jr./II/III. Add `people.suffix text` (migration; nullable). Include it in the trigger-maintained `display_name`: `given "nickname" surname suffix (née maiden)` → e.g. `George Clay Jr.`, `John "Jack" Smith III (née …)` only when set. Add the field to the person editor in Faces mode (after surname), to the autocomplete display, and to `shared/SCHEMA.md`. Search (Phase 11) and the metadata writer (Phase 13) must include it; note that in `PROJECT-PLAN.md` Phase 11/13 lines is the PM's job — just make the column and display work here. Update the existing `display_name` test.
+
+Commit: `Phase 6 fix-up 4: people.suffix`.
+
+---
+
+## Phase 6 fix-up 5 — see the whole photo from a face
+
+In the cluster grid and the person view, a face crop is often not enough to decide who it is. Add:
+
+1. **Space** (or double-click) on a face tile opens a preview pane (right-hand dock, or a lightbox if the pane is narrow) with the **full photo** fitted to the pane, the current face outlined, every other detected face on that photo outlined too — labelled with their person name where known — plus the caption strip: year, batch/sequence or folder, and back transcription text if the photo has one. Arrow keys move to the next/previous face in the cluster and the preview follows. Esc closes.
+2. **Hold Space** (peek) shows it only while held, for quick checks without leaving the grid flow.
+3. Clicking another outlined face in the preview jumps the grid cursor to that face's cluster (if unlabelled) or opens that person (if labelled) — siblings and spouses in the same photo are the fastest way to identify someone.
+4. The same preview is reachable from the per-photo view and the Person view.
+
+Commit: `Phase 6 fix-up 5: full-photo preview from faces`.
