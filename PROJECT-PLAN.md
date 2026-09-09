@@ -149,7 +149,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Accept when: George tags a face and suggests a date from a phone in under 10 seconds each; admin accepts both and the photo's completeness rises.
 
 ### Phase 11 — Search (Claude Code, Windows) — spec §9
-- Names incl. maiden, nickname table, Metaphone, full text over comments/descriptions/transcriptions, tolerant date ranges, places, attention filters.
+- Names incl. maiden and suffix (Jr./II/III — `people.suffix`), nickname table, Metaphone, full text over comments/descriptions/transcriptions, tolerant date ranges, places, attention filters.
 - Accept when: "Peggy" finds Margaret; "Schmitt" finds Schmidt; a decade-only photo appears in its decade search.
 
 ### Phase 12 — Download and export (Claude Code, Windows) — spec §11
@@ -158,7 +158,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Accept when: a 500-photo zip has the right tree and no backs; whole-archive job runs to completion without the API blocking.
 
 ### Phase 13 — Metadata writer (Claude Code, Windows) — spec §12
-- Writes confirmed date, people (full names in description, common name in keywords), place/GPS, AI description marked auto-generated, back transcription, and the physical reference (`Batch 00012 #017`, original filename) into XMP so it survives outside this system. Working copies only, asserted in code. Temp-file + atomic replace. Dry-run.
+- Writes confirmed date, people (full names incl. suffix in description, common name in keywords), place/GPS, AI description marked auto-generated, back transcription, and the physical reference (`Batch 00012 #017`, original filename) into XMP so it survives outside this system. Working copies only, asserted in code. Temp-file + atomic replace. Dry-run.
 - Accept when: dry-run report matches what exiftool reads back after a real run; an attempt to point it at a master raises.
 
 ### Phase 14 — Deploy to the VM (George + Claude Code, Windows) — new
