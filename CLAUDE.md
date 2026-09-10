@@ -247,6 +247,43 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   audit row; undo writes `face.review.undo`. Sync (Phase 9) pushes
   `review_status`; the web will surface `unknown` faces as
   "Who is this?" prompts.
+- **Manual bbox edit** (fix-up 9). In the preview: click a face box and
+  drag its body to move, drag a corner to resize (`CORNER_HANDLE_PX=10`);
+  drag on empty canvas to draw a new box; arrow keys nudge the current
+  face by 2 px (Shift+arrows = 10 px); short click without dragging
+  still routes to `face_clicked`. On release the writer updates
+  `faces.bbox`, sets `source='human'`, writes `face.bbox_edit` audit,
+  regenerates the face crop, and tries `/detect-faces` on the crop for
+  a fresh embedding. If the service is down, `faces.embedding_stale`
+  (migration 25) goes true; a future refresh path picks it up.
+- **People sidebar** (fix-up 9). A dedicated sidebar mode with a
+  searchable list (name, face count, birth/death years) and an editor
+  covering every name field, birth/death year, notes, and add/remove
+  name variants. Merge and "show all photos" buttons per person. The
+  same editor is what the People… dialog in Faces uses.
+- **Assign-existing-person dialog** (fix-up 9). Opens with an empty
+  focused search field. Typing filters live — prefix on any name field
+  first, then trigram on `display_name` and hand-curated variants. The
+  AI-suggested person is pinned at the top; Enter accepts the highlighted
+  row. Never pre-fill the field with the suggestion.
+- **Full-photo preview back panel** (fix-up 10). When a photo has a
+  `photo_backs` row, the preview grows a Back panel below the image:
+  back thumbnail (click-to-enlarge via the `T` key which flips the main
+  pane), verbatim transcription with `confidence`/`orientation_used`,
+  chips for `parsed_dates` and `names` from the latest AI transcription
+  suggestion, plus **Confirm transcription** and **Fix transcription…**
+  buttons (audit `back.transcription_confirm` / `back.transcription_edit`).
+- **Suggestions block** (fix-up 10). Read-only list of the photo's
+  date / description / folder suggestions. Each date suggestion has an
+  **Accept date** button that promotes it via
+  `repo.promote_date_suggestion` (sets
+  `photos.capture_date/precision/confirmed=true`, marks the suggestion
+  accepted, writes `photo.capture_date.set`, refreshes completeness).
+  When the photo already has a confirmed date, the promoter returns
+  `conflict=True` so the UI can prompt (409-style) before overwriting.
+- **✎ badge** (fix-up 10). Face tiles whose photo has any
+  `photo_backs` row are prefixed with `✎` in the cluster grid so
+  George knows there's writing on the back to read.
 - **Working-file integrity** (fix-up 7). Some scans went through
   `_staging/` in Phase 2 and later got released via rebuilds /
   rejections, leaving `photos.working_path` stale. Every non-deleted

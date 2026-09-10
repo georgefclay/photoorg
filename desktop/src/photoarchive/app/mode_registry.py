@@ -21,6 +21,7 @@ def default_modes() -> list[Mode]:
     from ..modes.cleanup import CleanupPanel
     from ..modes.jobs import JobsPanel
     from ..modes.faces import FacesPanel
+    from ..modes.people import PeoplePanel
     from ..modes.sync import SyncPanel
 
     return [
@@ -30,5 +31,6 @@ def default_modes() -> list[Mode]:
         Mode("cleanup", "Cleanup", CleanupPanel),
         Mode("jobs", "Jobs", JobsPanel),
         Mode("faces", "Faces", FacesPanel),
+        Mode("people", "People", PeoplePanel),
         Mode("sync", "Sync", SyncPanel),
     ]

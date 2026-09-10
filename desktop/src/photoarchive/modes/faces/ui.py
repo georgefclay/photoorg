@@ -19,6 +19,7 @@ recursive split above FACE_MAX_CLUSTER. Show clusters big-first, small
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -60,6 +61,7 @@ from .clustering import (
     order_cluster_by_centroid_distance,
     topk_persons_by_prototype,
 )
+from .assign_dialog import AssignExistingPersonDialog
 from .merge import merge_people
 from .person_dialog import MergePeopleDialog, PersonDialog
 from .photo_preview import PEEK_HOLD_MS, PhotoPreviewWidget
@@ -91,6 +93,9 @@ class FacesPanel(QWidget):
         # what was there before the action.
         self._review_undo_stack: list[list[tuple[int, str]]] = []
         self._unknown_queue_start: int = 0
+        # Fix-up 10: photo ids that have at least one photo_backs row —
+        # the cluster grid draws a ✎ badge on their tiles.
+        self._photos_with_backs: set[int] = set()
 
         outer = QVBoxLayout(self)
 
@@ -118,6 +123,16 @@ class FacesPanel(QWidget):
         self.merge_btn = QPushButton("Merge…")
         self.merge_btn.clicked.connect(self._open_merge_dialog)
         toolbar.addWidget(self.merge_btn)
+
+        # Fix-up 9: one-click access to the fix-up-6/7 maintenance passes.
+        self.repair_btn = QPushButton("Repair orientation / files…")
+        self.repair_btn.setToolTip(
+            "Fill in photos.orientation, swap dims for portrait phone photos "
+            "and scans (fix-up 6), rescale their face bboxes, and repair any "
+            "photos.working_path that fell out of sync (fix-up 7)."
+        )
+        self.repair_btn.clicked.connect(self._run_repair)
+        toolbar.addWidget(self.repair_btn)
 
         outer.addLayout(toolbar)
 
@@ -207,6 +222,13 @@ class FacesPanel(QWidget):
         # the cluster, Esc closes.
         self.preview = PhotoPreviewWidget()
         self.preview.face_clicked.connect(self._on_preview_face_clicked)
+        self.preview.face_bbox_changed.connect(self._on_preview_face_bbox_changed)
+        self.preview.new_face_requested.connect(self._on_preview_new_face_requested)
+        self.preview.face_delete_requested.connect(self._on_preview_face_delete_requested)
+        self.preview.confirm_back_requested.connect(self._on_confirm_back)
+        self.preview.edit_back_confirmed.connect(self._on_edit_back)
+        self.preview.accept_date_requested.connect(self._on_accept_date)
+        self.preview.toggle_front_back_requested.connect(self.preview.toggle_front_back)
         self.preview.setVisible(False)
         splitter.addWidget(self.preview)
 
@@ -241,6 +263,8 @@ class FacesPanel(QWidget):
         QShortcut(QKeySequence(Qt.Key_U), self, self._mark_unknown)
         QShortcut(QKeySequence(Qt.Key_I), self, self._mark_ignore)
         QShortcut(QKeySequence(Qt.Key_Z), self, self._undo_review)
+        # Fix-up 10: T toggles the preview's main pane between front and back.
+        QShortcut(QKeySequence(Qt.Key_T), self, self.preview.toggle_front_back)
 
     # --- clustering -------------------------------------------------------
 
@@ -357,6 +381,17 @@ class FacesPanel(QWidget):
         self._people_means = s.get("means", {})
         self._people_prototypes = s.get("prototypes", {})
         self._low_quality_faces = s.get("low_quality", [])
+        # Cache which photos have backs, so the cluster grid can ✎-badge.
+        photo_ids = {f.photo_id for f in self._face_index.values()}
+        try:
+            with dbmod.connection() as conn:
+                conn.autocommit = True
+                self._photos_with_backs = repo.photo_ids_with_backs(
+                    conn, list(photo_ids),
+                )
+        except Exception as e:
+            log.warning("faces: photo_ids_with_backs lookup failed: %s", e)
+            self._photos_with_backs = set()
         diagnostics = s.get("diagnostics", {})
         log.info("faces: cluster diagnostics = %s", diagnostics)
         result: ClusteringResult | None = s.get("result")
@@ -443,6 +478,9 @@ class FacesPanel(QWidget):
                 str(face.photo_capture_year)
                 if face and face.photo_capture_year else ""
             )
+            # Fix-up 10: ✎ badge if the photo has a back.
+            if face and face.photo_id in self._photos_with_backs:
+                year_label = f"✎ {year_label}" if year_label else "✎"
             item.setText(year_label)
             item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
             pix = _load_pixmap(thumbs_dir / f"{face_id}.jpg", THUMB_TILE_PX)
@@ -560,21 +598,18 @@ class FacesPanel(QWidget):
         if not people:
             QMessageBox.information(self, "Faces", "No people yet. Press N to create one.")
             return None
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Assign to person")
-        layout = QVBoxLayout(dlg)
-        combo = QComboBox()
-        combo.setEditable(True)
-        for p in people:
-            combo.addItem(p.display_name or f"person {p.id}", p.id)
-        layout.addWidget(combo)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        layout.addWidget(btns)
+        # Fix-up 9: live-filter dialog with the AI suggestion pinned at
+        # the top; the field starts EMPTY so George just types.
+        suggested_id = self.accept_btn.property("suggested_person_id")
+        suggested_person: repo.PersonRow | None = None
+        if suggested_id is not None:
+            suggested_person = self._people_by_id.get(int(suggested_id))
+        dlg = AssignExistingPersonDialog(
+            suggested_person=suggested_person, parent=self,
+        )
         if dlg.exec() != QDialog.Accepted:
             return None
-        return int(combo.currentData()) if combo.currentData() is not None else None
+        return dlg.selected_person_id()
 
     def _assign_new(self) -> None:
         cluster = self._current_cluster()
@@ -830,6 +865,55 @@ class FacesPanel(QWidget):
             self._face_index.pop(fid, None)
         self._advance_cluster()
 
+    # --- fix-up 9: one-click repair ---------------------------------------
+
+    def _run_repair(self) -> None:
+        confirm = QMessageBox.question(
+            self, "Repair orientation & files",
+            "This runs check_working_files (repair working_path) and "
+            "repair_face_boxes (fill photos.orientation, swap dims for "
+            "orientation ≠ 1 rows, rescale face bboxes). Safe to run "
+            "repeatedly. Proceed?",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        def _target(progress_cb, cancel_token):
+            from ...tools.check_working_files import check as check_files
+            from ...tools.repair_face_boxes import repair as repair_boxes
+            wf = check_files(dry_run=False, limit=None)
+            rb = repair_boxes(dry_run=False, limit=None)
+            return {"check_working_files": wf.as_dict(), "repair_face_boxes": rb.as_dict()}
+
+        job = BackgroundJob(_target)
+        job.signals.finished.connect(self._on_repair_finished)
+        job.signals.failed.connect(self._on_repair_failed)
+        self._repair_worker = job
+        self.status_label.setText("Running repair…")
+        self.repair_btn.setEnabled(False)
+        job.start()
+
+    def _on_repair_finished(self, summary: dict[str, Any]) -> None:
+        self.repair_btn.setEnabled(True)
+        wf = summary.get("check_working_files", {})
+        rb = summary.get("repair_face_boxes", {})
+        parts = [
+            f"working_path: ok={wf.get('already_ok', 0)}, "
+            f"pointer-repaired={wf.get('pointer_repaired_standard', 0) + wf.get('pointer_repaired_staging', 0)}, "
+            f"recopied={wf.get('recopied_from_master', 0)}, "
+            f"missing={wf.get('truly_missing', 0)}",
+            f"orientation/bbox: dims-swapped={rb.get('dims_swapped', 0)}, "
+            f"orientation-backfilled={rb.get('orientation_backfilled', 0)}, "
+            f"faces-repaired={rb.get('faces_repaired', 0)}",
+        ]
+        self.status_label.setText("Repair done. " + " · ".join(parts))
+        log.info("faces: repair summary = %s", summary)
+
+    def _on_repair_failed(self, tb: str) -> None:
+        self.repair_btn.setEnabled(True)
+        self.status_label.setText("Repair FAILED — see log dock.")
+        log.error("faces: repair failed:\n%s", tb)
+
     # --- fix-up 5: full-photo preview -------------------------------------
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 — Qt override
@@ -978,6 +1062,249 @@ class FacesPanel(QWidget):
                 return
         # Not in any cluster (e.g. low-quality bucket): just show its preview.
         self._open_preview_for_face(face_id)
+
+    # --- fix-up 9 preview handlers: bbox edit / draw / delete -------------
+
+    def _on_preview_face_bbox_changed(self, face_id: int, new_bbox: dict) -> None:
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                repo.update_face_bbox(
+                    conn, face_id=face_id, new_bbox=new_bbox,
+                    source="human", reason="manual_bbox_edit",
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        # Refresh embedding via /detect-faces on the crop when the service
+        # is available; otherwise flag it stale for the next detect pass.
+        embedding_ok = self._refresh_face_embedding_via_service(face_id)
+        if not embedding_ok:
+            with dbmod.connection() as conn:
+                conn.autocommit = True
+                repo.mark_face_embedding_stale(conn, face_id=face_id, stale=True)
+            self.status_label.setText(
+                "Bbox saved; embedding refresh deferred (service unreachable). "
+                "Next detect_faces pass will pick it up."
+            )
+        else:
+            self.status_label.setText("Bbox saved and embedding refreshed.")
+        # Regenerate this photo's face crop from the new bbox.
+        self._regen_face_crop(face_id)
+        # Refresh the preview context so the drawn bbox reflects the DB.
+        self._refresh_preview_context()
+
+    def _on_preview_new_face_requested(self, bbox: dict) -> None:
+        if self.preview._context is None:
+            return
+        photo_id = self.preview._context.photo_id
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                new_id = repo.draw_face(
+                    conn, photo_id=photo_id, bbox=bbox,
+                    embedding=None, embedding_model=None, person_id=None,
+                )
+                # Mark stale so the next detect_faces pass gives it an embedding.
+                repo.mark_face_embedding_stale(conn, face_id=new_id, stale=True)
+                repo.flag_photo_needs_detection(conn, photo_id=photo_id)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.status_label.setText(
+            f"Drew face {new_id}; embedding will fill in on the next detect_faces pass."
+        )
+        self._refresh_preview_context()
+
+    def _on_preview_face_delete_requested(self, face_id: int) -> None:
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                repo.soft_delete_face(conn, face_id=face_id, reason="not_a_face")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.status_label.setText(f"Face {face_id} soft-deleted.")
+        self._refresh_preview_context()
+
+    def _refresh_face_embedding_via_service(self, face_id: int) -> bool:
+        """Try to recompute the embedding for one face via
+        `/detect-faces` on the crop. Returns True on success, False if
+        the service is unreachable or fails."""
+        try:
+            from ...inference_client import shared, ENDPOINT_DETECT_FACES, RefImage
+            from ...inference_client.image_prep import prepare_jpeg_bytes
+        except Exception:
+            return False
+        try:
+            with dbmod.connection() as conn:
+                conn.autocommit = True
+                row = conn.execute(
+                    """
+                    select f.bbox, p.working_path
+                    from faces f join photos p on p.id = f.photo_id
+                    where f.id = %s
+                    """,
+                    (face_id,),
+                ).fetchone()
+            if row is None:
+                return False
+            bbox_raw, working_path = row
+            bbox = bbox_raw if isinstance(bbox_raw, dict) else json.loads(bbox_raw)
+            if not working_path or not Path(working_path).exists():
+                return False
+            from PIL import Image, ImageOps
+            with Image.open(working_path) as im:
+                im = ImageOps.exif_transpose(im)
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
+                # Pad ~15% around bbox for context.
+                pad_x = int(round(0.15 * float(bbox.get("w", 0))))
+                pad_y = int(round(0.15 * float(bbox.get("h", 0))))
+                x1 = max(0, int(round(float(bbox.get("x", 0)) - pad_x)))
+                y1 = max(0, int(round(float(bbox.get("y", 0)) - pad_y)))
+                x2 = min(im.width, int(round(float(bbox.get("x", 0)) + float(bbox.get("w", 0)) + pad_x)))
+                y2 = min(im.height, int(round(float(bbox.get("y", 0)) + float(bbox.get("h", 0)) + pad_y)))
+                crop = im.crop((x1, y1, x2, y2))
+                import io as _io
+                buf = _io.BytesIO()
+                crop.save(buf, format="JPEG", quality=95)
+                data = buf.getvalue()
+            prepared = prepare_jpeg_bytes(data, 1536)
+            envelope = shared.client().call_endpoint(
+                ENDPOINT_DETECT_FACES,
+                RefImage(ref=f"f{face_id}", path=Path(working_path), prepared_bytes=prepared),
+            )
+            result = envelope.get("result") or {}
+            faces = result.get("faces") or []
+            if not faces:
+                return False
+            best = faces[0]
+            embedding = best.get("embedding")
+            model = envelope.get("model") or "buffalo_l"
+            if not embedding:
+                return False
+            with dbmod.connection() as conn:
+                conn.autocommit = False
+                try:
+                    repo.refresh_face_embedding(
+                        conn, face_id=face_id, embedding=embedding,
+                        embedding_model=model,
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            return True
+        except Exception as e:
+            log.warning("refresh_face_embedding_via_service(%s): %s", face_id, e)
+            return False
+
+    def _regen_face_crop(self, face_id: int) -> None:
+        try:
+            from ...jobs.detect_faces import _write_face_crops
+        except Exception:
+            return
+        with dbmod.connection() as conn:
+            conn.autocommit = True
+            row = conn.execute(
+                """
+                select f.bbox, p.working_path
+                from faces f join photos p on p.id = f.photo_id
+                where f.id = %s
+                """,
+                (face_id,),
+            ).fetchone()
+        if row is None:
+            return
+        bbox_raw, working_path = row
+        bbox = bbox_raw if isinstance(bbox_raw, dict) else json.loads(bbox_raw)
+        if not working_path:
+            return
+        out_dir = self._settings.THUMBS_DIR / "faces"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_face_crops(Path(working_path), [(face_id, bbox)], out_dir)
+
+    def _refresh_preview_context(self) -> None:
+        """Reload the currently-shown photo context so the preview
+        reflects the freshly-updated DB rows (bbox / faces)."""
+        if self.preview._context is None:
+            return
+        photo_id = self.preview._context.photo_id
+        with dbmod.connection() as conn:
+            conn.autocommit = True
+            context = repo.load_photo_context(conn, photo_id)
+        if context is not None:
+            self.preview.show_photo(context, self.preview._current_face_id or 0)
+
+    # --- fix-up 10 handlers: back confirm / edit / accept date ------------
+
+    def _on_confirm_back(self, photo_back_id: int) -> None:
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                repo.confirm_back_transcription(
+                    conn, photo_back_id=photo_back_id, edited_text=None,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.status_label.setText(f"Back {photo_back_id} confirmed.")
+        self._refresh_preview_context()
+
+    def _on_edit_back(self, photo_back_id: int, new_text: str) -> None:
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                repo.confirm_back_transcription(
+                    conn, photo_back_id=photo_back_id, edited_text=new_text,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.status_label.setText(f"Back {photo_back_id} transcription edited + confirmed.")
+        self._refresh_preview_context()
+
+    def _on_accept_date(self, suggestion_id: int) -> None:
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                outcome = repo.promote_date_suggestion(
+                    conn, suggestion_id=suggestion_id, allow_overwrite=False,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        if outcome.conflict:
+            confirm = QMessageBox.question(
+                self, "Overwrite existing date?",
+                f"This photo already has a confirmed date "
+                f"{outcome.existing_date} ({outcome.existing_precision}). "
+                f"Overwrite with {outcome.new_date} ({outcome.new_precision})?",
+            )
+            if confirm != QMessageBox.Yes:
+                self.status_label.setText("Accept date cancelled.")
+                return
+            with dbmod.connection() as conn:
+                conn.autocommit = False
+                try:
+                    repo.promote_date_suggestion(
+                        conn, suggestion_id=suggestion_id, allow_overwrite=True,
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            self.status_label.setText("Confirmed date overwritten.")
+        else:
+            self.status_label.setText(f"Date {outcome.new_date} accepted.")
+        self._refresh_preview_context()
 
     def _photo_for_face(self, face_id: int) -> int:
         with dbmod.connection() as conn:

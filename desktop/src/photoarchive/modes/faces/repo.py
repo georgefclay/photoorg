@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 import numpy as np
@@ -60,6 +60,24 @@ class PersonRow:
     notes: str | None
     is_deleted: bool
     suffix: str | None = None  # Phase 6 fix-up 4: Jr./II/III/…
+
+
+def photo_ids_with_backs(
+    conn: psycopg.Connection, photo_ids: list[int],
+) -> set[int]:
+    """Fix-up 10 item 4: the cluster grid tags tiles whose photo has any
+    `photo_backs` row with a ✎ badge. One query for the batch."""
+    if not photo_ids:
+        return set()
+    rows = conn.execute(
+        """
+        select distinct photo_id
+        from photo_backs
+        where photo_id = ANY(%s)
+        """,
+        (list(photo_ids),),
+    ).fetchall()
+    return {int(r[0]) for r in rows}
 
 
 def unlabelled_faces_with_embeddings(
@@ -117,6 +135,35 @@ class PhotoContext:
     scan_sequence: int | None
     back_transcription: str | None
     faces: list["PhotoFaceOverlay"]
+    # Fix-up 10: everything the Back panel needs.
+    backs: list["PhotoBack"] = field(default_factory=list)
+    date_suggestions: list["DateSuggestion"] = field(default_factory=list)
+    description_suggestion: str | None = None
+    folder_hint: str | None = None
+    has_confirmed_date: bool = False
+
+
+@dataclass
+class PhotoBack:
+    id: int
+    working_path: str | None
+    master_path: str
+    transcribed_text: str | None
+    transcription_confidence: float | None
+    transcription_confirmed: bool
+    orientation_used: str | None    # from the transcription suggestion payload
+    parsed_dates: list[dict]         # [{text, iso, precision}, ...]
+    names: list[str]
+
+
+@dataclass
+class DateSuggestion:
+    suggestion_id: int
+    date: str | None                 # ISO or None
+    precision: str
+    confidence: float | None
+    evidence: str
+    year_range: tuple[int, int] | None
 
 
 @dataclass
@@ -168,15 +215,91 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
             review_status=review_status or "pending",
         ))
 
-    back_row = conn.execute(
+    # All photo_backs rows on this photo, with the newest AI transcription
+    # suggestion joined so the preview can show orientation_used + chips.
+    back_rows = conn.execute(
         """
-        select transcribed_text from photo_backs
-        where photo_id = %s and transcribed_text is not null
-        order by id limit 1
+        select b.id, b.working_path, b.master_path,
+               b.transcribed_text, b.transcription_confidence,
+               b.transcription_confirmed,
+               (
+                 select payload from suggestions s
+                 where s.kind = 'transcription' and s.source = 'ai'
+                   and (s.payload->>'photo_back_id')::bigint = b.id
+                 order by s.confidence desc nulls last, s.id desc
+                 limit 1
+               ) as suggestion_payload
+        from photo_backs b
+        where b.photo_id = %s
+        order by b.id
+        """,
+        (photo_id,),
+    ).fetchall()
+    backs: list[PhotoBack] = []
+    for bid, bwp, bmp, text, conf, confirmed, payload in back_rows:
+        payload = payload if isinstance(payload, dict) else (
+            json.loads(payload) if payload else {}
+        )
+        backs.append(PhotoBack(
+            id=int(bid), working_path=bwp, master_path=bmp,
+            transcribed_text=text,
+            transcription_confidence=float(conf) if conf is not None else None,
+            transcription_confirmed=bool(confirmed),
+            orientation_used=payload.get("orientation_used"),
+            parsed_dates=list(payload.get("parsed_dates") or []),
+            names=list(payload.get("names") or []),
+        ))
+    back_text = next(
+        (b.transcribed_text for b in backs if b.transcribed_text), None,
+    )
+
+    # Pending date + description suggestions for the "Suggestions" block.
+    date_rows = conn.execute(
+        """
+        select id, payload, confidence
+        from suggestions
+        where photo_id = %s and kind = 'date' and status = 'pending'
+        order by confidence desc nulls last, id desc
+        """,
+        (photo_id,),
+    ).fetchall()
+    dates: list[DateSuggestion] = []
+    for sid, payload, conf in date_rows:
+        payload = payload if isinstance(payload, dict) else json.loads(payload)
+        rng = payload.get("range") or {}
+        yr = None
+        if "year_min" in rng and "year_max" in rng:
+            try:
+                yr = (int(rng["year_min"]), int(rng["year_max"]))
+            except (TypeError, ValueError):
+                yr = None
+        dates.append(DateSuggestion(
+            suggestion_id=int(sid),
+            date=payload.get("date"),
+            precision=payload.get("precision") or "unknown",
+            confidence=float(conf) if conf is not None else None,
+            evidence=payload.get("evidence") or "",
+            year_range=yr,
+        ))
+
+    desc_row = conn.execute(
+        """
+        select payload from suggestions
+        where photo_id = %s and kind = 'description' and status = 'pending'
+        order by id desc limit 1
         """,
         (photo_id,),
     ).fetchone()
-    back_text = back_row[0] if back_row else None
+    if desc_row:
+        payload = desc_row[0] if isinstance(desc_row[0], dict) else json.loads(desc_row[0])
+        description_suggestion = payload.get("text")
+    else:
+        description_suggestion = None
+
+    has_confirmed = conn.execute(
+        "select capture_date_confirmed from photos where id = %s", (photo_id,)
+    ).fetchone()
+    has_confirmed_flag = bool(has_confirmed[0]) if has_confirmed else False
 
     return PhotoContext(
         photo_id=photo_id,
@@ -189,6 +312,11 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
         scan_sequence=int(scan_sequence) if scan_sequence is not None else None,
         back_transcription=back_text,
         faces=faces,
+        backs=backs,
+        date_suggestions=dates,
+        description_suggestion=description_suggestion,
+        folder_hint=source_folder,
+        has_confirmed_date=has_confirmed_flag,
     )
 
 
@@ -204,6 +332,53 @@ def faces_for_photo(conn: psycopg.Connection, photo_id: int) -> list[FaceRow]:
         (photo_id,),
     ).fetchall()
     return [_face(row) for row in rows]
+
+
+def search_people(
+    conn: psycopg.Connection, query: str, limit: int = 25,
+) -> list[PersonRow]:
+    """Fix-up 9 assign dialog: prefix match on any name field (given,
+    surname, maiden, nickname, suffix) OR trigram similarity on
+    display_name and any hand-curated name variant. Returns ordered by
+    a simple relevance score: prefix hits before trigram, alpha within
+    tier. Empty query returns list_people()."""
+    q = (query or "").strip()
+    if not q:
+        return list_people(conn)
+    like = f"{q.lower()}%"
+    rows = conn.execute(
+        """
+        with matches as (
+          select p.id,
+                 case
+                   when lower(coalesce(p.given_name, '')) like %s then 3
+                   when lower(coalesce(p.surname, '')) like %s then 3
+                   when lower(coalesce(p.maiden_name, '')) like %s then 2
+                   when lower(coalesce(p.nickname, '')) like %s then 2
+                   when lower(coalesce(p.suffix, '')) like %s then 1
+                   when exists (
+                     select 1 from person_name_variants v
+                     where v.person_id = p.id and lower(v.variant) like %s
+                   ) then 2
+                   when similarity(coalesce(p.display_name, ''), %s) > 0.15 then 1
+                   else 0
+                 end as score
+          from people p
+          where not p.is_deleted
+        )
+        select p.id, p.display_name, p.given_name, p.middle_name, p.surname,
+               p.maiden_name, p.nickname, p.birth_year, p.death_year, p.notes,
+               p.is_deleted, p.suffix, m.score
+        from people p
+        join matches m on m.id = p.id
+        where m.score > 0
+        order by m.score desc, lower(coalesce(p.display_name, ''))
+        limit %s
+        """,
+        (like, like, like, like, like, like, q, limit),
+    ).fetchall()
+    # Strip the trailing score column before mapping to PersonRow.
+    return [_person(r[:-1]) for r in rows]
 
 
 def list_people(conn: psycopg.Connection) -> list[PersonRow]:
@@ -405,6 +580,253 @@ def create_person(
     return person_id
 
 
+def list_name_variants(conn: psycopg.Connection, person_id: int) -> list[tuple[int, str, str]]:
+    """(variant_id, variant, kind) — a person's hand-curated aliases."""
+    rows = conn.execute(
+        """
+        select id, variant, kind::text
+        from person_name_variants
+        where person_id = %s
+        order by lower(variant)
+        """,
+        (person_id,),
+    ).fetchall()
+    return [(int(r[0]), r[1], r[2]) for r in rows]
+
+
+def add_name_variant(
+    conn: psycopg.Connection,
+    *,
+    person_id: int,
+    variant: str,
+    kind: str = "nickname",
+) -> int | None:
+    """Case-insensitively unique per person; returns the new id or None
+    if the variant already exists on this person."""
+    if not variant.strip():
+        return None
+    row = conn.execute(
+        """
+        insert into person_name_variants (person_id, variant, kind)
+        values (%s, %s, %s)
+        on conflict do nothing
+        returning id
+        """,
+        (person_id, variant.strip(), kind),
+    ).fetchone()
+    if row is None:
+        return None
+    variant_id = int(row[0])
+    dbmod.audit(
+        conn, actor="desktop", action="person.variant.add",
+        entity_type="person", entity_id=person_id,
+        new_value={"variant": variant.strip(), "kind": kind, "variant_id": variant_id},
+    )
+    return variant_id
+
+
+def remove_name_variant(conn: psycopg.Connection, variant_id: int) -> None:
+    row = conn.execute(
+        "select person_id, variant, kind from person_name_variants where id = %s",
+        (variant_id,),
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute("delete from person_name_variants where id = %s", (variant_id,))
+    dbmod.audit(
+        conn, actor="desktop", action="person.variant.remove",
+        entity_type="person", entity_id=int(row[0]),
+        previous_value={"variant": row[1], "kind": row[2], "variant_id": variant_id},
+    )
+
+
+@dataclass
+class DateAcceptResult:
+    accepted: bool
+    conflict: bool
+    existing_date: str | None
+    existing_precision: str | None
+    new_date: str | None
+    new_precision: str | None
+
+
+def promote_date_suggestion(
+    conn: psycopg.Connection,
+    *,
+    suggestion_id: int,
+    allow_overwrite: bool = False,
+) -> DateAcceptResult:
+    """Fix-up 10: 'Accept date' promotes a `suggestions` row of kind
+    'date' to `photos.capture_date` + precision + confirmed=true. Writes
+    an audit row and refreshes the completeness score. If the target
+    photo already has a confirmed date and `allow_overwrite` is False,
+    returns `conflict=True` with the existing values so the UI can
+    prompt."""
+    row = conn.execute(
+        """
+        select photo_id, kind::text, payload, status::text
+        from suggestions where id = %s
+        """,
+        (suggestion_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"suggestion {suggestion_id} not found")
+    photo_id, kind, payload, status = row
+    if kind != "date":
+        raise ValueError(f"suggestion {suggestion_id} is kind {kind!r}, not 'date'")
+    if status != "pending":
+        raise ValueError(f"suggestion {suggestion_id} is already {status}")
+    if photo_id is None:
+        raise ValueError("date suggestion has no photo_id")
+    payload = payload if isinstance(payload, dict) else json.loads(payload)
+    new_date = payload.get("date")
+    new_precision = payload.get("precision") or "unknown"
+
+    existing = conn.execute(
+        """
+        select capture_date::text, capture_date_precision::text,
+               capture_date_confirmed
+        from photos where id = %s
+        """,
+        (photo_id,),
+    ).fetchone()
+    if existing is None:
+        raise ValueError(f"photo {photo_id} not found")
+    exist_date, exist_prec, exist_confirmed = existing
+
+    if exist_confirmed and not allow_overwrite:
+        return DateAcceptResult(
+            accepted=False, conflict=True,
+            existing_date=exist_date, existing_precision=exist_prec,
+            new_date=new_date, new_precision=new_precision,
+        )
+
+    conn.execute(
+        """
+        update photos
+        set capture_date = %s::date,
+            capture_date_precision = %s::date_precision,
+            capture_date_confirmed = true
+        where id = %s
+        """,
+        (new_date, new_precision, photo_id),
+    )
+    conn.execute(
+        """
+        update suggestions
+        set status = 'accepted', resolved_at = now()
+        where id = %s
+        """,
+        (suggestion_id,),
+    )
+    dbmod.audit(
+        conn, actor="desktop", action="photo.capture_date.set",
+        entity_type="photo", entity_id=int(photo_id),
+        previous_value={"capture_date": exist_date, "precision": exist_prec,
+                        "confirmed": exist_confirmed},
+        new_value={"capture_date": new_date, "precision": new_precision,
+                   "confirmed": True, "suggestion_id": suggestion_id},
+    )
+    # Best-effort completeness refresh. The function may not exist in
+    # every DB (older test DBs?), so guard.
+    try:
+        conn.execute("select refresh_completeness(%s)", (int(photo_id),))
+    except Exception:
+        pass
+    return DateAcceptResult(
+        accepted=True, conflict=False,
+        existing_date=exist_date, existing_precision=exist_prec,
+        new_date=new_date, new_precision=new_precision,
+    )
+
+
+def confirm_back_transcription(
+    conn: psycopg.Connection,
+    *,
+    photo_back_id: int,
+    edited_text: str | None = None,
+    confidence: float | None = None,
+) -> None:
+    """Fix-up 10 item 2: George confirms (or edits and confirms) the
+    OCR/VLM transcription on a photo_backs row. Sets
+    `transcription_confirmed = true` and, if `edited_text` is given,
+    updates `transcribed_text` too. Writes `back.transcription_edit`
+    audit."""
+    row = conn.execute(
+        """
+        select transcribed_text, transcription_confidence, transcription_confirmed
+        from photo_backs where id = %s
+        """,
+        (photo_back_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"photo_back {photo_back_id} not found")
+    prev_text, prev_conf, prev_confirmed = row
+    if edited_text is not None:
+        conn.execute(
+            """
+            update photo_backs
+            set transcribed_text = %s,
+                transcription_confidence = coalesce(%s, transcription_confidence),
+                transcription_confirmed = true
+            where id = %s
+            """,
+            (edited_text, confidence, photo_back_id),
+        )
+        action = "back.transcription_edit"
+        new_val = {
+            "transcribed_text": edited_text,
+            "transcription_confidence": confidence or prev_conf,
+            "transcription_confirmed": True,
+        }
+    else:
+        conn.execute(
+            """
+            update photo_backs
+            set transcription_confirmed = true
+            where id = %s
+            """,
+            (photo_back_id,),
+        )
+        action = "back.transcription_confirm"
+        new_val = {"transcription_confirmed": True}
+    dbmod.audit(
+        conn, actor="desktop", action=action,
+        entity_type="photo_back", entity_id=photo_back_id,
+        previous_value={
+            "transcribed_text": prev_text,
+            "transcription_confidence": prev_conf,
+            "transcription_confirmed": bool(prev_confirmed),
+        },
+        new_value=new_val,
+    )
+
+
+def photos_for_person(conn: psycopg.Connection, person_id: int) -> list[int]:
+    """Distinct photo ids where this person has at least one non-deleted face."""
+    rows = conn.execute(
+        """
+        select distinct photo_id
+        from faces
+        where person_id = %s and not is_deleted
+        order by photo_id
+        """,
+        (person_id,),
+    ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def face_count_for_person(conn: psycopg.Connection, person_id: int) -> int:
+    row = conn.execute(
+        """
+        select count(*) from faces
+        where person_id = %s and not is_deleted
+        """,
+        (person_id,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def update_person(conn: psycopg.Connection, person_id: int, **fields) -> None:
     cols = []
     vals = []
@@ -575,6 +997,84 @@ def soft_delete_face(
                         "was_deleted": bool(prev[1]) if prev else None},
         new_value={"is_deleted": True, "reason": reason},
     )
+
+
+def update_face_bbox(
+    conn: psycopg.Connection,
+    *,
+    face_id: int,
+    new_bbox: dict,
+    source: str = "human",
+    reason: str = "manual_bbox_edit",
+) -> dict | None:
+    """Fix-up 9: manual bbox adjustment from the preview. Updates
+    `faces.bbox`, marks the source `human`, and writes a
+    `face.bbox_edit` audit row with previous and new bboxes. The
+    embedding stays put (potentially stale) — the caller decides
+    whether to refresh it via `/detect-faces` or set
+    `embedding_stale=true`."""
+    prev = conn.execute(
+        "select bbox, source from faces where id = %s", (face_id,)
+    ).fetchone()
+    if prev is None:
+        return None
+    prev_bbox = prev[0] if isinstance(prev[0], dict) else json.loads(prev[0])
+    conn.execute(
+        """
+        update faces
+        set bbox = %s, source = %s
+        where id = %s
+        """,
+        (json.dumps(new_bbox), source, face_id),
+    )
+    dbmod.audit(
+        conn, actor="desktop", action="face.bbox_edit",
+        entity_type="face", entity_id=face_id,
+        previous_value={"bbox": prev_bbox, "source": prev[1]},
+        new_value={"bbox": new_bbox, "source": source, "reason": reason},
+    )
+    return prev_bbox
+
+
+def refresh_face_embedding(
+    conn: psycopg.Connection,
+    *,
+    face_id: int,
+    embedding: list[float],
+    embedding_model: str,
+) -> None:
+    conn.execute(
+        """
+        update faces
+        set embedding = %s,
+            embedding_model = %s,
+            embedding_stale = false
+        where id = %s
+        """,
+        (embedding, embedding_model, face_id),
+    )
+
+
+def mark_face_embedding_stale(
+    conn: psycopg.Connection, *, face_id: int, stale: bool = True,
+) -> None:
+    conn.execute(
+        "update faces set embedding_stale = %s where id = %s",
+        (stale, face_id),
+    )
+
+
+def stale_faces(conn: psycopg.Connection) -> list[FaceRow]:
+    rows = conn.execute(
+        """
+        select id, photo_id, person_id, bbox, embedding, embedding_model,
+               confidence, is_disputed, is_deleted
+        from faces
+        where embedding_stale and not is_deleted
+        order by id
+        """
+    ).fetchall()
+    return [_face(row) for row in rows]
 
 
 def draw_face(

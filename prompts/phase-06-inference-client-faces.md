@@ -185,3 +185,28 @@ George needs to dismiss a cluster he cannot name without it coming back. Two dis
 6. Tests: U/I set status + audit; queue excludes them; ignore excluded from references; undo restores.
 
 Commit: `Phase 6 fix-up 8: unknown / ignore faces`.
+
+---
+
+## Phase 6 fix-up 9 — box editing, people editing, assign dialog
+
+1. **Some face boxes are still wrong** after fix-up 6 (fewer, but not zero). George's examples: **photo 1114** and **photo 9121**. Run `diagnose_face_box` on both and report the verdict lines before changing code. Likely remaining causes: orientation 3 (180°) rows the rescale could not fix, photos whose working copy was regenerated at a different size, or faces added before a rescan changed the preferred master. Fix the class, not the instances.
+2. **Manual box adjust.** In the full-photo preview (and the per-photo view): drag a box to move it, drag its corners to resize, `Delete` to mark not-a-face, drag on empty space to draw a new one. On release: update `faces.bbox`, `source='human'` (keeps `person_id`), audit row `face.bbox_edit` with previous/new, regenerate the crop, and recompute the embedding from the new crop via `/detect-faces` when the service is up (else leave the old embedding and flag `embedding_stale=true` for the next detect pass). Keyboard nudge: arrows move 2 px, Shift+arrows 10 px.
+3. **People editing must be easy to find.** Add a **People** entry to the sidebar: searchable list (name, face count, years), open the editor from any row, edit all name fields (given, middle, surname, maiden, nickname, suffix), birth/death year, notes, name variants (add/remove), merge into another person, and a "show all photos" button. The same editor opens from the person label in the cluster header, the preview caption, and the Person view. Every edit writes an audit row.
+4. **Assign-existing-person dialog**: opens with an **empty** text field and focus in it; typing filters live (prefix on any name part, then trigram on display_name and variants), results ranked with the AI's suggested person first if present; Enter picks the highlighted row; Esc cancels. Never pre-fill with the suggestion — show it as the first row instead.
+
+Tests: bbox edit round-trip + audit; people editor field round-trip; dialog filtering order.
+Commit: `Phase 6 fix-up 9: box editing, People sidebar, assign dialog`.
+
+---
+
+## Phase 6 fix-up 10 — show the back and its transcription in the preview
+
+All 824 backs are transcribed (`photo_backs.transcribed_text`). In the full-photo preview (and per-photo view), when the photo has one or more `photo_backs` rows, add a **Back** panel below or beside the image:
+
+1. The back image itself (from `photo_backs.working_path`, `exif_transpose`d, RGB-converted), thumbnail-sized with click-to-enlarge; a toggle key **T** flips the main pane between front and back.
+2. The transcription text, verbatim with line breaks, with the confidence and orientation used; parsed dates and names from the `transcription` suggestion payload rendered as chips ("1962", "Peggy"). A **Fix transcription** button opens an editable text box; saving writes `photo_backs.transcribed_text`, sets `transcription_confirmed=true`, audit row `back.transcription_edit`. A **Confirm** button sets `transcription_confirmed=true` without edits.
+3. Also list the photo's other AI/import suggestions (date suggestions with evidence, description when available, folder hint) in a small "Suggestions" block, read-only for now — accept/reject stays an admin web action in Phase 9/10, except: an **Accept date** button here that promotes a date suggestion to `capture_date` (George in the desktop is the admin) with the standard accept semantics (409-style conflict prompt if a different confirmed date exists, audit row, completeness refresh).
+4. In the cluster grid, faces whose photo has a back get a small "✎" badge on the tile so George knows there's writing to read.
+
+Commit: `Phase 6 fix-up 10: back panel and transcription in preview`.
