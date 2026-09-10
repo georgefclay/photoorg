@@ -10,6 +10,30 @@ INVIOLABLE on the web side:
 - **No real deletes.** Hide, soft-delete, reject — never remove.
 - Expiries in SQL; POST for every state change; CSRF on session-authed POSTs; service token for the desktop.
 
+## Groups — the access model (read `PROJECT-PLAN.md` §2 "Groups")
+Build this first; every route below depends on it.
+
+Migration: `groups` (id, name unique, description, created_by, created_at, is_deleted); `group_members` (group_id, user_id, role `member`|`moderator`, added_by, added_at; PK on the pair); `photo_groups` (photo_id, group_id, added_by, added_at; PK on the pair). Add `contributions.group_ids bigint[]` (target groups chosen by the uploader). Soft deletes only.
+
+Visibility rule, implemented once as SQL fragments/helpers and used **everywhere** a photo, face, back, thumbnail, comment, like, suggestion, person-page photo list, search result, or count is produced:
+- admin → all non-private, non-deleted photos;
+- everyone else → photos that share at least one group with the user (`exists (select 1 from photo_groups pg join group_members gm using (group_id) where pg.photo_id = photos.id and gm.user_id = $me)`);
+- photos with no group are visible to admins only;
+- `is_private` still wins over everything.
+Tests must prove a non-member gets 404 (not 403 — don't confirm existence) for detail, image, thumb, back, faces, comments, and that lists/counts/search never include invisible photos.
+
+Roles: `requireAdmin` (exists); `requireModerator(groupId)` = admin or `group_members.role='moderator'` for that group.
+
+Moderator endpoints (scoped to their group, audited): hide/unhide a comment on a photo visible in their group; remove a photo from their group (`photo_groups` row soft-removed; if the photo has no groups left it becomes unfiled — never a site-wide delete); add/remove members of their group (never role changes); approve/reject contribution files whose target groups include theirs (approval assigns those groups).
+
+Admin endpoints: group CRUD; membership and role changes; bulk assign/unassign photos to groups by filter (album, scan_batch, person, year range, source folder, id list); `GET /api/admin/unfiled` (paginated); approval of access requests now also takes initial group ids (Phase 8's approve page gets a group multi-select).
+
+Sync: `POST /sync/photo_groups` (desktop → web, upsert/soft-remove); `GET /sync/pull/groups` (groups + memberships + photo_groups changed since cursor, web → desktop). Conflicts: last-writer-wins by `updated_at`, audited.
+
+Desktop: a **Groups** section in Sync mode (or its own mode): pull groups; bulk assign/unassign photos to groups by album, batch, person, year, source folder, or the current grid selection; show per-group counts and the unfiled count; push. This is how the 12,800 existing photos get filed.
+
+Uploads: the uploader picks one or more of **their own** groups (server validates membership); the contribution and its files carry `group_ids`; approval assigns them.
+
 ## Storage on the VM
 `PHOTO_DIR` (from `.env`) holds `working/` (synced working copies, flat, same names as the laptop), `thumbs/` (320 px), `faces/` (face crops), `backs/`, and `uploads/` (contributions, originals, never modified). Express serves `working/`, `thumbs/`, `faces/`, `backs/` **only** through a route that checks the photo is not private and the requester is signed in — never `express.static` on `PHOTO_DIR`. Set `Cache-Control: private, max-age=86400` on served images.
 
@@ -63,6 +87,7 @@ Uploaded files are visible only to their uploader (`/mine`) and admins until app
 ## Tests (`node --test` + supertest on `TEST_DATABASE_URL`)
 - Sync: upsert idempotence; 400 on a private record; file version handshake; pull-confirmed since-cursor.
 - Privacy: a row inserted directly with `is_private=true` is absent from list, detail, image route, and counts.
+- Groups: non-member 404s on every photo-scoped route; member sees; admin sees unfiled; moderator can remove-from-group but not from another group; moderator approve limited to own group; bulk assign by album/batch/person/year; sync round-trip of photo_groups both directions.
 - Suggestions: contributor creates; admin accept writes the fact + audit + completeness; 409 on conflicting confirmed value; force works and audits.
 - Faces: contributor tag creates suggestion, not fact; dispute; admin resolve.
 - Contributions: sha pre-check; duplicate detection against a seeded photo; approval flow; uploader isolation (user A cannot see user B's pending files); rejected file still on disk.
@@ -76,7 +101,7 @@ Desktop: pytest for push resumability (kill mid-batch → resume sends only the 
 3. Confirm zero private photos on the web side (there are 0 today — mark one private on the laptop, push, confirm it never arrives; unmark).
 4. From a phone on the LAN: upload 3 photos through `/upload`; approve 2 on `/admin/contributions`; Pull on the desktop; confirm the two files landed under `D:\Contributed\...`, were ingested with `uploaded_by`, and the rejected one did not move.
 5. Suggest a date and a face tag as a contributor account; accept both as admin; confirm the facts, audit rows, and the completeness change.
-6. Update `CLAUDE.md`, `shared/SCHEMA.md`, `web/README.md` (API summary). Commit and push: `Phase 9: web core, sync, contributions`.
+6. Update `CLAUDE.md`, `shared/SCHEMA.md`, `web/README.md` (API summary). Commit and push: `Phase 9: web core, groups, sync, contributions`.
 
 ---
 
