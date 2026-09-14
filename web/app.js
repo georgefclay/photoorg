@@ -22,6 +22,7 @@ const apiCsrfRoutes = require('./routes/api-csrf');
 const apiContribRoutes = require('./routes/api-contrib');
 const apiAdminRoutes = require('./routes/api-admin');
 const apiGroupsModule = require('./routes/api-groups');
+const syncRoutes = require('./routes/sync');
 
 function createApp({ pool }) {
   const app = express();
@@ -75,8 +76,10 @@ function createApp({ pool }) {
   app.use('/api/admin/photos', apiGroupsModule.adminBulkAssignRouter({ pool }));
   app.use('/api/admin', apiAdminRoutes({ pool }));
 
-  // Phase 9 will mount the real sync endpoints here. For Phase 8 we expose
-  // just a ping so the middleware is exercised end-to-end.
+  // Phase 9 sync endpoints (service-token authed).
+  app.use('/sync', syncRoutes({ pool }));
+
+  // Kept for Phase 8 smoke tests.
   app.get('/service/ping', requireService, (_req, res) => {
     res.json({ ok: true, service: true });
   });
