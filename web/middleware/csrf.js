@@ -40,7 +40,10 @@ function csrfMiddleware(req, res, next) {
   // so req.user is populated.
   if (!req.user) return next();
 
-  const supplied = req.body && req.body._csrf;
+  // Accept the token either as the `_csrf` form field or as the
+  // `X-CSRF-Token` header — JSON clients (Phase 9 /api/*) supply the
+  // header instead of a form field.
+  const supplied = (req.body && req.body._csrf) || req.get('x-csrf-token');
   if (!token || !supplied || supplied !== token) {
     return res.status(403).render('error', {
       title: 'Forbidden',

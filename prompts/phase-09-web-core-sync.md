@@ -134,4 +134,7 @@ GO.
 - [x] Visibility helpers (`web/middleware/visibility.js`) — `photoVisibleSql`, `photoVisibleWhere`, `assertPhotoVisible`, `isModerator`, `userGroupIds`, `userModeratorGroupIds`. Admin sees all non-private non-deleted (including unfiled); contributor needs a live shared group; is_private / is_deleted always exclude. `requireModerator` middleware.
 - [x] Image-serving route `/media/{thumbs,working,backs,faces}/:id` — session-gated, visibility-checked, Cache-Control: private max-age=86400, 404 (never 403) on non-membership.
 - [x] Web tests 28/28 green (6 new visibility tests, existing auth tests untouched).
+- [x] Read APIs: `/api/photos` list (year/decade/person/place/album/has_no_date/has_untagged_faces/low_completeness filters; recent/liked/incomplete sorts; keyset paginated) + detail (faces, comments, place, likes, backs, pending suggestions, physical ref, rescan_wanted; suggester identity shown to admins + group moderators only). `/api/people` list + detail + autocomplete + create (contributor). `/api/albums` list + detail. `/api/relationships` POST → suggestion. `POST /api/photos/:id/rescan_wanted` (admin).
+- [x] CSRF middleware also accepts `X-CSRF-Token` header (`_csrf` form field still works). `GET /api/csrf` exposes the token to JS clients.
+- [x] Web tests 35/35 green (7 new API read tests).
 
