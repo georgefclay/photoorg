@@ -14,6 +14,7 @@ const requestAccessRoutes = require('./routes/request-access');
 const loginRoutes = require('./routes/login');
 const magicRoutes = require('./routes/magic');
 const adminRoutes = require('./routes/admin');
+const mediaRoutes = require('./routes/media');
 
 function createApp({ pool }) {
   const app = express();
@@ -55,6 +56,7 @@ function createApp({ pool }) {
   app.use('/', loginRoutes({ pool, authLimiter: makeAuthLimiter() }));
   app.use('/', magicRoutes({ pool }));
   app.use('/admin', adminRoutes({ pool }));
+  app.use('/media', mediaRoutes({ pool }));
 
   // Phase 9 will mount the real sync endpoints here. For Phase 8 we expose
   // just a ping so the middleware is exercised end-to-end.

@@ -106,4 +106,32 @@ Desktop: pytest for push resumability (kill mid-batch → resume sends only the 
 ---
 
 ## Answers to Claude Code's questions
-(added as they come)
+
+1. **Join-table sync columns.** Yes: `updated_at` (trigger), `is_deleted`, `deleted_at`, `deleted_by` on `group_members` and `photo_groups`. Remove = soft-delete the row. Never hard-delete-and-recreate.
+2. **contributions tables.** (b) extend via ALTER. Phase 8 doesn't depend on them, but drop-and-recreate on a production-bound migration path is a habit we don't want. Add what's missing; rename nothing.
+3. **group_ids array.** App-enforced validation (every id exists, not deleted, uploader is a member). Fine.
+4. **Embeddings.** Gate behind `SYNC_FACE_EMBEDDINGS=false` in `desktop/.env` for now. Always push bbox / person_id / disputed / review_status; embeddings only when the flag is on. Column stays nullable on the VM.
+5. **Visibility everywhere.** Confirmed: people, albums, places pages and every count on them. If a contributor can't see a photo, it doesn't exist for them anywhere on the site.
+6. **Moderator approval.** The fair one: a moderator's approval assigns **only their own group**; other targeted groups stay pending for their own moderators or an admin. A file becomes `approved` (and pullable) once any target group has approved it; later approvals just add `photo_groups` rows through the normal web → desktop pull. A moderator's reject removes only their group from the targets; the file is `rejected` only when no target group remains.
+7. **Bulk assign.** Synchronous, one transaction, cap 20,000 rows per call, return counts.
+8. **pull/confirmed comments.** Minimal: `{photo_id, comment_count, has_hidden}`. Bodies stay web-authoritative.
+9. **Laptop-side PHOTO_DIR.** Yes, `C:\Photos-web-local\`. Note it in `GC.md`.
+10. **Contrib root.** (a) One root: `contrib=D:\Contributed|contrib`, per-uploader subfolders inside. (b) Guard: under a `contrib`-kind root, creation is permitted only inside `<root>\_incoming\<contribution_id>\`; after that contribution is ingested the folder is renamed to `<root>\<uploader>\<contribution_id>\`, and the manifest check covers everything outside `_incoming`. Nothing may ever modify or delete an existing file under the root.
+11. **Duplicates.** (c) badge, admin/moderator chooses. Approving a sha256-exact duplicate records it and creates no new photo; a pHash-near duplicate becomes a normal contribution file and laptop-side dedupe/rescan decides.
+12. **Rate limits.** 300/hour per user combined on suggestions/comments/likes/tags; 600/hour on uploads; admins exempt.
+13. **Suggester identity.** Display name to admins and to moderators of a group the photo is in; "someone" to everyone else. Never the email.
+14. **Minimal pages.** Confirmed — functional, mobile-safe, no polish. Phase 10 replaces them.
+15. **Real Express in pytest.** Yes, subprocess against `TEST_DATABASE_URL`; skip with a clear message if `node` or web deps are missing.
+
+GO.
+
+---
+
+## Progress
+
+- [x] Migration `phase-9-groups` — groups + group_members + photo_groups with soft-delete + updated_at trigger for LWW sync.
+- [x] Migration `phase-9-contributions` — contributions + contribution_files with group_ids, sha256/phash dedupe fields, approved_group_ids per file, is_video flag.
+- [x] Visibility helpers (`web/middleware/visibility.js`) — `photoVisibleSql`, `photoVisibleWhere`, `assertPhotoVisible`, `isModerator`, `userGroupIds`, `userModeratorGroupIds`. Admin sees all non-private non-deleted (including unfiled); contributor needs a live shared group; is_private / is_deleted always exclude. `requireModerator` middleware.
+- [x] Image-serving route `/media/{thumbs,working,backs,faces}/:id` — session-gated, visibility-checked, Cache-Control: private max-age=86400, 404 (never 403) on non-membership.
+- [x] Web tests 28/28 green (6 new visibility tests, existing auth tests untouched).
+
