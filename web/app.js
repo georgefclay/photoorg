@@ -21,6 +21,7 @@ const apiAlbumsRoutes = require('./routes/api-albums');
 const apiCsrfRoutes = require('./routes/api-csrf');
 const apiContribRoutes = require('./routes/api-contrib');
 const apiAdminRoutes = require('./routes/api-admin');
+const apiGroupsModule = require('./routes/api-groups');
 
 function createApp({ pool }) {
   const app = express();
@@ -69,6 +70,9 @@ function createApp({ pool }) {
   app.use('/api/relationships', apiPeopleModule.relationshipsRouter({ pool }));
   app.use('/api/albums', apiAlbumsRoutes({ pool }));
   app.use('/api', apiContribRoutes({ pool }));
+  app.use('/api/groups', apiGroupsModule({ pool }));
+  app.use('/api/admin/groups', apiGroupsModule.adminGroupsRouter({ pool }));
+  app.use('/api/admin/photos', apiGroupsModule.adminBulkAssignRouter({ pool }));
   app.use('/api/admin', apiAdminRoutes({ pool }));
 
   // Phase 9 will mount the real sync endpoints here. For Phase 8 we expose

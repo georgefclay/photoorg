@@ -141,4 +141,6 @@ GO.
 - [x] Moderator write: `POST /api/comments/:id/{hide,unhide}` — admin OR moderator of any group the photo is in.
 - [x] Admin API: `GET/POST /api/admin/suggestions/*` with 409-on-confirmed + force override + refresh_completeness on accept; date/person/place/description/relationship/classification(no_people) accept paths. Disputes list + resolve (keep/unassign/reassign). Audit browser. Monthly report. Rescan list. Unfiled queue.
 - [x] Web tests 44/44 green (9 new write tests).
+- [x] Groups routes: `GET /api/groups` (mine, with counts + my_role) + `GET /api/groups/:id`. Admin CRUD (`POST/PATCH/POST-delete`). Membership add/remove/role-change (admin — any role; moderator — member only). Moderator `POST /api/groups/:groupId/photos/:photoId/remove`. Bulk assign at `POST /api/admin/photos/bulk-assign-groups` (synchronous, cap 20 000, one transaction, filters: album_id / scan_batch / person_id / year / decade / source_folder / ids; adds and removes both).
+- [x] Web tests 48/48 green (4 new groups tests).
 
