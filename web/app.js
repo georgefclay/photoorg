@@ -19,6 +19,8 @@ const apiPhotosRoutes = require('./routes/api-photos');
 const apiPeopleModule = require('./routes/api-people');
 const apiAlbumsRoutes = require('./routes/api-albums');
 const apiCsrfRoutes = require('./routes/api-csrf');
+const apiContribRoutes = require('./routes/api-contrib');
+const apiAdminRoutes = require('./routes/api-admin');
 
 function createApp({ pool }) {
   const app = express();
@@ -66,6 +68,8 @@ function createApp({ pool }) {
   app.use('/api/people', apiPeopleModule({ pool }));
   app.use('/api/relationships', apiPeopleModule.relationshipsRouter({ pool }));
   app.use('/api/albums', apiAlbumsRoutes({ pool }));
+  app.use('/api', apiContribRoutes({ pool }));
+  app.use('/api/admin', apiAdminRoutes({ pool }));
 
   // Phase 9 will mount the real sync endpoints here. For Phase 8 we expose
   // just a ping so the middleware is exercised end-to-end.
