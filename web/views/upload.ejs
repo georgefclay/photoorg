@@ -1,0 +1,191 @@
+<%- include('partials/head', { title: 'Upload' }) %>
+<style>
+  .upload-wrap { max-width: 42rem; margin: 0 auto; padding: 1rem; }
+  .upload-wrap h1 { font-size: 1.4rem; margin: .3rem 0 1rem; }
+  .upload-form label { display: block; margin: .8rem 0 .3rem; font-weight: bold; }
+  .upload-form input, .upload-form select, .upload-form textarea {
+    width: 100%; padding: .6rem; font: inherit; box-sizing: border-box;
+  }
+  .upload-form textarea { min-height: 4rem; }
+  .field-row { display: flex; gap: .4rem; flex-wrap: wrap; }
+  .field-row > * { flex: 1 1 45%; }
+  .file-input-wrap { margin: .6rem 0; }
+  .file-list { list-style: none; padding: 0; margin: 1rem 0; }
+  .file-list li { padding: .4rem 0; border-bottom: 1px solid #ddd; font-size: .95rem; }
+  .file-list .name  { display: block; word-break: break-all; }
+  .file-list .meta  { color: #666; font-size: .85rem; }
+  .file-list .bar   { display: block; margin-top: .3rem; background: #eee; height: .5rem; overflow: hidden; border-radius: 3px; }
+  .file-list .bar > span { display: block; height: 100%; background: #4c9; width: 0%; transition: width .2s; }
+  .file-list .status { font-size: .85rem; }
+  .file-list .status.err { color: #a00; }
+  .file-list .status.dup { color: #b70; }
+  .actions { display: flex; gap: .5rem; margin-top: 1rem; }
+  .actions button { padding: .7rem 1rem; font: inherit; min-height: 44px; }
+  .primary { background: #06c; color: #fff; border: none; border-radius: .3rem; }
+  .primary:disabled { background: #99b; }
+</style>
+
+<div class="upload-wrap">
+  <h1>Upload photos</h1>
+  <p>Files stay private (only you and the admin see them) until they're approved. Family photos only — please skip anything sensitive.</p>
+
+  <form class="upload-form" id="upload-form">
+    <label for="groups">Which groups is this for?</label>
+    <select id="groups" multiple size="4"></select>
+    <p style="font-size:.85rem;color:#666;margin-top:.2rem">Hold Ctrl / Cmd to pick more than one. If you leave this blank the admin will decide where they go.</p>
+
+    <label for="note">Note (optional)</label>
+    <textarea id="note" maxlength="1000" placeholder="e.g. Grandad's 1962 fishing trip photos"></textarea>
+
+    <div class="file-input-wrap">
+      <label for="files-gallery">Choose photos or take a picture</label>
+      <input id="files-gallery" type="file" accept="image/*,video/*" multiple />
+      <input id="files-camera"  type="file" accept="image/*" capture="environment" style="margin-top:.4rem" />
+      <input id="files-dir"     type="file" webkitdirectory directory style="margin-top:.4rem" />
+    </div>
+
+    <ul class="file-list" id="file-list"></ul>
+
+    <div class="actions">
+      <button type="button" class="primary" id="start-btn" disabled>Send</button>
+      <span id="status-line" style="align-self:center;color:#444"></span>
+    </div>
+  </form>
+</div>
+
+<script>
+(async function () {
+  const csrf = (await fetch('/api/csrf').then(r => r.json())).csrfToken;
+
+  // Load groups the user is a member of.
+  const groupsSel = document.getElementById('groups');
+  const groupsRes = await fetch('/api/groups').then(r => r.json());
+  for (const g of groupsRes.items || []) {
+    const opt = document.createElement('option');
+    opt.value = g.id;
+    opt.textContent = g.name;
+    groupsSel.appendChild(opt);
+  }
+
+  const fileList = document.getElementById('file-list');
+  const startBtn = document.getElementById('start-btn');
+  const statusLine = document.getElementById('status-line');
+  const chosen = [];
+
+  function addFilesFrom(input) {
+    for (const f of input.files) chosen.push(f);
+    input.value = '';
+    renderList();
+    if (chosen.length > 0) startBtn.disabled = false;
+  }
+  document.getElementById('files-gallery').addEventListener('change', (e) => addFilesFrom(e.target));
+  document.getElementById('files-camera').addEventListener('change',  (e) => addFilesFrom(e.target));
+  document.getElementById('files-dir').addEventListener('change',     (e) => addFilesFrom(e.target));
+
+  function renderList() {
+    fileList.innerHTML = '';
+    chosen.forEach((f, i) => {
+      const li = document.createElement('li');
+      li.dataset.i = i;
+      li.innerHTML = `
+        <span class="name">${escapeHtml(f.name)}</span>
+        <span class="meta">${f.type || 'file'} — ${(f.size / 1024 / 1024).toFixed(2)} MB</span>
+        <span class="bar"><span></span></span>
+        <span class="status">queued</span>
+      `;
+      fileList.appendChild(li);
+    });
+  }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  async function sha256Of(file) {
+    const buf = await file.arrayBuffer();
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hash))
+      .map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    statusLine.textContent = 'Preparing…';
+
+    // Create a contribution.
+    const groupIds = Array.from(groupsSel.selectedOptions).map((o) => Number(o.value));
+    const note = document.getElementById('note').value.trim();
+    const create = await fetch('/api/contributions', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+      body: JSON.stringify({ group_ids: groupIds, note }),
+    });
+    if (!create.ok) {
+      const err = await create.json().catch(() => ({}));
+      statusLine.textContent = 'Could not start: ' + (err.error || create.status);
+      startBtn.disabled = false;
+      return;
+    }
+    const cid = (await create.json()).id;
+    statusLine.textContent = 'Uploading ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's') + '…';
+
+    // Sequential per-file uploads with sha pre-check + progress + retry.
+    for (let i = 0; i < chosen.length; i++) {
+      const li = fileList.children[i];
+      const setStatus = (t, cls) => {
+        const el = li.querySelector('.status');
+        el.textContent = t;
+        el.className = 'status' + (cls ? ' ' + cls : '');
+      };
+      const setProgress = (pct) => {
+        li.querySelector('.bar > span').style.width = pct + '%';
+      };
+      const file = chosen[i];
+      try {
+        setStatus('hashing…');
+        const sha = await sha256Of(file);
+        setStatus('checking…');
+        // HEAD pre-check.
+        const head = await fetch(`/api/contributions/${cid}/files?sha256=` + sha, { method: 'HEAD' });
+        if (head.status === 204) {
+          setProgress(100);
+          setStatus('already on the archive — skipped', 'dup');
+          continue;
+        }
+        setStatus('sending…');
+        await uploadOne(cid, csrf, file, setProgress);
+        setProgress(100);
+        setStatus('sent');
+      } catch (err) {
+        setStatus('failed — ' + err.message, 'err');
+      }
+    }
+
+    // Finish.
+    await fetch(`/api/contributions/${cid}/finish`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+      body: '{}',
+    });
+    statusLine.textContent = 'Done. The admin has been notified.';
+  });
+
+  function uploadOne(cid, csrf, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/contributions/${cid}/files`);
+      xhr.setRequestHeader('x-csrf-token', csrf);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText || '{}'));
+        else reject(new Error('http ' + xhr.status));
+      };
+      xhr.onerror = () => reject(new Error('network error'));
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      xhr.send(fd);
+    });
+  }
+})();
+</script>
+
+<%- include('partials/foot') %>

@@ -1,0 +1,113 @@
+<%- include('../partials/head', { title: 'Contributions' }) %>
+<style>
+  .contrib-wrap { max-width: 60rem; margin: 0 auto; padding: 1rem; }
+  .contrib { border: 1px solid #ddd; border-radius: .3rem; padding: 1rem; margin-bottom: 1rem; }
+  .contrib h2 { font-size: 1.05rem; margin: 0 0 .3rem; }
+  .contrib .meta { color: #666; font-size: .9rem; margin-bottom: .5rem; }
+  .files { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: .5rem; }
+  .file { border: 1px solid #ddd; border-radius: .3rem; padding: .4rem; font-size: .8rem; text-align: center; }
+  .file .thumb { background: #eee; width: 100%; aspect-ratio: 1/1; margin-bottom: .3rem; display: flex; align-items: center; justify-content: center; color: #999; overflow: hidden; }
+  .file .thumb img { max-width: 100%; max-height: 100%; }
+  .file .dup { color: #b70; }
+  .file .st  { font-weight: bold; }
+  .file .st.approved { color: #050; }
+  .file .st.rejected { color: #a00; }
+  .file .st.pending  { color: #444; }
+  .file button { font: inherit; font-size: .8rem; margin: .2rem 0; padding: .3rem .6rem; }
+  .actions { margin-top: .5rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+  .primary { background: #06c; color: #fff; border: none; border-radius: .3rem; padding: .5rem 1rem; font: inherit; }
+  .danger  { background: #a00; color: #fff; border: none; border-radius: .3rem; padding: .5rem 1rem; font: inherit; }
+</style>
+
+<div class="contrib-wrap">
+  <h1>Pending contributions</h1>
+  <p style="color:#666">Approve files to make them pullable by desktop Sync. Rejected files stay on disk and are never deleted.</p>
+  <div id="list">Loading…</div>
+</div>
+
+<script>
+(async function () {
+  const csrf = (await fetch('/api/csrf').then(r => r.json())).csrfToken;
+  const list = document.getElementById('list');
+
+  async function refresh() {
+    const res = await fetch('/api/admin/contributions?status=pending').then(r => r.json());
+    if (!res.items || res.items.length === 0) {
+      list.textContent = 'Nothing pending.';
+      return;
+    }
+    list.innerHTML = '';
+    for (const c of res.items) {
+      const detail = await fetch('/api/admin/contributions/' + c.id).then(r => r.json());
+      list.appendChild(renderContribution(detail));
+    }
+  }
+
+  function renderContribution(c) {
+    const wrap = document.createElement('div');
+    wrap.className = 'contrib';
+    wrap.id = 'c' + c.id;
+    wrap.innerHTML = `
+      <h2>Contribution #${c.id} — ${escapeHtml(c.uploader || '')}</h2>
+      <div class="meta">Groups: ${c.group_ids && c.group_ids.length ? c.group_ids.join(', ') : '(none — you decide)'} · ${c.files.length} files · ${escapeHtml(c.note || '(no note)')}</div>
+      <div class="files"></div>
+      <div class="actions">
+        <button type="button" class="primary" data-op="approve-all">Approve all</button>
+        <button type="button" class="danger"  data-op="reject-all">Reject all</button>
+      </div>
+    `;
+    const filesEl = wrap.querySelector('.files');
+    for (const f of c.files) filesEl.appendChild(renderFile(c.id, f));
+    wrap.querySelector('[data-op="approve-all"]').onclick = () => bulk(c.id, 'approve-all');
+    wrap.querySelector('[data-op="reject-all"]').onclick  = () => bulk(c.id, 'reject-all');
+    return wrap;
+  }
+
+  function renderFile(cid, f) {
+    const el = document.createElement('div');
+    el.className = 'file';
+    el.innerHTML = `
+      <div class="thumb">${f.mime && f.mime.startsWith('image/') ? '<span>(file)</span>' : '(no preview)'}</div>
+      <div>${escapeHtml(f.original_filename)}</div>
+      <div class="meta">${f.mime || ''} · ${f.size ? (f.size / 1024 / 1024).toFixed(2) + ' MB' : ''}</div>
+      ${f.duplicate_of_photo_id ? `<div class="dup">dup of #${f.duplicate_of_photo_id}${f.duplicate_distance != null ? ' (d=' + f.duplicate_distance + ')' : ''}</div>` : ''}
+      <div class="st ${f.status}">${f.status}</div>
+      <button type="button" data-op="approve">Approve</button>
+      <button type="button" data-op="reject">Reject</button>
+    `;
+    el.querySelector('[data-op="approve"]').onclick = () => single(cid, f.id, 'approve');
+    el.querySelector('[data-op="reject"]').onclick  = () => single(cid, f.id, 'reject');
+    return el;
+  }
+
+  async function single(cid, fid, op) {
+    const res = await fetch(`/api/admin/contributions/${cid}/files/${fid}/${op}`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+      body: '{}',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || ('http ' + res.status));
+    }
+    refresh();
+  }
+  async function bulk(cid, op) {
+    const res = await fetch(`/api/admin/contributions/${cid}/${op}`, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+      body: '{}',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || ('http ' + res.status));
+    }
+    refresh();
+  }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  refresh();
+})();
+</script>
+
+<%- include('../partials/foot') %>

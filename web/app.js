@@ -23,6 +23,8 @@ const apiContribRoutes = require('./routes/api-contrib');
 const apiAdminRoutes = require('./routes/api-admin');
 const apiGroupsModule = require('./routes/api-groups');
 const syncRoutes = require('./routes/sync');
+const apiContributionsModule = require('./routes/api-contributions');
+const { requireUser: requireUserMw, requireAdmin: requireAdminMw } = require('./middleware/require-user');
 
 function createApp({ pool }) {
   const app = express();
@@ -75,6 +77,12 @@ function createApp({ pool }) {
   app.use('/api/admin/groups', apiGroupsModule.adminGroupsRouter({ pool }));
   app.use('/api/admin/photos', apiGroupsModule.adminBulkAssignRouter({ pool }));
   app.use('/api/admin', apiAdminRoutes({ pool }));
+  app.use('/api/contributions', apiContributionsModule({ pool }));
+  app.use('/api/admin/contributions', apiContributionsModule.adminContribRouter({ pool }));
+
+  // Minimal Phase 9 pages — replaced in Phase 10.
+  app.get('/upload', requireUserMw, (_req, res) => res.render('upload'));
+  app.get('/admin/contributions', requireAdminMw, (_req, res) => res.render('admin/contributions'));
 
   // Phase 9 sync endpoints (service-token authed).
   app.use('/sync', syncRoutes({ pool }));
