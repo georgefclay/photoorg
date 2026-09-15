@@ -106,6 +106,13 @@ def _probe_root(root: MasterRoot) -> RootGuardResult:
         r.error = f"Could not list root: {e}"
         return r
 
+    # `contrib` roots use append-only semantics: creation is permitted
+    # only under `<root>/_incoming/<contribution_id>/`. The root itself
+    # and every *committed* subfolder (uploader/contribution_id) must
+    # be read-only. We skip `_incoming` when picking a probe subfolder.
+    if root.kind == "contrib":
+        subs = [s for s in subs if s.name != "_incoming"]
+
     if subs:
         sub = random.choice(subs)
         r.sub_path = sub

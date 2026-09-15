@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 _LABEL_RE = re.compile(r"^[a-z0-9_]+$")
-_KIND_VALUES = {"digital", "scan"}
+_KIND_VALUES = {"digital", "scan", "contrib"}
 
 
 @dataclass(frozen=True)
