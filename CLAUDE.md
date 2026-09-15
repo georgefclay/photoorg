@@ -352,6 +352,111 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Dev mail** goes to `web/tmp/mail/` when `POSTMARK_API_KEY` is unset —
   the sink is gitignored; sign-in links there are clickable.
 
+## Web core, groups, sync, contributions (Phase 9 onwards)
+
+- **Visibility is the load-bearing rule.** A photo is visible to a user
+  when the user is an admin (sees every non-private, non-deleted photo
+  including unfiled) OR they share at least one live group with it
+  (`photo_groups + group_members`, both `is_deleted = false`).
+  `is_private` and `is_deleted` always exclude. Photos with no live
+  group are **admin-only** — that's how the 12 800 back-catalogue
+  photos start until George bulk-assigns them. Every list, count,
+  detail, image, face, back, comment, like, suggestion, and search
+  goes through `middleware/visibility.js`. **A non-member gets 404,
+  never 403** — don't confirm the photo exists.
+- **Groups have soft-delete on the join tables.** `group_members` and
+  `photo_groups` both carry `is_deleted / deleted_at / deleted_by /
+  updated_at` and a `set_updated_at` trigger. A "remove from group" is
+  `update ... set is_deleted = true` — never a hard delete — so the
+  desktop↔web sync can do last-writer-wins by `updated_at`. Ties
+  fall through and re-write; strictly-older incoming rows are
+  rejected. **Group name uniqueness is per live row** (`create unique
+  index groups_name_unique_live on groups (lower(name)) where not is_deleted`).
+- **Moderator scope is per group.** `group_members.role = 'moderator'`
+  (per group). `requireModerator({ groupIdParam })` gates the routes.
+  A moderator may hide/unhide comments on photos visible in their
+  group, remove a photo from their group (soft-delete the
+  `photo_groups` row; photo unfiled iff no groups remain), add/remove
+  **members** of their group (never role changes), and
+  approve/reject contribution files that target their group.
+  **Moderator approve assigns only their group.** Moderator reject
+  removes only their group from the contribution's targets — the file
+  becomes `rejected` only when no target group remains.
+- **Facts vs. suggestions still holds.** Every contributor write
+  produces a `suggestions` row with `source='human'`. Admin
+  `POST /api/admin/suggestions/:id/accept` promotes it into a fact
+  column and writes an audit row; **the accept path returns 409 with
+  both current + proposed values when the target already has a
+  confirmed fact**, and only `force: true` overrides (still audited).
+  Accept also calls `refresh_completeness` on the touched photo.
+- **CSRF has two carriers.** The per-session token comes back as
+  `res.locals.csrfToken` (form `_csrf`) or `X-CSRF-Token` header
+  (JSON clients). `GET /api/csrf` returns the current token for JS.
+  Token-URL POSTs (`/a/:token`, `/admin/access/:token/*`) are exempt
+  and rely on the unguessable token as their CSRF defence.
+- **Contributor rate limit is per-user, in-process.** 300/hour
+  combined across suggestions/comments/likes/tags/disputes;
+  admins exempt. Uploads: 600/hour per user. Both are courtesy caps,
+  not a security tool; replace with Redis if we ever run more than
+  one Node process.
+- **Contributions never make anything public.** Files land under
+  `PHOTO_DIR/uploads/<contribution_id>/<file_id>.<ext>`, visible only
+  to the uploader (`/api/contributions/mine`) and to admins/moderators
+  of a target group. Admin approve-all assigns all target groups;
+  moderator approve assigns only their own. **Rejected files stay on
+  disk forever** with `status='rejected'` — never a delete.
+- **`HEAD /api/contributions/:id/files?sha256=`** returns 204 if the
+  server already holds that sha (photos, photo_masters, or another
+  contribution_files row). The `/upload` page pre-hashes each file in
+  the browser and skips whatever exists — that's how a partial upload
+  resumes.
+- **Duplicate policy on upload:** the file is uploaded either way, and
+  the server records `duplicate_of_photo_id` + `duplicate_distance`
+  when sha256 is exact OR pHash Hamming ≤ 10. Admin decides whether
+  to approve (sha256-exact never creates a new photo; pHash-near goes
+  through laptop-side dedupe / rescan). Never auto-reject.
+- **Sync is service-token authed.** `Authorization: Bearer <SERVICE_TOKEN>`
+  must match `desktop/.env` `WEB_API_TOKEN`. `/sync/photos` batch cap
+  200, rejects with 400 on any `is_private=true` row, and returns
+  `need_files` for photos whose `synced_file_version < file_version`
+  or whose file is missing on disk. `PUT /sync/photos/:id/file`
+  writes the working copy, regenerates a 320-px thumb via `sharp`,
+  and records `synced_file_version` so the second push sends zero
+  files. Every metadata batch route caps at 500 items. **Face
+  embeddings are optional** — the desktop only sends them when
+  `SYNC_FACE_EMBEDDINGS=true` in `desktop/.env`; the web accepts
+  either shape.
+- **`photo_groups` LWW.** Both directions push updates through
+  `POST /sync/photo_groups`. The write compares `updated_at`: strictly
+  older is rejected, equal or newer wins. Soft-delete rows sync with
+  the rest.
+- **`GET /sync/pull/confirmed` is minimal by design.** It returns
+  accepted-suggestion payloads, every fact-set audit row
+  (`photo.capture_date.set`, `face.assign`, `relationship.confirm`,
+  …), and comment/like *summaries* — not comment bodies. Bodies
+  stay web-authoritative; the desktop's metadata writer only needs
+  to know a photo has comments to exclude it from XMP writes.
+- **Contrib master root is append-only.** `MASTER_ROOTS` accepts a
+  `|contrib` kind. Creation is permitted ONLY inside
+  `<root>/_incoming/<contribution_id>/`. The masters guard skips
+  `_incoming/` when probing subfolders. The pull writer snapshots
+  the committed area, streams files into `_incoming/<cid>/`,
+  verifies the snapshot didn't change, then renames to
+  `<uploader>/<cid>/` and calls
+  `POST /sync/pull/contributions/:id/pulled`.
+- **Web `PHOTO_DIR` on the laptop must differ from desktop `WORKING_DIR`**
+  — if the same path, a push copies files onto themselves.
+- **Two facts writers set directly, no promotion needed** (repeated
+  from Phase 6): `photo_backs.transcribed_text/…` and the `faces`
+  rows themselves. Everything else on the web flows through the
+  suggestion queue.
+- **Audit namespaces added in Phase 9:** `contribution.*`,
+  `contribution.file.*`, `photo_group.*`, `group.*`,
+  `group_member.*`, `photo.rescan_wanted`, `sync.pull.*`.
+- **The `photo-back-orphan` migration's `down` refuses to run when
+  orphan `photo_backs` rows exist** — those are legitimate scanned
+  backs of unidentified fronts and must never be silently deleted.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site

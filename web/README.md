@@ -26,10 +26,10 @@ Listens on `PORT` (default 8090).
 | `TEST_DATABASE_URL` | Separate DB used by `npm test`. Must not equal `DATABASE_URL`. Shares `photoorg_test` with `shared/`. |
 | `SESSION_SECRET` | Random bytes. Rotate to log everyone out. |
 | `ADMIN_EMAIL` | Single address that receives access-request notifications. Other admins are not copied. |
-| `SERVICE_TOKEN` | Bearer token the desktop app presents on sync endpoints (Phase 9 onwards). Constant-time compared. |
+| `SERVICE_TOKEN` | Bearer token the desktop app presents on sync endpoints. Must equal `WEB_API_TOKEN` in `desktop/.env`. Constant-time compared. |
 | `POSTMARK_API_KEY` | Leave blank in dev to use the dev-mail fallback. |
 | `POSTMARK_FROM_EMAIL` | Verified sender in Postmark. |
-| `PHOTO_DIR` | Where working-copy JPEGs live on this host. |
+| `PHOTO_DIR` | Root of photo storage on this host. Subfolders `working/`, `thumbs/`, `backs/`, `faces/`, `uploads/` are created on demand. On the laptop keep this distinct from the desktop's `WORKING_DIR` so a Sync push doesn't copy files onto themselves. |
 
 ## Bootstrap the first admin
 
@@ -78,6 +78,60 @@ Refuses if the email already exists. Then start the server and sign in via
 If `POSTMARK_API_KEY` is unset, `services/email.js` logs every message to
 the console and writes a copy to `web/tmp/mail/<timestamp>.txt` so the
 sign-in links are clickable in dev. The `tmp/` directory is gitignored.
+
+## Phase 9 API surface
+
+Session-authed JSON under `/api`. Every list is keyset-paginated (by
+id desc, `cursor` param) and visibility-scoped (see below). Session
+POSTs carry `_csrf` from a form field or `X-CSRF-Token` header;
+`GET /api/csrf` returns the current token. Rate limit: 300/hour per
+user combined across contributor writes; admins exempt. Contributor
+uploads: 600/hour per user.
+
+- `GET  /api/photos` — filters `year|decade|person_id|place_id|album_id|has_no_date|has_untagged_faces|low_completeness`, sort `recent|liked|incomplete`.
+- `GET  /api/photos/:id` — faces (with disputed flag), comments, place, likes, backs (transcription), pending suggestions, physical ref, rescan_wanted. Suggester name shown only to admins + moderators of a group the photo is in.
+- `POST /api/photos/:id/{suggestions,faces,comments,like}` and `POST /api/faces/:id/dispute`. Date suggestions accept free text ("1962", "March 1962", "sometime in the 60s", …) parsed server-side.
+- `POST /api/comments/:id/{hide,unhide}` — admin or moderator of any group the photo is in.
+- `GET  /api/people[/:id][/autocomplete]`, `POST /api/people`, `POST /api/relationships` (files a suggestion).
+- `GET  /api/albums[/:id]`.
+- `POST /api/photos/:id/rescan_wanted` (admin).
+
+Admin (`requireAdmin`):
+
+- `GET  /api/admin/suggestions?status=&kind=`, `POST /api/admin/suggestions/:id/{accept,reject}` — 409 on a conflicting confirmed value; `force: true` overrides and audits. Accept refreshes completeness for the photo.
+- `GET  /api/admin/disputes`, `POST /api/admin/faces/:id/resolve` (`action: keep|unassign|reassign`).
+- `GET  /api/admin/audit`, `GET /api/admin/report/monthly?month=YYYY-MM`, `GET /api/admin/rescan-list`, `GET /api/admin/unfiled`.
+
+Groups (visibility model):
+
+- `GET  /api/groups[/:id]` — user's own groups (admin sees all).
+- Admin: `POST /api/admin/groups`, `PATCH .../:id`, `POST .../:id/delete`, membership add/remove/role.
+- Moderator (of `:groupId`): `POST /api/groups/:groupId/photos/:photoId/remove`, `POST .../members`, `POST .../members/:userId/remove`.
+- Bulk assign: `POST /api/admin/photos/bulk-assign-groups` — synchronous, one transaction, cap 20 000 rows. Body `{album_id|scan_batch|person_id|year|decade|source_folder|ids, add: [gid], remove: [gid]}`.
+
+Contributions (uploader own; admin/moderator across the whole set they scope to):
+
+- `POST /api/contributions`; `HEAD /api/contributions/:id/files?sha256=` (204 if server holds); `POST /api/contributions/:id/files` (multipart, ≤100 MB); `POST /api/contributions/:id/finish` (emails admin); `GET /api/contributions/mine`.
+- Admin/moderator: `GET /api/admin/contributions[/:id]`, `POST .../:id/files/:fid/{approve,reject}`, `POST .../:id/{approve-all,reject-all}` (admin batch). Moderator approve assigns only their group; moderator reject removes only their group from targets.
+
+Sync (service token):
+
+- `POST /sync/photos` (≤200, `need_files` handshake, 400 on private).
+- `PUT  /sync/photos/:id/file`, `PUT /sync/photo_backs/:id/file`, `PUT /sync/faces/:id/crop`.
+- Batched (≤500): `photo_masters`, `people`, `person_name_variants`, `relationships`, `places`, `photo_places`, `albums`, `album_photos`, `faces`, `photo_backs`, `suggestions`, `photo_groups`.
+- `GET  /sync/pull/{groups,confirmed,contributions}?since=<ts>`; `GET .../contributions/:id/files/:file_id` (bytes); `POST .../contributions/:id/pulled`.
+- `GET  /sync/status` — per-table counts + last-touch.
+
+Visibility rule (implemented in `middleware/visibility.js`): admin sees
+all non-private non-deleted photos including unfiled; contributor
+needs a live shared group; `is_private` and `is_deleted` always
+exclude. Non-members get 404 (never 403) — the media route, photo
+detail, faces, backs, comments, likes, suggestions, and every list
+and count go through the same fragment.
+
+Minimal Phase 9 pages (replaced in Phase 10): `/upload` (mobile-first
+sequential uploads with sha256 pre-check + progress + retry) and
+`/admin/contributions` (per-file + batch approve/reject).
 
 ## Tests
 

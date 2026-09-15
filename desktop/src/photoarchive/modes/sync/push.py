@@ -182,9 +182,9 @@ def push(
                 if progress:
                     progress(PushProgress(
                         stage="photo_files",
-                        done=stats.files_uploaded,
+                        done=i + 1,
                         total=len(need_meta),
-                        detail=f"{m['id']}",
+                        detail=f"id={m['id']} sent_total={stats.files_uploaded}",
                     ))
 
             _mark_synced(conn, [r["id"] for r in rows])

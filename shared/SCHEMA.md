@@ -61,6 +61,52 @@ The rule that governs the whole schema:
   - `transcription`: `{"text":"...","parsed_date":"1962","names":["Peggy"],"photo_back_id":34}`
   - `classification`: `{"label":"document","confidence":0.93}`
 
+### Groups (Phase 9, migration `phase-9-groups`)
+
+The unit of visibility on the web. A photo is visible to a user when
+they share at least one live group with it (`photo_groups + group_members`,
+both `is_deleted = false`); admins see every non-private, non-deleted
+photo including unfiled; `is_private` and `is_deleted` always exclude.
+
+- **`groups`** — `name`, `description`, `created_by`, soft-delete fields
+  (`is_deleted / deleted_at / deleted_by`). Name uniqueness is
+  case-insensitive per **live** row (partial unique index
+  `groups_name_unique_live on lower(name) where not is_deleted`).
+- **`group_members`** — PK `(group_id, user_id)`. `role` is
+  `group_role` enum (`member | moderator`). Soft-delete fields;
+  `updated_at` trigger for LWW sync.
+- **`photo_groups`** — PK `(photo_id, group_id)`. Soft-delete fields;
+  `updated_at` trigger for LWW sync. Partial live index
+  `photo_groups_live_idx (photo_id, group_id) where not is_deleted` for
+  the hot visibility path.
+
+### Contribution uploads (Phase 9, migration `phase-9-contributions`)
+
+- **`contributions`** — one row per upload session. `user_id`
+  (nullable — uploader can be soft-deleted later), `note`, `status`
+  `contribution_status` enum (`pending|approved|rejected|partial`),
+  `group_ids bigint[]` (uploader's chosen target groups; app-enforces
+  membership), `decided_by`, `decided_at`, `pulled_at`, `finished_at`.
+- **`contribution_files`** — one row per file. `contribution_id` FK,
+  `original_filename`, `stored_path` (relative to `PHOTO_DIR` — usually
+  `uploads/<contribution_id>/<file_id>.<ext>`), `sha256` UNIQUE, `size`,
+  `mime`, `width`, `height`, `exif_taken_at`, `phash` (64-bit dHash),
+  `status` `contribution_file_status` enum, `decided_by`, `decided_at`,
+  `approved_group_ids bigint[]` (which groups this specific file has
+  been approved into — moderator approve only adds their own group,
+  admin approve-all adds every target group), `duplicate_of_photo_id`,
+  `duplicate_distance`, `is_video`.
+
+### Photo sync columns
+
+`photos.synced_at` and `photos.synced_file_version` (both from Phase 1)
+track what has been pushed to the web. `POST /sync/photos` returns
+`need_files: [ids]` for anything whose `synced_file_version <
+file_version` or whose file is missing on disk; `PUT /sync/photos/:id/file`
+writes the working file, regenerates the 320-px thumb via `sharp`, and
+sets `synced_file_version = file_version`. Re-running push after a
+successful one sends 0 files.
+
 ### Ingest staging (migration 12)
 
 - **`ingest_pairings`** — proposed front/back pairs held between the ingest scan pass and George's review. `front_photo_id` FK to the already-committed front photo (nullable as of migration 16 — a proposal whose immediate predecessor was itself a probable back has front_photo_id null, and George decides in the grid with N=orphan or F=pick front from filmstrip); `back_master_path` / `back_sha256` identify the back file on disk (unique). `back_score` 0–1 from the back-detect heuristic (1.0 when George asserts it via the Triage B key). `staging_working_path` and `staging_thumb_path` point to `WORKING_DIR/_staging/{sha256}.{ext}` and `THUMBS_DIR/_staging/{sha256}.jpg` for held (not-yet-committed) backs. `back_photo_id` (nullable, added migration 13) points to an already-committed photo when the Rebuild-back-proposals action or the Triage B key re-classifies it as a back. `back_aspect_mismatch` boolean (migration 14): true when the back's aspect ratio differs from the front's. Aspect is a hard gate below score 0.8 and a review tag at or above 0.8 — a back can be cropped very differently from its front, so aspect is evidence not veto for strong candidates. `details` JSONB (migration 19) carries proposal provenance, e.g. `{"source": "triage", "reason": "orphan_predecessor_is_back"}` for B-key entries. `status ingest_proposal_status` (`pending|accepted|rejected`) + `decided_at`. Accepting a held back inserts a `photo_backs` row for `front_photo_id` and renames the staged files into place. Accepting a photo-as-back (rebuild path) inserts a `photo_backs` row referencing the demoted photo's working file and thumb, then marks the old `photos` row `is_deleted=true` with `physical_ref_note='converted to back of photo <front_id>'`. Rejecting a held back takes it through the normal new-photo path. Rejecting a photo-as-back leaves the photo alone and blocks re-proposal (unique index on `back_photo_id` where pending prevents duplicates; the rejected row remains and rebuild skips already-rejected photos).
