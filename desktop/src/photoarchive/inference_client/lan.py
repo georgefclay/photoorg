@@ -146,8 +146,13 @@ class LanInferenceClient(InferenceClient):
             files=files,
             timeout=UPLOAD_CHUNK_TIMEOUT_S,
         )
+        # The mini replies {"stored": N, "refs": [...], "held": M, ...} (see
+        # inference/app/main.py). "accepted" is kept as a fallback name so an
+        # older/newer service shape still counts. Before this the runner
+        # recorded uploaded=0 for every hand-over (fix-up 11 follow-up).
+        accepted = body.get("stored", body.get("accepted", 0))
         return BatchUploadResult(
-            accepted=int(body.get("accepted", 0)),
+            accepted=int(accepted or 0),
             rejected=list(body.get("rejected", [])),
         )
 
