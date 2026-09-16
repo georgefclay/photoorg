@@ -127,6 +127,28 @@ def _fetch_ids_needing_upload(conn, ids: list[int]) -> list[dict]:
         return cur.fetchall()
 
 
+def _filter_to_grouped(conn, ids: list[int]) -> list[int]:
+    """Restrict a photo id list to those that live in at least one live
+    photo_groups row. Used when files_only_for_grouped=True — we still
+    push every photo's metadata (harmless, keeps the web catalogue
+    complete) but only upload the file bytes for photos a real user
+    can see.
+    """
+    if not ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct pg.photo_id
+              from photo_groups pg
+             where pg.is_deleted = false
+               and pg.photo_id = any(%s::bigint[])
+            """,
+            (ids,),
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
+
 def _mark_synced(conn, ids: list[int]) -> None:
     if not ids:
         return
@@ -143,11 +165,22 @@ def push(
     working_dir: Path,
     thumbs_dir: Path,
     send_face_embeddings: bool = False,
+    files_only_for_grouped: bool = True,
     progress: Callable[[PushProgress], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> PushStats:
     """Run one full push. Blocking. `progress` receives updates; return
-    True from `should_stop` to break at the next batch boundary."""
+    True from `should_stop` to break at the next batch boundary.
+
+    files_only_for_grouped (default True): send file bytes only for
+    photos that live in at least one live `photo_groups` row. Metadata
+    for every non-private/non-junk photo still goes across so the web
+    catalogue is complete and lists/search behave. The full-file push
+    (`files_only_for_grouped=False`) is scheduled once cleanup and
+    inference jobs on the laptop stop bumping `file_version`; passing
+    False casually would burn hours re-pushing bytes that are about to
+    change.
+    """
     stats = PushStats()
 
     with db.connection() as conn:
@@ -168,6 +201,8 @@ def push(
 
             # Upload files the web says it needs.
             need_ids = list(resp.get("need_files", []))
+            if files_only_for_grouped:
+                need_ids = _filter_to_grouped(conn, need_ids)
             need_meta = _fetch_ids_needing_upload(conn, need_ids)
             for i, m in enumerate(need_meta):
                 if should_stop and should_stop():

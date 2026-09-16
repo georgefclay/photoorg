@@ -1,0 +1,21 @@
+# /etc/systemd/system/photoorg.service
+[Unit]
+Description=Photo Archive web app
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/photoorg/web
+ExecStart=/usr/local/bin/node server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+LimitNOFILE=65536
+StandardOutput=append:/var/log/photoorg.log
+StandardError=append:/var/log/photoorg.log
+
+[Install]
+WantedBy=multi-user.target

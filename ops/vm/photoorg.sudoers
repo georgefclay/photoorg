@@ -1,0 +1,4 @@
+# /etc/sudoers.d/photoorg  (chmod 440)
+# Validate with: sudo visudo -cf /etc/sudoers.d/photoorg
+ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart photoorg.service
+ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl status photoorg.service

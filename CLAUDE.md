@@ -456,6 +456,14 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **The `photo-back-orphan` migration's `down` refuses to run when
   orphan `photo_backs` rows exist** — those are legitimate scanned
   backs of unidentified fronts and must never be silently deleted.
+- **Push has a `files_only_for_grouped` flag (default True)**. Metadata
+  for every non-private/non-junk photo pushes; file bytes go only for
+  photos in at least one live `photo_groups` row. This is on while
+  Phase 7 cleanup and inference jobs are still bumping `file_version`
+  — pushing 28 GB of bytes that are about to change wastes hours.
+  Pass `--all-files` to `run_push` (or uncheck the Sync-tab checkbox)
+  when the archive is quiescent and we're doing the one-time full
+  file push.
 
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB

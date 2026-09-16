@@ -187,7 +187,8 @@ def test_push_creates_photos_then_resends_zero_files(web_server, tmp_path):
     pdb.init_pool(_S(), min_size=1, max_size=2)  # type: ignore[arg-type]
 
     stats1 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir,
-                  send_face_embeddings=False)
+                  send_face_embeddings=False,
+                  files_only_for_grouped=False)
     assert stats1.photos_upserted == 3, stats1
     assert stats1.files_uploaded == 3
 
@@ -201,8 +202,77 @@ def test_push_creates_photos_then_resends_zero_files(web_server, tmp_path):
             pass
 
     stats2 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir,
-                  send_face_embeddings=False)
+                  send_face_embeddings=False,
+                  files_only_for_grouped=False)
     assert stats2.photos_upserted == 3, stats2
     assert stats2.files_uploaded == 0, "second push must send zero files"
 
+    pdb.close_pool()
+
+
+def test_push_files_only_for_grouped_uploads_only_grouped_photos(web_server, tmp_path):
+    """With files_only_for_grouped=True (Phase 14 default), file bytes go
+    only for photos in at least one live photo_groups row; metadata still
+    pushes for everything."""
+    from photoarchive.modes.sync.client import WebSyncClient
+    from photoarchive.modes.sync.push import push
+    from photoarchive import db as pdb
+
+    client = WebSyncClient(web_server, "test-service-token")
+
+    working_dir = tmp_path / "working2"
+    working_dir.mkdir()
+    thumbs_dir = tmp_path / "thumbs2"
+    thumbs_dir.mkdir()
+
+    import psycopg
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""
+                truncate table photo_groups, group_members, groups,
+                               audit_log, magic_links, access_requests, "session",
+                               contribution_files, contributions,
+                               suggestions, likes, comments, faces, photo_backs,
+                               album_photos, albums, photo_masters, photos, users
+                  restart identity cascade
+            """)
+            # 3 keep photos, none in any group.
+            ids = []
+            for label in ("a", "b", "c"):
+                cur.execute(
+                    """
+                    insert into photos (sha256, mime, source_root, source_folder, source_filename,
+                                        triage_status, is_private, file_version, working_path)
+                    values (%s, 'image/jpeg', 'photos', 'f2', %s, 'keep', false, 1, %s)
+                    returning id
+                    """,
+                    (f"sha2-{label}", f"{label}2.jpg", f"placeholder-{label}.jpg"),
+                )
+                ids.append(int(cur.fetchone()[0]))
+            # One group; put only the FIRST photo in it.
+            cur.execute("insert into groups (name) values ('Clay Family') returning id")
+            gid = int(cur.fetchone()[0])
+            cur.execute("insert into photo_groups (photo_id, group_id) values (%s, %s)",
+                        (ids[0], gid))
+            # Write working files matching each photo's stored working_path basename.
+            for pid, label in zip(ids, ("a", "b", "c")):
+                base = f"{pid:08d}_{label[:4]}.jpg"
+                cur.execute("update photos set working_path = %s where id = %s", (base, pid))
+                (working_dir / base).write_bytes(_tiny_jpeg_bytes())
+
+    pdb.close_pool()
+    class _S:
+        DATABASE_URL = TEST_DATABASE_URL
+    pdb.init_pool(_S(), min_size=1, max_size=2)  # type: ignore[arg-type]
+
+    stats = push(
+        client, working_dir=working_dir, thumbs_dir=thumbs_dir,
+        send_face_embeddings=False,
+        files_only_for_grouped=True,
+    )
+    assert stats.photos_upserted == 3, stats
+    assert stats.files_uploaded == 1, (
+        f"files_only_for_grouped=True should upload only the 1 grouped photo, got {stats.files_uploaded}"
+    )
     pdb.close_pool()

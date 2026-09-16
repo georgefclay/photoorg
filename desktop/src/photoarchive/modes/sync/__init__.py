@@ -14,7 +14,7 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
     QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -80,6 +80,12 @@ class SyncPanel(QWidget):
             "are skipped automatically. Resumable: a second Push after a "
             "successful first sends 0 files."
         ))
+        self._chk_files_only_grouped = QCheckBox(
+            "Files: only photos in a group  (recommended while cleanup / AI jobs "
+            "are still bumping file_version — metadata still pushes for everything)"
+        )
+        self._chk_files_only_grouped.setChecked(True)
+        v.addWidget(self._chk_files_only_grouped)
         self._btn_push = QPushButton("Push now")
         self._btn_push.clicked.connect(self._on_push)
         v.addWidget(self._btn_push, alignment=Qt.AlignLeft)
@@ -95,6 +101,8 @@ class SyncPanel(QWidget):
         settings = self._settings_lazy()
         client = self._client_lazy()
 
+        files_only_for_grouped = bool(self._chk_files_only_grouped.isChecked())
+
         def do(status: Callable[[str], None]) -> dict:
             def prog(p: PushProgress) -> None:
                 status(f"{p.stage}: {p.done}/{p.total} {p.detail}")
@@ -103,6 +111,7 @@ class SyncPanel(QWidget):
                 working_dir=Path(settings.WORKING_DIR),
                 thumbs_dir=Path(settings.THUMBS_DIR),
                 send_face_embeddings=_env_bool("SYNC_FACE_EMBEDDINGS"),
+                files_only_for_grouped=files_only_for_grouped,
                 progress=prog,
             )
             return {

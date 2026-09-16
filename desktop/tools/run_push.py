@@ -33,6 +33,14 @@ def _humanb(n: float) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="count targets, don't push")
+    ap.add_argument(
+        "--all-files",
+        action="store_true",
+        help=(
+            "Send file bytes for every non-private, non-junk photo "
+            "(default: only photos in at least one live photo_groups row)."
+        ),
+    )
     args = ap.parse_args()
 
     settings = load_settings()
@@ -73,13 +81,16 @@ def main() -> int:
                 last_print = now
 
         env_face = os.environ.get("SYNC_FACE_EMBEDDINGS", "false").strip().lower() in ("1", "true", "yes")
+        files_only_for_grouped = not args.all_files
         print(f"SYNC_FACE_EMBEDDINGS={env_face}")
+        print(f"files_only_for_grouped={files_only_for_grouped}")
         print("--- push begin ---")
         stats = push(
             client,
             working_dir=Path(settings.WORKING_DIR),
             thumbs_dir=Path(settings.THUMBS_DIR),
             send_face_embeddings=env_face,
+            files_only_for_grouped=files_only_for_grouped,
             progress=prog,
         )
         elapsed = time.time() - started
