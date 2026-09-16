@@ -3,6 +3,9 @@ stays focused on interactions."""
 
 from __future__ import annotations
 
+from ...config import load as load_settings
+from ..ingest.paths import resolve_working_path
+
 import json
 import logging
 from dataclasses import dataclass, field
@@ -192,6 +195,11 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
     if prow is None:
         return None
     working_path, width, height, capture_year, source_folder, scan_batch, scan_sequence = prow
+    # Fix-up 11: the preview opens whatever is in `working_path`; resolve
+    # bare rows here so every consumer of PhotoContext sees an absolute path.
+    _wd = load_settings().WORKING_DIR
+    _resolved = resolve_working_path(_wd, working_path)
+    working_path = str(_resolved) if _resolved is not None else None
 
     face_rows = conn.execute(
         """
@@ -240,8 +248,9 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
         payload = payload if isinstance(payload, dict) else (
             json.loads(payload) if payload else {}
         )
+        _bwp = resolve_working_path(_wd, bwp)
         backs.append(PhotoBack(
-            id=int(bid), working_path=bwp, master_path=bmp,
+            id=int(bid), working_path=str(_bwp) if _bwp is not None else None, master_path=bmp,
             transcribed_text=text,
             transcription_confidence=float(conf) if conf is not None else None,
             transcription_confirmed=bool(confirmed),

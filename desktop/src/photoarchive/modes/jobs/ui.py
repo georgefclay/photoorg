@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
 from ...config import load as load_settings
 from ...inference_client import QUEUE_ORDER, shared
 from ...jobs import all_jobs, get_job
-from ...jobs.base import JobContext, collect, hand_over, has_handover, reconcile_handovers
+from ...jobs.base import (
+    JobContext, collect, hand_over, has_handover, last_skipped, reconcile_handovers,
+)
 from ...workers import BackgroundJob, CancelToken
 from . import stats as stats_mod
 
@@ -71,8 +73,18 @@ class JobsPanel(QWidget):
         self.run_all_btn.clicked.connect(self._run_all_clicked)
         self.collect_btn = QPushButton("Collect now")
         self.collect_btn.clicked.connect(self._collect_now_clicked)
+        # Fix-up 11: hand-overs skip missing / undecodable files instead of
+        # aborting. This button lists the skipped refs of the latest run.
+        self.skipped_btn = QPushButton("Skipped files…")
+        self.skipped_btn.setToolTip(
+            "Photos whose working file was missing or undecodable at the last "
+            "hand-over. Run check_working_files, then Run the job again."
+        )
+        self.skipped_btn.clicked.connect(self._show_skipped_clicked)
+        self.skipped_btn.setVisible(False)
         header.addWidget(self.run_all_btn)
         header.addWidget(self.collect_btn)
+        header.addWidget(self.skipped_btn)
         outer.addLayout(header)
 
         # Model / prompt_version input row — for a re-run we may need to
@@ -149,6 +161,7 @@ class JobsPanel(QWidget):
         # Fire once after the event loop is up.
         QTimer.singleShot(0, self._refresh_health)
         QTimer.singleShot(0, self._refresh_local_stats)
+        QTimer.singleShot(0, self._refresh_skipped_button)
         QTimer.singleShot(200, self._reconcile_handovers_bg)
         QTimer.singleShot(500, self._auto_collect)
 
@@ -305,7 +318,8 @@ class JobsPanel(QWidget):
                 job = get_job(name)
                 s = hand_over(job, ctx, progress_cb=progress_cb)
                 summaries.append({"job": name, "selected": s.selected,
-                                  "uploaded": s.uploaded, "started": s.started})
+                                  "uploaded": s.uploaded, "started": s.started,
+                                  "skipped": s.skipped, "report": s.report()})
             return {"summaries": summaries}
 
         self._start_worker(_target, "hand_over_all")
@@ -322,7 +336,8 @@ class JobsPanel(QWidget):
         def _target(progress_cb, cancel_token):
             ctx.cancel = cancel_token
             s = hand_over(job, ctx, progress_cb=progress_cb)
-            return {"job": name, "selected": s.selected, "uploaded": s.uploaded, "started": s.started}
+            return {"job": name, "selected": s.selected, "uploaded": s.uploaded,
+                    "started": s.started, "skipped": s.skipped, "report": s.report()}
 
         self._start_worker(_target, f"hand_over:{name}")
 
@@ -418,8 +433,51 @@ class JobsPanel(QWidget):
 
     def _on_finished(self, kind: str, summary: dict[str, Any]) -> None:
         self._active_worker = None
-        self.status_line.setText(f"{kind}: done — {summary}")
+        report = summary.get("report")
+        if report:
+            self.status_line.setText(f"{kind}: {report} — {summary}")
+        else:
+            self.status_line.setText(f"{kind}: done — {summary}")
         self._refresh_local_stats()
+        if kind.startswith("hand_over"):
+            self._refresh_skipped_button()
+
+    # --- skipped files (fix-up 11) --------------------------------------------
+
+    def _refresh_skipped_button(self) -> None:
+        try:
+            skipped = last_skipped()
+        except Exception as e:
+            log.debug("jobs panel: last_skipped failed: %s", e)
+            return
+        n = sum(len(v) for v in skipped.values())
+        self.skipped_btn.setVisible(n > 0)
+        self.skipped_btn.setText(f"Skipped files… ({n})")
+
+    def _show_skipped_clicked(self) -> None:
+        try:
+            skipped = last_skipped()
+        except Exception as e:
+            QMessageBox.warning(self, "Skipped files", f"Could not read job_runs: {e}")
+            return
+        if not skipped:
+            QMessageBox.information(self, "Skipped files", "Nothing was skipped at the last hand-over.")
+            return
+        parts = []
+        for job_name, refs in sorted(skipped.items()):
+            ids = ", ".join(refs[:200])
+            more = f" … and {len(refs) - 200} more" if len(refs) > 200 else ""
+            parts.append(f"{job_name} ({len(refs)}): {ids}{more}")
+        box = QMessageBox(self)
+        box.setWindowTitle("Skipped files (missing or undecodable)")
+        box.setText(
+            "These photo ids were skipped at the last hand-over because their "
+            "working file was missing or unreadable.\n\nRun\n"
+            "  python -m photoarchive.tools.check_working_files\n"
+            "then press Run again — skipped items are re-selected automatically."
+        )
+        box.setDetailedText("\n\n".join(parts))
+        box.exec()
 
     def _on_failed(self, kind: str, tb: str) -> None:
         self._active_worker = None

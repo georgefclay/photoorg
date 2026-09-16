@@ -210,3 +210,37 @@ All 824 backs are transcribed (`photo_backs.transcribed_text`). In the full-phot
 4. In the cluster grid, faces whose photo has a back get a small "✎" badge on the tile so George knows there's writing to read.
 
 Commit: `Phase 6 fix-up 10: back panel and transcription in preview`.
+
+---
+
+## Phase 6 fix-up 11 — classify hand-over crashes on a bare filename
+
+George pressed **Run** on `classify` in the Jobs panel and the hand-over died with:
+
+```
+FileNotFoundError: [Errno 2] No such file or directory: '00000001_13b533cd.jpg'
+```
+
+Note the path is **bare** — no `WORKING_DIR` prefix. `detect_faces` handed over all 12,677 photos fine, so either (a) the classify/describe/estimate_date uploader builds the filename from the naming scheme and forgets to join `WORKING_DIR`, or (b) something since detect_faces rewrote `photos.working_path` for some rows as a bare name (suspects: `check_working_files` "updates the pointer only" path, the Phase 9 push pre-flight, dedupe resolve). Photo 1 is the very first digital photo, so it is unlikely to have been through `_staging/`.
+
+1. Diagnose first, report before fixing: `select id, working_path from photos where id in (1, 2, 1114)` — absolute or bare? `select count(*) from photos where working_path not like 'D:\%' and is_deleted = false` (adjust to the configured `WORKING_DIR`). Then read the classify uploader's path construction and compare with detect_faces'.
+2. Fix the class. All five uploaders (and everything else that opens a working file: preview, face-crop generation, push, dedupe) must go through the **one** working-file resolver that already exists from Phase 2 (held vs committed). No uploader constructs a path from the naming scheme on its own. If DB rows were rewritten bare, repair them (absolute `WORKING_DIR/{id:08d}_{sha[:8]}.{ext}`, verify exists, audit row per repair, count reported) and fix whatever wrote them.
+3. **A hand-over must never abort on one bad file.** Wrap the per-item upload: on `FileNotFoundError` / undecodable image, mark the `job_items` row `status='failed'` with the error, log it, continue; at the end report "N uploaded, M skipped (missing file)". The Jobs panel shows the skipped count with a button that lists the photo ids. The next `Run` retries failed items after `check_working_files` has been run.
+4. Re-run `python -m photoarchive.tools.check_working_files --dry-run` and paste the summary. If it reports anything missing, run it for real, then Run classify again.
+5. Tests: uploader opens `WORKING_DIR`-joined path (mock the filesystem, assert the absolute path); a missing file yields one failed `job_items` row and the batch still hands over the rest.
+
+Commit: `Phase 6 fix-up 11: uploader path resolution, skip-not-abort on missing files`.
+
+Then hand over `classify`, `describe`, `estimate_date` (in that order) and confirm the mini's queue via `/batch/results/classify/summary`.
+
+### PM answers to the fix-up 11 review
+
+Diagnosis accepted: the Phase 9 local push ran the laptop web server against the desktop's own `photoorg` database, and the sync upsert wrote basenames over the desktop's absolute paths. Plan steps 1–7 approved as written, with these notes:
+
+1. `allow_shared_db=True` as an explicit test opt-in is fine. Do not rework the fixture now.
+2. The repair rewrites bare rows back to **absolute** `WORKING_DIR/...` paths. The resolver's bare-name tolerance is a safety net, not the new normal — after the repair, `select count(*) from photos where working_path !~ '^[A-Za-z]:\\'` must be 0 for live rows, and the same for `photo_backs`. Add that as a check to `check_working_files` output.
+3. **You create `photoorg_web` on the laptop yourself** (`createdb -U postgres -O photo_user photoorg_web`, run `shared/` migrations against it, point `web/.env` `DATABASE_URL` at it) — the same way `photoorg_test` was created. Record the steps in `GC.md` under the laptop section, and make `web/README.md` say plainly that the local web DB must never be the desktop DB.
+4. Confirm in the report which URL the desktop's push currently targets (`WEB_API_URL` in `desktop/.env`) — it should be the VM now, not localhost.
+5. Add step 5's guard to the CLAUDE.md "Web core / sync" section as an inviolable: **desktop and web never share a database on the same machine.**
+
+GO.

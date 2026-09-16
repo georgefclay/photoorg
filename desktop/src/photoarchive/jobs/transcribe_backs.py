@@ -41,7 +41,9 @@ from ..inference_client import (
     ResultLine,
 )
 from ..inference_client.image_prep import prepare_jpeg_bytes
-from .base import Job, JobContext, SelectedItem, Selector, Uploader, Writer
+from ..config import load as load_settings
+from ..modes.ingest.paths import resolve_working_path
+from .base import Job, JobContext, SelectedItem, Selector, WorkingFileUploader, Writer
 
 log = logging.getLogger(__name__)
 
@@ -87,9 +89,8 @@ class BacksSelector(Selector):
         ]
 
 
-class BacksUploader(Uploader):
-    def prepare(self, item: SelectedItem, max_edge: int) -> RefImage:
-        return RefImage(ref=item.ref, path=Path(item.working_path))
+class BacksUploader(WorkingFileUploader):
+    """Path resolution lives in WorkingFileUploader (fix-up 11)."""
 
 
 class BacksWriter(Writer):
@@ -126,7 +127,9 @@ class BacksWriter(Writer):
                 "select coalesce(working_path, master_path) from photo_backs where id = %s",
                 (back_id,),
             ).fetchone()
-            back_path = Path(path_row[0]) if path_row and path_row[0] else None
+            back_path = resolve_working_path(
+                load_settings().WORKING_DIR, path_row[0] if path_row else None,
+            )
             if back_path is not None and back_path.exists():
                 for orientation in ("flip", "rot180"):
                     try:

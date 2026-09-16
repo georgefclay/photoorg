@@ -26,6 +26,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 
 **Progress (2026-09-15):** Phase 9 closed. The phone-on-LAN upload test could not connect and was **deferred to the live domain** — it is now verification step 2/4 of Phase 14. **Phase order changed: 14 (deploy) runs next, before 10 (pages)**, so every remaining phase is tested on a phone against `https://cyberdinosaurs.com`. Prompt: `prompts/phase-14-deploy.md`. **Phase 14 deploys the site with metadata + one test group's files only.** The full 28 GB file push is deferred until the mini's classify/describe/date jobs finish and Phase 7 (cleanup) has replaced the working copies it will replace — otherwise most files would be pushed twice. VM disk (30 GB, 19 free) is enough for the test set; grow to 80 GB before the full push.
 
+**Progress (2026-09-16):** **Phase 14 done — `https://cyberdinosaurs.com` is live.** Root grown to 80 GB (66 free). 28 migrations on the VM; metadata for 13,257 photos, 23,461 faces, 5,433 suggestions synced; files for one test group (139 photos, Clay Family / Album 6). Postmark round-trip verified (request → approve → magic link) from a phone. Nightly `pg_dump`, logrotate, fail2ban whitelist, Caddy + systemd in place; templates under `ops/vm/`. Open: UptimeRobot monitor, off-site backup, the full 28 GB file push (after Phase 7 + mini jobs). Next: **Phase 10 (pages)**, prompt `prompts/phase-10-web-pages.md`.
+
 **Progress (2026-09-16):** Phase 14 landed. `https://cyberdinosaurs.com` live over TLS, admin bootstrapped, deploy key on GitHub, Caddy site + systemd unit + sudoers + logrotate installed, root FS grown 30 → 80 GB (66 GB free), nightly `pg_dump` cron with 14-day retention, fail2ban whitelist updated. Postmark end-to-end (request-access → approve → magic-link → sign-in) confirmed with `georgefclay+phase14@gmail.com`. Desktop pointed at prod; new `files_only_for_grouped` push flag (default on) sends full metadata but files only for photos in a live `photo_groups` row — 13 257 metadata rows + 139 Clay Family files (Album 6: Summer 1992 — Canada) uploaded in 11 min 43 s (260.5 MB), second push 0 files in 135 s. `/sync/status` counts on prod match the laptop exactly. Off-site backup + UptimeRobot monitor + full-file push queued as TODOs in `GC.md`. Ops templates committed under `ops/vm/`.
 
 Consequences of the survey:
@@ -130,6 +132,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - All AI output lands in `suggestions` with `source='ai'`. Back transcriptions flagged high confidence.
 - **Transcribe-back orientation retry** (deferred from Phase 2 fix-up 5): when the first pass returns low confidence, retry with the horizontally flipped and 180°-rotated variants of the image, keep the best, and record `details.orientation ∈ {"upright","mirrored","rot180","rot180+mirrored"}` on the suggestion so the reviewer can tell the scanner had it wrong.
 - Accept when: overnight run over the keep set completes; killing at N resumes at N; a disputed tag is provably absent from the reference set.
+- **Fix-up 11 (2026-09-16)** — classify hand-over died on a bare `working_path`. Cause: the Phase 9 local verification push ran the laptop web against the desktop's `photoorg` DB and the sync routes wrote basenames over every `photos`/`photo_backs.working_path`. Fixed: one resolver (`resolve_working_path`) used by every uploader and reader; hand-over skips missing/undecodable files (`job_items` failed rows, "N uploaded, M skipped" + Skipped files… button); `check_working_files` repairs backs too and reports a "still bare" post-condition (now 0/0); push pre-flight refuses a web that reports our own DB identity; laptop web moves to `photoorg_web`.
 
 ### Phase 7 — Scan cleanup (Claude Code, Windows) — spec §5
 - Deskew, crop, multi-print split, colour-cast and fade correction. Always a new derived file; `file_version` bumps so sync re-pushes.
@@ -184,6 +187,12 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 2. Confirm the masters have a backup.
 3. ~~Pick the archive's domain name~~ — cyberdinosaurs.com.
 4. On 2026-09-22, move the inference service to the M6 (config change + model re-download).
+5. Hand over `classify`, `describe`, `estimate_date` to the mini (blocked on Phase 6 fix-up 11).
+6. Bulk-assign the ~12,800 unfiled photos to groups from the desktop Groups panel.
+7. Full 28 GB file push once Phase 7 cleanup and the mini jobs are done (uncheck `files_only_for_grouped`).
+8. UptimeRobot monitor on `https://cyberdinosaurs.com/healthz` — no hurry.
+9. Off-site backup of the VM's nightly pg_dump (S3) — no hurry.
+10. Refresh the fail2ban whitelist IP in GC.md if the ISP changes it.
 
 ## 6. Risks
 

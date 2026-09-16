@@ -22,7 +22,7 @@ Listens on `PORT` (default 8090).
 | `PORT` | HTTP listen port. Default 8090. |
 | `NODE_ENV` | `production` in prod so the session cookie gets `secure`. |
 | `BASE_URL` | Absolute URL used inside emailed links, e.g. `https://photos.example.com`. Falls back to `http(s)://<host>` from the request if unset. |
-| `DATABASE_URL` | Local Postgres. URL-encode special chars in the password. |
+| `DATABASE_URL` | Local Postgres. URL-encode special chars in the password. **On the laptop this must be `photoorg_web`, never the desktop's `photoorg`.** The sync routes store `working_path` as a bare basename; pointing the web at the desktop's DB rewrites every desktop working path (fix-up 11). The desktop's push refuses a web that reports the same DB. |
 | `TEST_DATABASE_URL` | Separate DB used by `npm test`. Must not equal `DATABASE_URL`. Shares `photoorg_test` with `shared/`. |
 | `SESSION_SECRET` | Random bytes. Rotate to log everyone out. |
 | `ADMIN_EMAIL` | Single address that receives access-request notifications. Other admins are not copied. |
@@ -132,6 +132,19 @@ and count go through the same fragment.
 Minimal Phase 9 pages (replaced in Phase 10): `/upload` (mobile-first
 sequential uploads with sha256 pre-check + progress + retry) and
 `/admin/contributions` (per-file + batch approve/reject).
+
+## Local web database (laptop)
+
+The local web server needs its own database, created the same way as the
+test DB and migrated from `shared/`:
+
+```
+createdb -U postgres -O photo_user photoorg_web
+cd ../shared && DATABASE_URL=postgresql://photo_user:<pw>@localhost:5432/photoorg_web npm run migrate:up
+```
+
+Then set `DATABASE_URL` in `web/.env` to `.../photoorg_web`. The local web
+DB must never be the desktop DB (`photoorg`).
 
 ## Tests
 

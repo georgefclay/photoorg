@@ -27,7 +27,8 @@ from typing import Callable, Iterable
 from psycopg.rows import dict_row
 
 from ... import db
-from .client import WebSyncClient
+from ..ingest.paths import resolve_working_path
+from .client import WebSyncClient, WebSyncError
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,43 @@ def _filter_to_grouped(conn, ids: list[int]) -> list[int]:
         return [int(r[0]) for r in cur.fetchall()]
 
 
+class SharedDatabaseError(WebSyncError):
+    """The web server we are about to push to is writing to the SAME
+    Postgres database this desktop reads. Pushing would overwrite the
+    desktop's own working_path rows with basenames (fix-up 11)."""
+
+
+def local_db_identity(conn) -> tuple[str | None, str | None]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select current_database(), system_identifier::text from pg_control_system()"
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def guard_not_shared_database(conn, client: WebSyncClient) -> None:
+    """Raise SharedDatabaseError if the web's /sync/status reports the same
+    (database name, cluster system_identifier) as our own connection.
+    A web that cannot report its identity is logged and allowed."""
+    try:
+        remote = (client.status() or {}).get("db") or {}
+    except WebSyncError as e:
+        log.warning("push pre-flight: /sync/status unavailable (%s); cannot verify DB isolation", e)
+        return
+    r_name, r_id = remote.get("name"), remote.get("system_identifier")
+    if not r_name or not r_id:
+        log.warning("push pre-flight: web did not report a DB identity; cannot verify DB isolation")
+        return
+    l_name, l_id = local_db_identity(conn)
+    if (l_name, l_id) == (r_name, str(r_id)):
+        raise SharedDatabaseError(
+            f"refusing to push: the web at this URL writes to database {r_name!r} on the "
+            f"same Postgres cluster this desktop uses. Desktop and web must never share a "
+            f"database on one machine — point web/.env DATABASE_URL at photoorg_web (see GC.md)."
+        )
+
+
 def _mark_synced(conn, ids: list[int]) -> None:
     if not ids:
         return
@@ -168,6 +206,7 @@ def push(
     files_only_for_grouped: bool = True,
     progress: Callable[[PushProgress], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    allow_shared_db: bool = False,
 ) -> PushStats:
     """Run one full push. Blocking. `progress` receives updates; return
     True from `should_stop` to break at the next batch boundary.
@@ -185,6 +224,10 @@ def push(
 
     with db.connection() as conn:
         conn.autocommit = True
+        # Fix-up 11 pre-flight: never push into our own database.
+        # `allow_shared_db=True` is an explicit test-only opt-in.
+        if not allow_shared_db:
+            guard_not_shared_database(conn, client)
         total_photos = _photos_total(conn)
 
         # -------- photos + files --------------------------------------
@@ -207,7 +250,7 @@ def push(
             for i, m in enumerate(need_meta):
                 if should_stop and should_stop():
                     return stats
-                wpath = working_dir / os.path.basename(m["working_path"])
+                wpath = resolve_working_path(working_dir, m["working_path"])
                 if not wpath.exists():
                     log.warning("push: missing working file for photo %s (%s)", m["id"], wpath)
                     continue

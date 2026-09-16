@@ -13,12 +13,15 @@ row) and the collect loop (cursor advance in job_cursors, sweep with
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 import psycopg
+from PIL import UnidentifiedImageError
 
 from ..inference_client import (
     ENDPOINT_MAX_EDGE,
@@ -30,6 +33,8 @@ from ..inference_client import (
 from ..inference_client.image_prep import prepare_jpeg
 from ..workers import CancelToken, Cancelled
 from .. import db as dbmod
+from ..config import load as load_settings
+from ..modes.ingest.paths import resolve_working_path
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +70,31 @@ class Selector(ABC):
 
 
 class Uploader(ABC):
-    @abstractmethod
-    def prepare(self, item: SelectedItem, max_edge: int) -> RefImage: ...
+    """Turns a SelectedItem into a RefImage.
+
+    The default `prepare` is the only path construction any job may use
+    (fix-up 11): the stored `working_path` goes through the ONE resolver
+    in `modes.ingest.paths`, so an absolute row is used as-is and a bare
+    row is joined onto WORKING_DIR. No job builds a path from the naming
+    scheme on its own. Subclasses only override `prepare` when they need
+    pre-computed bytes (none do today)."""
+
+    _working_dir: Path | None = None
+
+    def working_dir(self) -> Path:
+        if self._working_dir is None:
+            self._working_dir = Path(load_settings().WORKING_DIR)
+        return self._working_dir
+
+    def prepare(self, item: SelectedItem, max_edge: int) -> RefImage:
+        path = resolve_working_path(self.working_dir(), item.working_path)
+        if path is None:
+            raise FileNotFoundError(f"{item.ref}: no working_path stored")
+        return RefImage(ref=item.ref, path=path)
+
+
+class WorkingFileUploader(Uploader):
+    """Concrete uploader every photo/back job uses."""
 
 
 class Writer(ABC):
@@ -134,6 +162,41 @@ class HandoverSummary:
     started: bool
     job_run_id: int | None
     error: str | None = None
+    skipped: int = 0                      # items whose file was missing / undecodable
+    skipped_refs: list[str] = field(default_factory=list)
+
+    def report(self) -> str:
+        return f"{self.uploaded} uploaded, {self.skipped} skipped (missing file)"
+
+
+# Errors that mean "this one file is bad" rather than "the hand-over is
+# broken". Anything else still aborts the hand-over.
+_PER_ITEM_ERRORS = (FileNotFoundError, UnidentifiedImageError, OSError, ValueError)
+
+
+class _NothingToStart(Exception):
+    """Internal: every selected item was skipped, so there is no inbox to start."""
+
+
+def _prepare_item(job: "Job", item: SelectedItem, max_edge: int) -> RefImage:
+    """Resolve + read + downscale one item. Raises one of _PER_ITEM_ERRORS
+    when the file is missing or undecodable."""
+    ref = job.uploader.prepare(item, max_edge)
+    if ref.prepared_bytes is not None:
+        return ref
+    return dataclasses.replace(ref, prepared_bytes=prepare_jpeg(ref.path, max_edge))
+
+
+def _record_skip(job_run_id: int, item: SelectedItem, error: str) -> None:
+    """job_items needs a photo_id; back items (photo_id None) are logged only."""
+    if item.photo_id is None:
+        return
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        dbmod.record_job_item(
+            conn, job_run_id=job_run_id, photo_id=item.photo_id,
+            status="failed", error=error[:500],
+        )
 
 
 def hand_over(
@@ -177,6 +240,7 @@ def hand_over(
 
     max_edge = ENDPOINT_MAX_EDGE[job.endpoint]
     uploaded = 0
+    skipped_refs: list[str] = []
     error: str | None = None
     started = False
     cancelled = False
@@ -184,17 +248,35 @@ def hand_over(
         for chunk_index, chunk in enumerate(_chunks(items, ctx.chunk_size), start=1):
             if ctok.is_set():
                 raise Cancelled()
-            refs = [job.uploader.prepare(it, max_edge) for it in chunk]
-            result = ctx.client.upload(job.name, refs, endpoint_edge=max_edge)
-            uploaded += result.accepted
+            # Fix-up 11: a hand-over must never abort on one bad file. Each
+            # item is resolved + read here; a missing / undecodable file
+            # becomes a failed job_items row and the chunk carries on.
+            refs: list[RefImage] = []
+            for it in chunk:
+                try:
+                    refs.append(_prepare_item(job, it, max_edge))
+                except _PER_ITEM_ERRORS as e:
+                    msg = f"{type(e).__name__}: {e}"
+                    log.warning("hand_over: %s skipping %s: %s", job.name, it.ref, msg)
+                    skipped_refs.append(it.ref)
+                    _record_skip(job_run_id, it, msg)
+            rejected = 0
+            if refs:
+                result = ctx.client.upload(job.name, refs, endpoint_edge=max_edge)
+                uploaded += result.accepted
+                rejected = len(result.rejected)
             progress_cb({
                 "kind": "uploaded_chunk",
                 "job_name": job.name,
                 "chunk": chunk_index,
                 "uploaded": uploaded,
+                "skipped": len(skipped_refs),
                 "total": total,
-                "rejected": len(result.rejected),
+                "rejected": rejected,
             })
+        if uploaded == 0 and skipped_refs:
+            # Every file was missing: nothing to start on the mini.
+            raise _NothingToStart()
         # Kick off processing.
         start = ctx.client.start_from_inbox(job.name, job.endpoint)
         started = start.accepted
@@ -206,6 +288,10 @@ def hand_over(
         cancelled = True
         error = "cancelled"
         raise
+    except _NothingToStart:
+        started = False
+        progress_cb({"kind": "started", "job_name": job.name, "started": False,
+                     "already_running": False, "reason": "all items skipped"})
     except Exception as e:
         log.exception("hand_over: %s failed", job.name)
         error = str(e)
@@ -232,14 +318,39 @@ def hand_over(
             dbmod.finish_job_run(
                 conn, job_run_id=job_run_id,
                 status="cancelled" if cancelled else ("failed" if error else "handed_over"),
-                stats={"selected": total, "uploaded": uploaded, "started": started, "error": error},
+                stats={
+                    "selected": total, "uploaded": uploaded, "started": started,
+                    "error": error,
+                    "skipped": len(skipped_refs), "skipped_refs": skipped_refs,
+                },
             )
 
-    progress_cb({"kind": "done", "job_name": job.name, "uploaded": uploaded, "total": total})
+    progress_cb({"kind": "done", "job_name": job.name, "uploaded": uploaded,
+                 "skipped": len(skipped_refs), "total": total})
     return HandoverSummary(
         job_name=job.name, selected=total, uploaded=uploaded,
         started=started, job_run_id=job_run_id, error=error,
+        skipped=len(skipped_refs), skipped_refs=skipped_refs,
     )
+
+
+def last_skipped(job_name: str | None = None) -> dict[str, list[str]]:
+    """{job_name: skipped_refs} from the most recent hand-over row of each
+    job that skipped anything. The Jobs panel's "Skipped..." button reads it."""
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        rows = conn.execute(
+            """
+            select distinct on (job_name) job_name,
+                   params -> 'stats' -> 'skipped_refs' as refs
+            from job_runs
+            where coalesce((params -> 'stats' ->> 'skipped')::int, 0) > 0
+              and (%s::text is null or job_name = %s)
+            order by job_name, id desc
+            """,
+            (job_name, job_name),
+        ).fetchall()
+    return {name: [str(r) for r in (refs or [])] for name, refs in rows}
 
 
 # --- collect --------------------------------------------------------------

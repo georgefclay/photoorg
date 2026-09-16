@@ -23,6 +23,14 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Private is private.** `is_private` photos are excluded from sync (skipped
   by push, absent from the VM's disk and DB). The web API refuses to serve
   them even if they somehow arrive.
+- **Desktop and web never share a database on the same machine.** The
+  laptop web server uses `photoorg_web`; the desktop uses `photoorg`.
+  The web's sync routes store `working_path` as a bare basename (correct
+  on the VM), so a push into a shared DB rewrites every desktop
+  `working_path` (fix-up 11, 2026-09-14). `push()` pre-flights
+  `GET /sync/status` and refuses when the web reports our own
+  `(current_database, system_identifier)`; `allow_shared_db=True` exists
+  only for the one test fixture that deliberately shares `photoorg_test`.
 
 ## Database
 - Local DB `photoorg`, role `photo_user`. Test DB `photoorg_test` (separate,
@@ -175,6 +183,25 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Private photos are sent to the mini.** LAN-only, no external egress;
   the "private is private" rule is about the web VM. Sweep removes the
   inbox copy once the result is in the DB.
+- **One working-file resolver** (fix-up 11).
+  `modes.ingest.paths.resolve_working_path(WORKING_DIR, stored)` is the
+  only place a stored `photos.working_path` / `photo_backs.working_path`
+  becomes a filesystem path: absolute stays, bare joins `WORKING_DIR` by
+  basename. Every uploader is `jobs.base.WorkingFileUploader`; the faces
+  preview context, bbox edit, face-crop writer, transcribe retry, and
+  push all go through it. No code builds a working path from the naming
+  scheme on its own. The bare-name tolerance is a safety net: the DB
+  holds absolute paths, and `check_working_files` (which now also covers
+  `photo_backs` and prints a "still bare" post-condition that must be 0)
+  rewrites anything bare with an audit row per repair.
+- **A hand-over never aborts on one bad file.** `hand_over` reads and
+  downscales each item itself; `FileNotFoundError` / undecodable image
+  → `job_items` row `status='failed'` with the error, log, continue.
+  `HandoverSummary.report()` is "N uploaded, M skipped (missing file)";
+  `job_runs.params.stats.skipped_refs` keeps the ids and the Jobs panel's
+  **Skipped files…** button lists them. Skipped items never reach
+  `photo_job_status`, so the next Run re-selects them. If every item was
+  skipped the mini is not started.
 
 ## Faces mode (Phase 6)
 - **Clustering is in-memory**, scipy **average-linkage** cosine distance

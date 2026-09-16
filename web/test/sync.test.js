@@ -209,3 +209,15 @@ test('GET /sync/pull/confirmed returns fact writes since cursor + comment/like s
   assert.ok(res.body.comments_summary.some((c) => Number(c.photo_id) === pid));
   assert.ok(res.body.likes_counts.some((l) => Number(l.photo_id) === pid && l.like_count >= 1));
 });
+
+test('GET /sync/status reports the database identity (fix-up 11 push guard)', async () => {
+  const res = await request(app).get('/sync/status').set('Authorization', bearer());
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray(res.body.tables));
+  assert.ok(res.body.db, 'db identity block present');
+  const { rows } = await pool.query(
+    'select current_database() as name, system_identifier::text as id from pg_control_system()',
+  );
+  assert.equal(res.body.db.name, rows[0].name);
+  assert.equal(res.body.db.system_identifier, rows[0].id);
+});

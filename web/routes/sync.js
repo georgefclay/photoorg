@@ -764,9 +764,25 @@ module.exports = function syncRoutes({ pool }) {
     }
   });
 
-  // /sync/status — light snapshot.
+  // /sync/status — light snapshot. Also reports which database this
+  // server is writing to (name + cluster identifier) so the desktop's
+  // push pre-flight can refuse when the web shares the desktop's own DB
+  // (fix-up 11: a local verification push once rewrote every desktop
+  // working_path to a bare basename that way).
   router.get('/status', async (req, res, next) => {
     try {
+      let db = null;
+      try {
+        const r = await pool.query(
+          `select current_database() as name, system_identifier::text as system_identifier
+             from pg_control_system()`,
+        );
+        db = r.rows[0] || null;
+      } catch (e) {
+        // pg_control_system() may be restricted on some roles; the desktop
+        // treats a missing identity as "cannot verify" and warns.
+        db = { name: null, system_identifier: null, error: String(e.message || e) };
+      }
       const rows = (await pool.query(`
         select 'photos' as name,       count(*)::int as n, max(updated_at) as last_touch from photos
         union all select 'faces',      count(*)::int, max(updated_at) from faces
@@ -780,7 +796,7 @@ module.exports = function syncRoutes({ pool }) {
         union all select 'contributions', count(*)::int, max(updated_at) from contributions
         union all select 'contribution_files', count(*)::int, max(updated_at) from contribution_files
       `)).rows;
-      res.json({ tables: rows });
+      res.json({ tables: rows, db });
     } catch (err) { next(err); }
   });
 

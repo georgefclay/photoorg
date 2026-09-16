@@ -29,7 +29,7 @@ from typing import Any
 import psycopg
 
 from ..inference_client import ENDPOINT_CLASSIFY, RefImage, ResultLine
-from .base import Job, JobContext, SelectedItem, Selector, Uploader, Writer
+from .base import Job, JobContext, SelectedItem, Selector, WorkingFileUploader, Writer
 
 log = logging.getLogger(__name__)
 
@@ -73,9 +73,8 @@ class ClassifySelector(Selector):
         ]
 
 
-class ClassifyUploader(Uploader):
-    def prepare(self, item: SelectedItem, max_edge: int) -> RefImage:
-        return RefImage(ref=item.ref, path=Path(item.working_path))
+class ClassifyUploader(WorkingFileUploader):
+    """Path resolution lives in WorkingFileUploader (fix-up 11)."""
 
 
 class ClassifyWriter(Writer):

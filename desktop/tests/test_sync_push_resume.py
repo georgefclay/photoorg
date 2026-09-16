@@ -186,9 +186,11 @@ def test_push_creates_photos_then_resends_zero_files(web_server, tmp_path):
         DATABASE_URL = TEST_DATABASE_URL
     pdb.init_pool(_S(), min_size=1, max_size=2)  # type: ignore[arg-type]
 
+    # allow_shared_db: this fixture deliberately runs web + desktop on one
+    # test DB (fix-up 11 PM answer 1). Production push refuses that.
     stats1 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir,
                   send_face_embeddings=False,
-                  files_only_for_grouped=False)
+                  files_only_for_grouped=False, allow_shared_db=True)
     assert stats1.photos_upserted == 3, stats1
     assert stats1.files_uploaded == 3
 
@@ -203,7 +205,7 @@ def test_push_creates_photos_then_resends_zero_files(web_server, tmp_path):
 
     stats2 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir,
                   send_face_embeddings=False,
-                  files_only_for_grouped=False)
+                  files_only_for_grouped=False, allow_shared_db=True)
     assert stats2.photos_upserted == 3, stats2
     assert stats2.files_uploaded == 0, "second push must send zero files"
 
@@ -270,6 +272,7 @@ def test_push_files_only_for_grouped_uploads_only_grouped_photos(web_server, tmp
         client, working_dir=working_dir, thumbs_dir=thumbs_dir,
         send_face_embeddings=False,
         files_only_for_grouped=True,
+        allow_shared_db=True,
     )
     assert stats.photos_upserted == 3, stats
     assert stats.files_uploaded == 1, (

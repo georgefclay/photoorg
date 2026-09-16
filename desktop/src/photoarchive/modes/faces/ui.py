@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from ... import db as dbmod
 from ...config import load as load_settings
+from ..ingest.paths import resolve_working_path
 from ...workers import BackgroundJob
 from .clustering import (
     ClusterMeta,
@@ -1154,6 +1155,7 @@ class FacesPanel(QWidget):
                 return False
             bbox_raw, working_path = row
             bbox = bbox_raw if isinstance(bbox_raw, dict) else json.loads(bbox_raw)
+            working_path = resolve_working_path(self._settings.WORKING_DIR, working_path)
             if not working_path or not Path(working_path).exists():
                 return False
             from PIL import Image, ImageOps
@@ -1222,6 +1224,7 @@ class FacesPanel(QWidget):
             return
         bbox_raw, working_path = row
         bbox = bbox_raw if isinstance(bbox_raw, dict) else json.loads(bbox_raw)
+        working_path = resolve_working_path(self._settings.WORKING_DIR, working_path)
         if not working_path:
             return
         out_dir = self._settings.THUMBS_DIR / "faces"

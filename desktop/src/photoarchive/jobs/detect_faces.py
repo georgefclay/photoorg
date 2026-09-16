@@ -30,7 +30,8 @@ from PIL import Image, ImageOps
 
 from ..config import load as load_settings
 from ..inference_client import ENDPOINT_DETECT_FACES, RefImage, ResultLine
-from .base import Job, JobContext, SelectedItem, Selector, Uploader, Writer
+from ..modes.ingest.paths import resolve_working_path
+from .base import Job, JobContext, SelectedItem, Selector, WorkingFileUploader, Writer
 
 log = logging.getLogger(__name__)
 
@@ -69,9 +70,8 @@ class FacesSelector(Selector):
         ]
 
 
-class FacesUploader(Uploader):
-    def prepare(self, item: SelectedItem, max_edge: int) -> RefImage:
-        return RefImage(ref=item.ref, path=Path(item.working_path))
+class FacesUploader(WorkingFileUploader):
+    """Path resolution lives in WorkingFileUploader (fix-up 11)."""
 
 
 class FacesWriter(Writer):
@@ -170,7 +170,8 @@ class FacesWriter(Writer):
         # Precompute face crop thumbnails outside the DB txn's scope
         # (safe — files, not DB). Failures just log; the crop is regenerable.
         if inserted_faces and working_path:
-            _write_face_crops(Path(working_path), inserted_faces, settings.THUMBS_DIR / "faces")
+            src = resolve_working_path(settings.WORKING_DIR, working_path)
+            _write_face_crops(src, inserted_faces, settings.THUMBS_DIR / "faces")
 
         return "ok"
 
