@@ -26,6 +26,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 
 **Progress (2026-09-15):** Phase 9 closed. The phone-on-LAN upload test could not connect and was **deferred to the live domain** — it is now verification step 2/4 of Phase 14. **Phase order changed: 14 (deploy) runs next, before 10 (pages)**, so every remaining phase is tested on a phone against `https://cyberdinosaurs.com`. Prompt: `prompts/phase-14-deploy.md`. **Phase 14 deploys the site with metadata + one test group's files only.** The full 28 GB file push is deferred until the mini's classify/describe/date jobs finish and Phase 7 (cleanup) has replaced the working copies it will replace — otherwise most files would be pushed twice. VM disk (30 GB, 19 free) is enough for the test set; grow to 80 GB before the full push.
 
+**Progress (2026-09-16, later):** Phase 6 fix-up 11 landed. Root cause of the `classify` hand-over crash: the Phase 9 local verification push ran the laptop web server against the desktop's own `photoorg` DB, and the sync upsert rewrote every `working_path` (12,677 photos + 826 backs) as a bare basename. Fixed with one working-file resolver, skip-not-abort hand-overs, `check_working_files` repair (now covers backs, post-condition "still bare = 0"), a shared-DB guard in `push()` (`/sync/status` identity check), and a separate `photoorg_web` DB on the laptop. **`classify`, `describe`, `estimate_date` handed over and running on the mini** (~104 h on the M4; M6 swap on 9/22 resumes the queue). Next: Phase 10.
+
 **Progress (2026-09-16):** **Phase 14 done — `https://cyberdinosaurs.com` is live.** Root grown to 80 GB (66 free). 28 migrations on the VM; metadata for 13,257 photos, 23,461 faces, 5,433 suggestions synced; files for one test group (139 photos, Clay Family / Album 6). Postmark round-trip verified (request → approve → magic link) from a phone. Nightly `pg_dump`, logrotate, fail2ban whitelist, Caddy + systemd in place; templates under `ops/vm/`. Open: UptimeRobot monitor, off-site backup, the full 28 GB file push (after Phase 7 + mini jobs). Next: **Phase 10 (pages)**, prompt `prompts/phase-10-web-pages.md`.
 
 **Progress (2026-09-16):** Phase 14 landed. `https://cyberdinosaurs.com` live over TLS, admin bootstrapped, deploy key on GitHub, Caddy site + systemd unit + sudoers + logrotate installed, root FS grown 30 → 80 GB (66 GB free), nightly `pg_dump` cron with 14-day retention, fail2ban whitelist updated. Postmark end-to-end (request-access → approve → magic-link → sign-in) confirmed with `georgefclay+phase14@gmail.com`. Desktop pointed at prod; new `files_only_for_grouped` push flag (default on) sends full metadata but files only for photos in a live `photo_groups` row — 13 257 metadata rows + 139 Clay Family files (Album 6: Summer 1992 — Canada) uploaded in 11 min 43 s (260.5 MB), second push 0 files in 135 s. `/sync/status` counts on prod match the laptop exactly. Off-site backup + UptimeRobot monitor + full-file push queued as TODOs in `GC.md`. Ops templates committed under `ops/vm/`.
@@ -182,12 +184,13 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - **Done 2026-09-16.** `https://cyberdinosaurs.com` live, TLS OK, admin bootstrapped, full email round-trip via Postmark. Root FS 30→80 GB. Systemd + Caddy + logrotate + sudoers + cron all installed (templates in `ops/vm/`). Metadata for the full keep set + files for one test group (Clay Family / Album 6) pushed and idempotent (second push 0 files). `/sync/status` matches the laptop.
 
 ## 5. Open items for George
+- **Candidate fix-up 12 — shared VLM inbox on the mini.** classify, describe and estimate_date all upload the same 1024-px JPEGs to three per-job inboxes (3 × ~2.5 GB, ~40 min each). One shared inbox with per-job result files, swept only when all three results are collected, would make it one upload. Do it before the next model / prompt-version rerun; not while a queue is running. (2026-09-16)
 
 1. Create the GitHub repo and push the skeleton (Phase 0).
 2. Confirm the masters have a backup.
 3. ~~Pick the archive's domain name~~ — cyberdinosaurs.com.
 4. On 2026-09-22, move the inference service to the M6 (config change + model re-download).
-5. Hand over `classify`, `describe`, `estimate_date` to the mini (blocked on Phase 6 fix-up 11).
+5. ~~Hand over `classify`, `describe`, `estimate_date` to the mini~~ — running since 2026-09-16.
 6. Bulk-assign the ~12,800 unfiled photos to groups from the desktop Groups panel.
 7. Full 28 GB file push once Phase 7 cleanup and the mini jobs are done (uncheck `files_only_for_grouped`).
 8. UptimeRobot monitor on `https://cyberdinosaurs.com/healthz` — no hurry.
