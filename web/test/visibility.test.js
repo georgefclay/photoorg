@@ -201,12 +201,13 @@ test('GET /media/thumbs/:id 404s for non-members and 200s for members', async ()
   await aliceAgent.post('/a/alice-token');
   await bobAgent.post('/a/bob-token');
 
-  // File does not exist on disk. Visibility passes for alice → 404 from
-  // the fs.stat, not the visibility check. For bob, visibility fails
-  // BEFORE the fs read — same 404 either way. What matters is that
-  // both fail-open to 404 (don't leak existence) and neither returns 500.
+  // File does not exist on disk. Alice may see the photo, so she gets the
+  // 200 "no image yet" placeholder (a 404 storm from metadata-only photos
+  // trips fail2ban). Bob fails visibility first → 404, never confirming
+  // the photo exists. Neither returns 500.
   const aliceRes = await aliceAgent.get(`/media/thumbs/${p}`);
   const bobRes   = await bobAgent.get(`/media/thumbs/${p}`);
-  assert.equal(aliceRes.status, 404);
+  assert.equal(aliceRes.status, 200);
+  assert.equal(aliceRes.headers['x-media-placeholder'], '1');
   assert.equal(bobRes.status, 404);
 });

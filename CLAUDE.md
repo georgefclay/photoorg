@@ -557,6 +557,16 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   A person suggestion's `face_id` must belong to that photo.
 - **Albums are read-only on the web** (no create / rename / add) until
   album changes can be pulled back to the desktop.
+- **Normal browsing and uploading must never produce 4xx responses.** The
+  VM's fail2ban `caddy-4xx-rate` jail (shared with George's other sites)
+  bans an IP after 20 4xx in 10 minutes for an hour — it banned George on
+  2026-09-17 when an admin Browse page asked for thumbnails of
+  metadata-only photos. So: a visible photo whose file isn't on the server
+  gets a 200 "No image yet" SVG from every `/media` route (header
+  `X-Media-Placeholder: 1`; not visible stays 404); lists carry `has_file`
+  and views don't request missing images; the upload sha pre-check answers
+  204 (held) / 200 (not held), never 404. Check the caddy access log for
+  4xx whenever a new page or script ships.
 - **Media derivatives are cut on demand and cached under `PHOTO_DIR`**,
   behind the same visibility gate as every `/media` route:
   `/media/display/:id` (≤ 1600 px, `display/<id>_v<synced_file_version>.jpg`),

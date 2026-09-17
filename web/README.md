@@ -111,7 +111,7 @@ Groups (visibility model):
 
 Contributions (uploader own; admin/moderator across the whole set they scope to):
 
-- `POST /api/contributions`; `HEAD /api/contributions/:id/files?sha256=` (204 if server holds); `POST /api/contributions/:id/files` (multipart, ≤100 MB); `POST /api/contributions/:id/finish` (emails admin); `GET /api/contributions/mine`.
+- `POST /api/contributions`; `HEAD /api/contributions/:id/files?sha256=` (204 if server holds, 200 if not — never 404, see CLAUDE.md on fail2ban); `POST /api/contributions/:id/files` (multipart, ≤100 MB); `POST /api/contributions/:id/finish` (emails admin); `GET /api/contributions/mine`.
 - Admin/moderator: `GET /api/admin/contributions[/:id]`, `POST .../:id/files/:fid/{approve,reject}`, `POST .../:id/{approve-all,reject-all}` (admin batch). Moderator approve assigns only their group; moderator reject removes only their group from targets.
 
 Sync (service token):

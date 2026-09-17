@@ -1,5 +1,8 @@
 <%
 // One grid tile. Keep in sync with tileHtml() in public/js/grid.js.
+// No <img> when the file isn't on the server yet (has_file false): the
+// tile shows "No image yet" without a request.
 const d = fmt.captureDate(p);
 const alt = d.text ? `Photo, ${d.guess ? 'about ' : ''}${d.text}` : 'Undated photo';
-%><li><a class="tile" href="/photos/<%= p.id %>?from=<%= encodeURIComponent(from) %>"><img src="<%= p.thumb_url %>" alt="<%= alt %>" width="320" height="320" loading="lazy" decoding="async"><% if (p.like_count) { %><span class="tile-badge"><%- include('icon', { name: 'heart' }) %><%= p.like_count %></span><% } %></a></li>
+const hasFile = p.has_file !== false;
+%><li><a class="tile<%= hasFile ? '' : ' missing' %>" href="/photos/<%= p.id %>?from=<%= encodeURIComponent(from) %>"<% if (!hasFile) { %> aria-label="<%= alt %> (no image yet)"<% } %>><% if (hasFile) { %><img src="<%= p.thumb_url %>" alt="<%= alt %>" width="320" height="320" loading="lazy" decoding="async"><% } %><% if (p.like_count) { %><span class="tile-badge"><%- include('icon', { name: 'heart' }) %><%= p.like_count %></span><% } %></a></li>

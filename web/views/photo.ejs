@@ -11,6 +11,8 @@ page.css.push('/css/photo.css');
 page.js.push('/js/autocomplete.js', '/js/like.js', '/js/datefield.js', '/js/tagger.js', '/js/photo.js');
 const ref = fmt.physicalRef(photo);
 const hasDims = photo.width > 0 && photo.height > 0;
+// Tagging needs the picture on screen.
+const canTag = hasDims && photo.has_file;
 const humanSuggestions = suggestions.filter(function (s) { return !s.ai; });
 const aiSuggestions = suggestions.filter(function (s) { return s.ai; });
 const prevUrl = neighbours.prev ? `/photos/${neighbours.prev}${fromQ}` : '';
@@ -47,16 +49,18 @@ function faceState(f) {
 
   <div class="photo-layout">
     <div class="photo-main">
-      <div class="photo-frame" id="photo-frame" data-photo-frame
+      <div class="photo-frame<%= photo.has_file ? "" : " missing" %>" id="photo-frame" data-photo-frame
         <% if (hasDims) { %>style="--ratio: <%= (photo.width / photo.height).toFixed(4) %>"<% } %>>
+        <% if (photo.has_file) { %>
         <img class="photo-img" data-photo-img src="/media/display/<%= photo.id %>"
           <% if (hasDims) { %>width="<%= photo.width %>" height="<%= photo.height %>"<% } %>
           alt="<%= alt %>" decoding="async" fetchpriority="high">
-        <div class="photo-missing" data-photo-missing hidden>
+        <% } %>
+        <div class="photo-missing" data-photo-missing <%= photo.has_file ? 'hidden' : '' %>>
           <%- include('partials/icon', { name: 'photos' }) %>
           <p>The picture isn't on the site yet.<br><span class="muted">Everything else about it is below.</span></p>
         </div>
-        <% if (hasDims) { %>
+        <% if (canTag) { %>
         <div class="face-layer" data-face-layer data-js-only>
           <% faces.forEach(function (f) { if (!f.style) return; const st = faceState(f); %>
             <button type="button" class="face-box face-<%= st %><%= f.suggested_by_me ? ' suggested' : '' %>" style="<%= f.style %>"
@@ -133,7 +137,7 @@ function faceState(f) {
             <% photo.people.forEach(function (p) { %>
               <li><a class="chip accent" href="/people/<%= p.id %>"><%= p.display_name %></a></li>
             <% }) %>
-            <% if (photo.unknown_face_count && hasDims) { %>
+            <% if (photo.unknown_face_count && canTag) { %>
               <li data-js-only><button type="button" class="chip who-chip" data-start-tagging><%- include('partials/icon', { name: 'question' }) %>Who is this? (<%= photo.unknown_face_count %>)</button></li>
             <% } %>
           </ul>
@@ -176,7 +180,7 @@ function faceState(f) {
         </button>
 
         <div class="action-row" role="group" aria-label="Help with this photo" data-js-only>
-          <button type="button" class="action-btn" data-action="tag" aria-pressed="false" aria-controls="photo-frame" <%= hasDims ? '' : 'disabled' %>>
+          <button type="button" class="action-btn" data-action="tag" aria-pressed="false" aria-controls="photo-frame" <%= canTag ? "" : "disabled" %>>
             <%- include('partials/icon', { name: 'tag' }) %><span>Tag a face</span>
           </button>
           <button type="button" class="action-btn" data-open-panel="date" aria-expanded="false" aria-controls="panel-date">
@@ -282,10 +286,12 @@ function faceState(f) {
         <h2 id="backs-h" class="section-h">On the back</h2>
         <% photo.backs.forEach(function (b) { %>
         <figure class="back">
+          <% if (b.has_file) { %>
           <a class="back-img-link" href="<%= b.image_url %>" data-back-link>
             <img src="<%= b.image_url %>" alt="The back of the print" loading="lazy" decoding="async" data-back-img>
           </a>
-          <p class="back-missing muted" data-back-missing hidden>The picture of the back isn't on the site yet.</p>
+          <% } %>
+          <p class="back-missing muted" data-back-missing <%= b.has_file ? 'hidden' : '' %>>The picture of the back isn't on the site yet.</p>
           <figcaption>
             <% if (b.transcribed_text) { %>
               <blockquote class="transcription"><%= b.transcribed_text %></blockquote>

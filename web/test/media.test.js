@@ -93,6 +93,38 @@ test('/media/display: 404 for non-members, private and deleted; cached on disk; 
   assert.equal((await admin.get(`/media/display/${pid}`)).status, 404, 'deleted');
 });
 
+test('a visible photo whose file is not on the server gets a 200 placeholder, never a 404 (fail2ban)', async () => {
+  const w = await seedWorld();
+  const pid = await insertPhoto({ synced_file_version: null });
+  await addToGroup(pid, w.clay);
+  const faceId = await insertFace(pid, { review: 'unknown' });
+  const alice = await agentFor(app, w.alice);
+  for (const url of [`/media/thumbs/${pid}`, `/media/display/${pid}`, `/media/working/${pid}`, `/media/faces/${faceId}`]) {
+    const r = await alice.get(url);
+    assert.equal(r.status, 200, url);
+    assert.equal(r.headers['x-media-placeholder'], '1', url);
+    assert.match(r.headers['content-type'], /image\/svg\+xml/, url);
+  }
+  // Not visible stays 404.
+  const carol = await agentFor(app, w.carol);
+  assert.equal((await carol.get(`/media/thumbs/${pid}`)).status, 404);
+  assert.equal((await alice.get('/media/thumbs/999999')).status, 404);
+
+  // Pages don't even ask for it: tile without <img>, photo page without display image or tagger.
+  const browse = await alice.get('/');
+  const tile = new RegExp(`<a class="tile missing" href="/photos/${pid}\\?[^>]*>(?!<img)`);
+  assert.match(browse.text, tile);
+  const api = await alice.get('/api/photos');
+  assert.equal(api.body.items.find((p) => p.id === pid).has_file, false);
+  const page = await alice.get(`/photos/${pid}`);
+  assert.equal(page.status, 200);
+  assert.doesNotMatch(page.text, new RegExp(`/media/display/${pid}`));
+  assert.doesNotMatch(page.text, /data-face-layer/);
+  // Who is this? skips faces nobody can see.
+  const who = await alice.get('/api/faces/unknown');
+  assert.ok(!who.body.items.some((f) => f.id === faceId));
+});
+
 test('/media/backs serves the JPEG pushed under the id+sha name; 404 for non-members', async () => {
   const w = await seedWorld();
   const back = (await pool.query('select id, sha256 from photo_backs limit 1')).rows[0];

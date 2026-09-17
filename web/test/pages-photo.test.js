@@ -37,7 +37,17 @@ test('member sees the photo page with caption, like, comments, actions and the b
   assert.doesNotMatch(t, /Add to album/);
   assert.doesNotMatch(t, /Rescan wanted/, 'admin only');
   assert.match(t, /Peggy and Chuck, Easter 1962/, 'back transcription');
-  assert.match(t, /\/media\/backs\/\d+/);
+  // The back's image isn't on disk in this test: say so instead of requesting it.
+  assert.doesNotMatch(t, /\/media\/backs\/\d+/);
+  assert.match(t, /The picture of the back isn't on the site yet\./);
+  const back = (await pool.query('select id, sha256 from photo_backs where photo_id = $1', [w.photos.clay1])).rows[0];
+  const storage = require('../services/photo-storage');
+  const fs = require('fs');
+  const path = require('path');
+  fs.mkdirSync(path.join(process.env.PHOTO_DIR, 'backs'), { recursive: true });
+  fs.writeFileSync(storage.backPath(Number(back.id), back.sha256), Buffer.from('jpeg'));
+  const withBack = await alice.get(`/photos/${w.photos.clay1}`);
+  assert.match(withBack.text, new RegExp(`/media/backs/${back.id}`), 'back image once pushed');
   assert.match(t, /Who is this\? \(1\)/, 'unknown face invites naming');
   assert.match(t, new RegExp(`data-face-id="${w.faces.unknown}" data-state="unknown"`));
   assert.match(t, new RegExp(`data-face-id="${w.faces.untagged}" data-state="unnamed"`));

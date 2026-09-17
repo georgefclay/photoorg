@@ -29,7 +29,11 @@
     const t = dateText(p);
     const alt = t ? `Photo, ${p.capture_date_confirmed ? '' : 'about '}${t}` : 'Undated photo';
     const badge = p.like_count ? `<span class="tile-badge">${HEART}${p.like_count}</span>` : '';
-    return `<li><a class="tile" href="/photos/${p.id}?from=${encodeURIComponent(from)}"><img src="${esc(p.thumb_url)}" alt="${esc(alt)}" width="320" height="320" loading="lazy" decoding="async">${badge}</a></li>`;
+    const href = `/photos/${p.id}?from=${encodeURIComponent(from)}`;
+    if (p.has_file === false) {
+      return `<li><a class="tile missing" href="${href}" aria-label="${esc(alt)} (no image yet)">${badge}</a></li>`;
+    }
+    return `<li><a class="tile" href="${href}"><img src="${esc(p.thumb_url)}" alt="${esc(alt)}" width="320" height="320" loading="lazy" decoding="async">${badge}</a></li>`;
   }
 
   function setup(grid) {

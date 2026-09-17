@@ -195,7 +195,10 @@ module.exports = function apiContributionsRoutes({ pool }) {
          union all select 1 from contribution_files where sha256 = $1
          limit 1`, [sha.toLowerCase()],
       );
-      return res.status(rows[0] ? 204 : 404).end();
+      // 204 = the server already holds it (skip); 200 = not held, upload it.
+      // Not 404: an upload of 20+ new photos would trip the VM's fail2ban
+      // 4xx-rate jail and ban the uploader.
+      return res.status(rows[0] ? 204 : 200).end();
     } catch (err) { next(err); }
   });
 

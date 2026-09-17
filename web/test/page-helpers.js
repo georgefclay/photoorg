@@ -50,6 +50,7 @@ async function insertPhoto(fields = {}) {
     sha256: `sha-${shaSeq}-${Math.random().toString(36).slice(2, 8)}`,
     mime: 'image/jpeg', source_root: 'photos', source_folder: '_1962-03', source_filename: `f${shaSeq}.jpg`,
     triage_status: 'keep', width: 1200, height: 800, working_path: `0000000${shaSeq}_abcdef12.jpg`,
+    synced_file_version: 1, // the file was pushed (pass null for metadata-only)
     ...fields,
   };
   const cols = Object.keys(f);

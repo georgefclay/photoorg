@@ -6,6 +6,7 @@
 const { photoVisibleSql, assertPhotoVisible } = require('../middleware/visibility');
 const { scopeSql } = require('./scope');
 const { encodeCursor, decodeCursor, orderBy, keysetWhere } = require('./cursor');
+const storage = require('./photo-storage');
 
 const SORTS = {
   recent:     { col: null,                 label: 'Recently added' },
@@ -115,6 +116,9 @@ function rowToItem(r) {
     width: r.width,
     height: r.height,
     like_count: r.like_count,
+    // False when only metadata was pushed: views render a placeholder
+    // instead of requesting an image that isn't on the server.
+    has_file: r.synced_file_version != null,
   };
 }
 
@@ -159,7 +163,7 @@ async function listPhotos(pool, user, {
       select p.id, p.capture_date, to_char(p.capture_date, 'YYYY-MM-DD') as capture_date_str,
              p.capture_date_precision, p.capture_date_confirmed,
              p.scan_batch, p.scan_sequence, p.physical_ref_note,
-             p.completeness_score, p.rescan_wanted, p.width, p.height,
+             p.completeness_score, p.rescan_wanted, p.width, p.height, p.synced_file_version,
              ${likeCol}
              ${albumPos}
         from photos p
@@ -271,7 +275,8 @@ async function getPhotoDetail(pool, user, id) {
             capture_date_precision, capture_date_confirmed,
             scan_batch, scan_sequence, source_folder, source_filename, physical_ref_note,
             rescan_wanted, completeness_score, description_ai, width, height, orientation,
-            has_no_people, is_scan, exif_taken_at, exif_camera, exif_gps_lat, exif_gps_lon
+            has_no_people, is_scan, exif_taken_at, exif_camera, exif_gps_lat, exif_gps_lon,
+            synced_file_version, working_path
        from photos where id = $1`, [id],
   )).rows[0];
 
@@ -296,7 +301,7 @@ async function getPhotoDetail(pool, user, id) {
       `select count(*)::int as n, coalesce(bool_or(user_id = $2), false) as me
          from likes where photo_id = $1`, [id, user.id]),
     pool.query(
-      `select id, transcribed_text, transcription_confidence, transcription_confirmed
+      `select id, sha256, transcribed_text, transcription_confidence, transcription_confirmed
          from photo_backs where photo_id = $1 order by id`, [id]),
     pool.query(
       `select s.id, s.kind, s.payload, s.confidence, s.source, s.created_at,
@@ -340,11 +345,14 @@ async function getPhotoDetail(pool, user, id) {
     }
   }
 
+  const { working_path: workingPath, synced_file_version: syncedVersion, ...photoCols } = photo;
   return {
-    ...photo,
+    ...photoCols,
     id: Number(photo.id),
     thumb_url: `/media/thumbs/${photo.id}`,
     working_url: `/media/working/${photo.id}`,
+    // False when only metadata was pushed (no image on the server yet).
+    has_file: syncedVersion != null && Boolean(workingPath),
     exif: {
       taken_at: photo.exif_taken_at, camera: photo.exif_camera,
       gps_lat: photo.exif_gps_lat, gps_lon: photo.exif_gps_lon,
@@ -370,6 +378,7 @@ async function getPhotoDetail(pool, user, id) {
       transcribed_text: b.transcribed_text,
       transcription_confidence: b.transcription_confidence,
       transcription_confirmed: b.transcription_confirmed,
+      has_file: storage.fileExists(storage.backPath(Number(b.id), b.sha256)),
     })),
     suggestions_pending: suggestions.rows.map((s) => ({
       id: Number(s.id),
@@ -407,7 +416,7 @@ async function attentionCounts(pool, user, scope) {
     `select
        count(*) filter (where p.capture_date_confirmed = false)::int as no_date,
        count(*) filter (where fc.untagged > 0)::int as untagged_faces,
-       coalesce(sum(fc.unknown), 0)::int as unknown_faces,
+       coalesce(sum(fc.unknown) filter (where p.synced_file_version is not null), 0)::int as unknown_faces,
        count(*)::int as total
        from photos p
   left join (select f.photo_id,

@@ -58,9 +58,10 @@ test('POST /api/contributions creates a pending contribution + upload + finish',
   assert.equal(create.status, 201);
   const cid = create.body.id;
 
-  // HEAD pre-check for a random sha → 404 (server does not have it).
+  // HEAD pre-check for a random sha → 200 (server does not have it). Never
+  // 404: a large upload would trip the VM's fail2ban 4xx-rate jail.
   const head = await agent.head(`/api/contributions/${cid}/files?sha256=${'a'.repeat(64)}`);
-  assert.equal(head.status, 404);
+  assert.equal(head.status, 200);
 
   // Upload a real tiny JPEG.
   const buf = tinyJpegBuf();

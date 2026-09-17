@@ -46,9 +46,30 @@ function paddedId(n) {
   return String(n).padStart(8, '0');
 }
 
+// The viewer may see this photo, but its file isn't on the server yet
+// (metadata-only push, back not pushed, undecodable upload). Answer 200
+// with a small neutral image, never 404: browsing a grid of metadata-only
+// photos would otherwise fire dozens of 404s a minute and the VM's
+// fail2ban `caddy-4xx-rate` jail bans the family member's IP (it banned
+// George on 2026-09-17). Real "not found / not yours" stays 404.
+const PLACEHOLDER_SVG = Buffer.from(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">'
+  + '<rect width="120" height="120" fill="#e6e1d6"/>'
+  + '<path d="M38 44h44v32H38z M44 70l12-12 8 8 6-6 12 10" fill="none" stroke="#8a8378" stroke-width="3" stroke-linejoin="round"/>'
+  + '<text x="60" y="96" font-family="system-ui,sans-serif" font-size="10" fill="#6b655b" text-anchor="middle">No image yet</text>'
+  + '</svg>',
+);
+
+function placeholder(res) {
+  res.setHeader('Cache-Control', 'private, no-cache');
+  res.setHeader('X-Media-Placeholder', '1');
+  res.type('image/svg+xml').send(PLACEHOLDER_SVG);
+}
+
+// Callers have already passed the visibility check.
 function serve(res, absPath) {
   fs.stat(absPath, (err, stat) => {
-    if (err || !stat.isFile()) return res.status(404).end();
+    if (err || !stat.isFile()) return placeholder(res);
     res.setHeader('Cache-Control', 'private, max-age=86400');
     res.sendFile(absPath);
   });
@@ -95,7 +116,8 @@ module.exports = function mediaRoutes({ pool }) {
     try {
       const id = Number(req.params.id);
       const row = await visiblePhoto(req.user, id, 'p.working_path');
-      if (!row || !row.working_path) return res.status(404).end();
+      if (!row) return res.status(404).end();
+      if (!row.working_path) return placeholder(res);
       // working_path on the web side is a relative filename under
       // PHOTO_DIR/working/ (basename of the desktop working file).
       return serve(res, path.join(photoDir(), 'working', path.basename(row.working_path)));
@@ -107,11 +129,12 @@ module.exports = function mediaRoutes({ pool }) {
     try {
       const id = Number(req.params.id);
       const row = await visiblePhoto(req.user, id, 'p.working_path, coalesce(p.synced_file_version, p.file_version) as file_version');
-      if (!row || !row.working_path) return res.status(404).end();
+      if (!row) return res.status(404).end();
+      if (!row.working_path) return placeholder(res);
       const dest = path.join(photoDir(), 'display', `${id}_v${row.file_version || 1}.jpg`);
       if (!(await exists(dest))) {
         const src = path.join(photoDir(), 'working', path.basename(row.working_path));
-        if (!(await exists(src))) return res.status(404).end();
+        if (!(await exists(src))) return placeholder(res);
         const buf = await sharp(src, { failOn: 'none' })
           .rotate()
           .resize({ width: DISPLAY_EDGE, height: DISPLAY_EDGE, fit: 'inside', withoutEnlargement: true })
@@ -141,7 +164,7 @@ module.exports = function mediaRoutes({ pool }) {
       // The JPEG written by PUT /sync/photo_backs/:id/file (name from id + sha).
       const derived = storage.backPath(backId, rows[0].sha256);
       if (await exists(derived)) return serve(res, derived);
-      if (!rows[0].working_path) return res.status(404).end();
+      if (!rows[0].working_path) return placeholder(res);
       return serve(res, path.join(photoDir(), 'backs', path.basename(rows[0].working_path)));
     } catch (err) { next(err); }
   });
@@ -171,7 +194,7 @@ module.exports = function mediaRoutes({ pool }) {
       const dest = path.join(photoDir(), 'faces', `gen_${faceId}_v${face.file_version || 1}_${hash}.jpg`);
       if (!(await exists(dest))) {
         const src = face.working_path && path.join(photoDir(), 'working', path.basename(face.working_path));
-        if (!src || !(await exists(src))) return res.status(404).end();
+        if (!src || !(await exists(src))) return placeholder(res);
         // bbox is in the EXIF-transposed frame at full resolution (fix-up 6).
         const rotated = await sharp(src, { failOn: 'none' }).rotate().toBuffer({ resolveWithObject: true });
         const W = rotated.info.width, H = rotated.info.height;
@@ -179,13 +202,13 @@ module.exports = function mediaRoutes({ pool }) {
         const sx = face.width ? W / face.width : 1;
         const sy = face.height ? H / face.height : 1;
         const x = Number(b.x) * sx, y = Number(b.y) * sy, w = Number(b.w) * sx, h = Number(b.h) * sy;
-        if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return res.status(404).end();
+        if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return placeholder(res);
         const px = w * 0.15, py = h * 0.15;
         const left = Math.max(0, Math.floor(x - px));
         const top = Math.max(0, Math.floor(y - py));
         const right = Math.min(W, Math.ceil(x + w + px));
         const bottom = Math.min(H, Math.ceil(y + h + py));
-        if (right - left < 2 || bottom - top < 2) return res.status(404).end();
+        if (right - left < 2 || bottom - top < 2) return placeholder(res);
         const buf = await sharp(rotated.data)
           .extract({ left, top, width: right - left, height: bottom - top })
           .resize({ width: FACE_EDGE, height: FACE_EDGE, fit: 'inside', withoutEnlargement: false })
@@ -218,11 +241,12 @@ module.exports = function mediaRoutes({ pool }) {
         );
         allowed = mod.rows.length > 0;
       }
-      if (!allowed || f.is_video || !f.stored_path) return res.status(404).end();
+      if (!allowed) return res.status(404).end();
+      if (f.is_video || !f.stored_path) return placeholder(res);
       const src = path.join(photoDir(), f.stored_path);
       const dest = path.join(photoDir(), 'uploads', String(f.contribution_id), `thumb_${fileId}.jpg`);
       if (!(await exists(dest))) {
-        if (!(await exists(src))) return res.status(404).end();
+        if (!(await exists(src))) return placeholder(res);
         let buf;
         try {
           buf = await sharp(src, { failOn: 'none' })
@@ -231,7 +255,7 @@ module.exports = function mediaRoutes({ pool }) {
             .jpeg({ quality: 80 })
             .toBuffer();
         } catch {
-          return res.status(404).end(); // e.g. HEIC the bundled libvips can't decode
+          return placeholder(res); // e.g. HEIC the bundled libvips can't decode
         }
         await writeAtomic(dest, buf);
       }

@@ -200,6 +200,8 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 9. Off-site backup of the VM's nightly pg_dump (S3) — no hurry.
 10. Refresh the fail2ban whitelist IP in GC.md if the ISP changes it.
 11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only). Fold into Phase 11 or 12.
+12. Phase 10 phone checklist (12 steps, in Code's 2026-09-17 report) — George, off Wi-Fi.
+13. Check `photos.orientation` on the desktop: Code found no photo with orientation set in the 408-photo local copy. Either the sync omits the column or the fix-up 6 backfill missed. `select orientation, count(*) from photos group by 1` on `photoorg`; phone photos should show 6/8 as well as 1.
 
 ## 6. Risks
 

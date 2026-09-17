@@ -10,6 +10,8 @@ async function listUnknownFaces(pool, user, { cursor = null, limit = 24, scope =
   const params = [user.id];
   const clauses = [
     `f.is_deleted = false`, `f.person_id is null`, `f.review_status = 'unknown'`,
+    // Nobody can name a face without seeing it: only photos whose file is on the server.
+    `p.synced_file_version is not null`,
     visibleSql(user, params, 'p'),
   ];
   const sc = scopeSql(scope, params, 'p');
