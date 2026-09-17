@@ -1,0 +1,9 @@
+<%
+// Admin page heading with a way back to the dashboard.
+// Params: title, sub (optional muted line), back (default true)
+%>
+<div class="admin-head">
+  <% if (locals.back !== false) { %><a class="back-link no-print" href="/admin"><%- include('../partials/icon', { name: 'left' }) %>Admin</a><% } %>
+  <h1><%= title %></h1>
+  <% if (locals.sub) { %><p class="muted"><%= sub %></p><% } %>
+</div>

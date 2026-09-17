@@ -1,0 +1,5 @@
+<%
+// One grid tile. Keep in sync with tileHtml() in public/js/grid.js.
+const d = fmt.captureDate(p);
+const alt = d.text ? `Photo, ${d.guess ? 'about ' : ''}${d.text}` : 'Undated photo';
+%><li><a class="tile" href="/photos/<%= p.id %>?from=<%= encodeURIComponent(from) %>"><img src="<%= p.thumb_url %>" alt="<%= alt %>" width="320" height="320" loading="lazy" decoding="async"><% if (p.like_count) { %><span class="tile-badge"><%- include('icon', { name: 'heart' }) %><%= p.like_count %></span><% } %></a></li>

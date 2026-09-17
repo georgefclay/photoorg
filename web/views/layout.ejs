@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title><%= page.title ? `${page.title} · Cyber Dinosaurs` : 'Cyber Dinosaurs' %></title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#2c6a4a">
+  <link rel="stylesheet" href="/css/site.css">
+  <% page.css.forEach(function (href) { %><link rel="stylesheet" href="<%= href %>">
+  <% }) %>
+</head>
+<body class="<%= user ? 'signed-in' : 'signed-out' %> <%= page.bodyClass || '' %>">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="header-row">
+    <a class="brand" href="/"><%- include('partials/icon', { name: 'dino' }) %><span>Cyber Dinosaurs</span></a>
+    <% if (user) { %>
+      <nav class="top-nav" aria-label="Main">
+        <a href="/" <%- page.nav === 'photos' ? 'aria-current="page"' : '' %>>Photos</a>
+        <a href="/people" <%- page.nav === 'people' ? 'aria-current="page"' : '' %>>People</a>
+        <a href="/albums" <%- page.nav === 'albums' ? 'aria-current="page"' : '' %>>Albums</a>
+        <a href="/upload" <%- page.nav === 'upload' ? 'aria-current="page"' : '' %>>Upload</a>
+        <% if (locals.isModerator) { %><a href="/admin" <%- page.nav === 'admin' ? 'aria-current="page"' : '' %>>Admin</a><% } %>
+      </nav>
+    <div class="header-tools">
+      <form class="scope-form" method="post" action="/scope">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+        <input type="hidden" name="return_to" value="<%= currentUrl %>">
+        <label class="sr-only" for="scope-select">Show photos from</label>
+        <select id="scope-select" name="scope" data-autosubmit>
+          <option value="all" <%= locals.groupScope && groupScope.kind === 'all' ? 'selected' : '' %>><%= user.role === 'admin' ? 'All photos' : 'All my groups' %></option>
+          <% (locals.scopeGroups || []).forEach(function (g) { %>
+            <option value="<%= g.id %>" <%= locals.groupScope && groupScope.kind === 'group' && groupScope.groupId === g.id ? 'selected' : '' %>><%= g.name %></option>
+          <% }) %>
+          <% if (user.role === 'admin') { %>
+            <option value="unfiled" <%= locals.groupScope && groupScope.kind === 'unfiled' ? 'selected' : '' %>>Unfiled</option>
+          <% } %>
+        </select>
+        <noscript><button type="submit" class="btn secondary small">Show</button></noscript>
+      </form>
+      <form class="search-form" method="get" action="/search" role="search">
+        <label class="sr-only" for="site-search">Search</label>
+        <input id="site-search" type="search" name="q" placeholder="Search names and words" value="<%= locals.searchQuery || '' %>" autocomplete="off">
+        <button type="submit" class="icon-btn" aria-label="Search"><%- include('partials/icon', { name: 'search' }) %></button>
+      </form>
+    </div>
+      <details class="account-menu">
+        <summary aria-label="Account menu"><span class="avatar" aria-hidden="true"><%= fmt.initials(user) %></span></summary>
+        <div class="menu-panel">
+          <p class="menu-who"><strong><%= user.display_name || user.email %></strong><br><span class="muted"><%= user.email %></span></p>
+          <a href="/upload/mine">My uploads</a>
+          <a href="/who-is-this">Who is this?</a>
+          <% if (locals.isModerator) { %><a href="/admin">Admin</a><% } %>
+          <form method="post" action="/logout">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+            <button type="submit" class="menu-button">Sign out</button>
+          </form>
+        </div>
+      </details>
+    <% } else { %>
+      <a class="btn secondary small" href="/login">Sign in</a>
+    <% } %>
+  </div>
+</header>
+
+<main id="main" class="site-main <%= page.wide ? 'wide' : '' %>">
+<%- body %>
+</main>
+
+<footer class="site-footer"><small>Cyber Dinosaurs · a private family archive</small></footer>
+
+<% if (user) { %>
+<nav class="tab-bar" aria-label="Main">
+  <a href="/" <%- page.nav === 'photos' ? 'aria-current="page"' : '' %>><%- include('partials/icon', { name: 'photos' }) %><span>Photos</span></a>
+  <a href="/people" <%- page.nav === 'people' ? 'aria-current="page"' : '' %>><%- include('partials/icon', { name: 'people' }) %><span>People</span></a>
+  <a href="/albums" <%- page.nav === 'albums' ? 'aria-current="page"' : '' %>><%- include('partials/icon', { name: 'albums' }) %><span>Albums</span></a>
+  <a href="/upload" <%- page.nav === 'upload' ? 'aria-current="page"' : '' %>><%- include('partials/icon', { name: 'upload' }) %><span>Upload</span></a>
+  <% if (locals.isModerator) { %><a href="/admin" <%- page.nav === 'admin' ? 'aria-current="page"' : '' %>><%- include('partials/icon', { name: 'admin' }) %><span>Admin</span></a><% } %>
+</nav>
+<% } %>
+<script src="/js/site.js" defer></script>
+<% page.js.forEach(function (src) { %><script src="<%= src %>" defer></script>
+<% }) %>
+</body>
+</html>

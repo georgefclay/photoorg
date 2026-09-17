@@ -1,0 +1,91 @@
+/* People, person, albums, album and search pages. Tokens and components
+   come from site.css; this file only adds what those pages need. */
+
+/* ---- find box (people list + search page) ---------------------------- */
+.people-find { display: flex; gap: var(--s2); margin-bottom: var(--s3); }
+.people-find input { flex: 1 1 auto; min-width: 0; }
+.people-find .btn { flex: none; }
+.people-note { margin-bottom: var(--s3); }
+
+/* ---- rows with an avatar or cover ------------------------------------ */
+.person-row, .album-row { gap: var(--s3); min-height: 64px; }
+.person-avatar {
+  flex: none; display: inline-grid; place-items: center;
+  width: 44px; height: 44px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent-strong);
+  font-weight: 700; font-size: 1rem; letter-spacing: 0.02em;
+}
+.person-avatar.big { width: 64px; height: 64px; font-size: 1.4rem; }
+.person-text { display: flex; flex-direction: column; min-width: 0; }
+.person-name { font-weight: 600; overflow-wrap: anywhere; }
+.person-sub { color: var(--fg-mute); font-size: 0.95rem; }
+.no-photos .person-name { font-weight: 500; }
+.no-photos .person-avatar { background: var(--surface-2); color: var(--fg-mute); }
+[data-people-results][aria-busy="true"] { opacity: 0.6; transition: opacity 0.15s; }
+
+.album-cover {
+  flex: none; width: 64px; height: 64px; border-radius: var(--radius-sm); overflow: hidden;
+  background: var(--surface-2); color: var(--fg-mute); display: grid; place-items: center;
+}
+.album-cover img { width: 100%; height: 100%; object-fit: cover; }
+.album-cover .icon { width: 28px; height: 28px; }
+.album-row.no-photos .person-name { color: var(--fg-mute); }
+
+/* ---- person page ------------------------------------------------------ */
+.person-layout { display: grid; gap: var(--s4); grid-template-columns: minmax(0, 1fr); }
+.person-head { display: flex; align-items: center; gap: var(--s3); margin: var(--s2) 0 var(--s4); }
+.person-head h1 { margin: 0; overflow-wrap: anywhere; }
+.person-life { margin: var(--s1) 0 0; font-size: 1.05rem; }
+.person-facts { display: grid; gap: var(--s2) var(--s4); grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); margin: 0 0 var(--s4); }
+.person-facts div { min-width: 0; }
+.person-facts dt { color: var(--fg-mute); font-size: 0.9rem; }
+.person-facts dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.person-notes p { white-space: pre-line; margin: 0; }
+.person-layout h2 { margin-top: var(--s4); }
+.rel-title { font-size: 1rem; color: var(--fg-mute); font-weight: 600; margin: var(--s3) 0 var(--s2); }
+.rel-list { list-style: none; margin: 0; padding: 0; }
+.rel-note { color: var(--fg-mute); font-size: 0.85rem; }
+.pending-list { margin: 0; padding-left: var(--s5); }
+.pending-list li { min-height: var(--tap); display: list-item; line-height: var(--tap); }
+.pending-list a { display: inline-block; min-height: var(--tap); }
+.suggest-card h2 { margin-top: 0; }
+.suggest-card fieldset .check { padding: var(--s1) 0; }
+.person-photos > h2 { margin-bottom: var(--s1); }
+
+@media (min-width: 900px) {
+  .person-layout {
+    grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr);
+    grid-template-areas: "info photos" "suggest photos";
+    grid-template-rows: auto 1fr;
+    column-gap: var(--s6);
+    align-items: start;
+  }
+  .person-info { grid-area: info; }
+  .person-photos { grid-area: photos; }
+  .suggest-card { grid-area: suggest; }
+  .person-photos .photo-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+
+/* ---- album page ------------------------------------------------------- */
+.album-head { margin: var(--s2) 0 var(--s4); }
+.album-head h1 { margin-bottom: var(--s2); overflow-wrap: anywhere; }
+.album-desc { max-width: var(--read-w); white-space: pre-line; }
+
+/* ---- search page ------------------------------------------------------ */
+.search-page-form { max-width: var(--read-w); }
+.search-filters { padding: 0; }
+.search-filters > summary {
+  display: flex; align-items: center; min-height: var(--tap); padding: var(--s2) var(--s4);
+  font-weight: 600; cursor: pointer; color: var(--accent);
+}
+.search-filters[open] > summary { border-bottom: 1px solid var(--border); }
+.search-filters .filter-grid { display: grid; gap: 0 var(--s4); padding: var(--s4) var(--s4) 0; grid-template-columns: minmax(0, 1fr); }
+.search-filters .actions { padding: 0 var(--s4) var(--s4); margin-top: 0; }
+.year-range .row { flex-wrap: nowrap; }
+.year-range input { flex: 1 1 0; min-width: 0; }
+@media (min-width: 640px) {
+  .search-filters .filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.search-people { margin-bottom: var(--s4); }
+.search-people .chips { list-style: none; margin: 0; padding: 0; }
+.search-suggest { list-style: none; margin: 0 0 var(--s4); padding: 0; }

@@ -1,0 +1,17 @@
+<%
+// One row of the People list. Keep in sync with rowHtml() in public/js/people.js.
+// Params: p (services/people.listPeople item), lifeSpan (fn)
+const words = String(p.display_name || '?').split(/\s+/).filter(Boolean);
+const initials = ((words[0] || '?')[0] + (words.length > 1 ? words[words.length - 1][0] : '')).toUpperCase();
+const life = lifeSpan(p);
+const years = fmt.yearSpan(p.year_min, p.year_max);
+let photosText;
+if (p.photo_count) {
+  // Face count only adds information when someone appears twice in a photo.
+  photosText = fmt.plural(p.photo_count, 'photo')
+    + (p.face_count > p.photo_count ? ` (${fmt.plural(p.face_count, 'face')})` : '')
+    + (years ? `, ${years}` : '');
+} else {
+  photosText = 'No photos you can see yet';
+}
+%><li><a class="list-link person-row<%= p.photo_count ? '' : ' no-photos' %>" href="/people/<%= p.id %>"><span class="person-avatar" aria-hidden="true"><%= initials %></span><span class="person-text"><span class="person-name"><%= p.display_name %></span><span class="person-sub"><% if (life) { %><%= life %> · <% } %><%= photosText %></span></span></a></li>

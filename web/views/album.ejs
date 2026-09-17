@@ -1,0 +1,26 @@
+<%
+page.title = album.name;
+page.nav = 'albums';
+page.wide = true;
+page.css.push('/css/people.css');
+page.js.push('/js/grid.js');
+const scoped = groupScope && groupScope.kind !== 'all';
+%>
+<a class="back-link" href="/albums"><%- include('partials/icon', { name: 'left' }) %> Albums</a>
+<header class="album-head">
+  <h1><%= album.name %></h1>
+  <% if (album.description) { %><p class="album-desc"><%= album.description %></p><% } %>
+  <p class="muted small-text"><%= fmt.plural(photoCount, 'photo') %><% if (scoped) { %> in <%= groupScope.label %><% } %></p>
+</header>
+
+<% if (isContinuation) { %><p class="small-text"><a href="/albums/<%= album.id %>">Back to the start</a></p><% } %>
+
+<% if (!photos.items.length) { %>
+  <% if (scoped) { %>
+    <%- include('partials/empty', { icon: 'albums', title: `Nothing from ${groupScope.label} in this album`, text: 'Switch the group at the top of the page to see photos from your other groups.' }) %>
+  <% } else { %>
+    <%- include('partials/empty', { icon: 'albums', title: 'No photos you can see in this album yet', text: 'Photos show up here once they have been shared with one of your groups.', action: { href: '/albums', label: 'Back to albums' } }) %>
+  <% } %>
+<% } else { %>
+  <%- include('partials/photo-grid', { items: photos.items, from: from, apiUrl: apiUrl, next: photos.next, moreUrl: moreUrl, label: album.name }) %>
+<% } %>

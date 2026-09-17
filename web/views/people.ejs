@@ -1,0 +1,41 @@
+<%
+page.title = 'People';
+page.nav = 'people';
+page.css.push('/css/people.css');
+page.js.push('/js/people.js');
+%>
+<div class="page-head">
+  <h1>People</h1>
+</div>
+
+<form class="people-find" method="get" action="/people" role="search" data-people-find data-api="/api/people?limit=100">
+  <label class="sr-only" for="people-q">Find a person by name</label>
+  <input id="people-q" type="search" name="q" value="<%= q %>" placeholder="Find a person by name" autocomplete="off" data-people-q>
+  <button class="btn" type="submit">Find</button>
+</form>
+
+<p class="muted small-text people-note" data-people-note>
+  <% if (groupScope && groupScope.kind !== 'all') { %>Photo counts are for <strong><%= groupScope.label %></strong>.<% } else { %>Everyone in the family archive, A to Z.<% } %>
+</p>
+
+<% if (isContinuation) { %>
+  <p class="small-text"><a href="<%= startUrl %>">Back to the start</a></p>
+<% } %>
+
+<div data-people-results aria-live="polite">
+<% if (!people.items.length) { %>
+  <% if (q) { %>
+    <%- include('partials/empty', { icon: 'search', title: `No one called “${q}”`, text: 'Try a first name, a surname, a maiden name or a nickname.', action: { href: '/people', label: 'Show everyone' } }) %>
+  <% } else { %>
+    <%- include('partials/empty', { icon: 'people', title: 'No people yet', text: 'People appear here once faces in the photos have been named.', action: { href: '/who-is-this', label: 'Help name faces' } }) %>
+  <% } %>
+<% } else { %>
+  <ul class="list people-list" data-people-list aria-label="People">
+    <% people.items.forEach(function (p) { %><%- include('people-row', { p: p, lifeSpan: lifeSpan }) %><% }) %>
+  </ul>
+<% } %>
+</div>
+
+<div class="grid-more" data-people-more-wrap <%= people.next ? '' : 'hidden' %>>
+  <a class="btn secondary" data-people-more href="<%= people.next ? moreUrl : '#' %>" data-next="<%= people.next || '' %>" data-api="<%= apiUrl %>">More people</a>
+</div>

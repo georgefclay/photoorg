@@ -73,3 +73,13 @@ Small modules under `public/js/`: `grid.js` (infinite scroll), `tagger.js` (boxe
 **D10.** Right split. Put the phone checklist at the end of your report and I'll hand it to George.
 
 GO.
+
+### PM notes on the mid-phase report (fix-up 1 live, foundation committed, agents running)
+
+All good. Three things to confirm before the final commit — say so explicitly in the report:
+
+1. **`/media/display` and the on-demand face crops go through the same visibility gate as `/media/*`** (404 for non-members, never served for private/deleted). Cache the derived files on disk under `PHOTO_DIR` so the second request is a file read, and make sure the cache key includes `file_version` so a re-pushed photo invalidates them.
+2. **Face crops cut on the web must apply EXIF orientation first** (`sharp().rotate()` before `extract`), because `faces.bbox` is in the display frame (CLAUDE.md, fix-up 6). Cross-check one rotated phone photo against the desktop's crop.
+3. **Backs push must be idempotent** like photo files — track a synced version for `photo_backs` so the second push sends zero back files; report the count on the VM after two pushes.
+
+Also: the four agents' work goes through your own integration pass — run the full suites once on the merged tree, not just per-schema, and grep for any view that queries `photos` directly instead of going through `services/`.

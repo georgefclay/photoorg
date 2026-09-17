@@ -1,0 +1,55 @@
+<%
+page.title = 'My uploads';
+page.nav = 'upload';
+page.css.push('/css/upload.css');
+const STATUS_CLASS = { pending: 'warn', approved: 'ok', rejected: 'bad' };
+%>
+<div class="page-head">
+  <h1>My uploads</h1>
+  <a class="btn" href="/upload"><%- include('partials/icon', { name: 'upload' }) %> Upload photos</a>
+</div>
+
+<% if (!mine.items.length) { %>
+  <%- include('partials/empty', {
+    icon: 'upload',
+    title: "You haven't sent any photos yet",
+    text: "Photos you upload show up here while they wait for approval. They stay private until they're approved.",
+    action: { href: '/upload', label: 'Upload photos' },
+  }) %>
+<% } else { %>
+  <p class="up-summary" data-summary><%= summary %></p>
+  <p class="muted small-text">Photos stay private until they're approved. Approved photos appear in the archive after the next sync.</p>
+
+  <ul class="up-contribs">
+  <% mine.items.forEach(function (c) { %>
+    <li class="card up-contrib" id="c<%= c.id %>">
+      <div class="row between">
+        <h2 class="up-contrib-title">
+          <time datetime="<%= new Date(c.created_at).toISOString() %>"><%= new Date(c.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) %></time>
+        </h2>
+        <span class="muted small-text"><%= fmt.plural(c.files.length, 'file') %></span>
+      </div>
+      <% if (c.note) { %><p class="up-note">“<%= c.note %>”</p><% } %>
+      <p class="chips">
+        <% if (c.groups.length) { c.groups.forEach(function (g) { %><span class="chip"><%= g %></span><% }) } else { %><span class="chip">Admin will choose a group</span><% } %>
+        <% if (c.counts.pending) { %><span class="up-badge warn"><%= c.counts.pending %> awaiting approval</span><% } %>
+        <% if (c.counts.approved) { %><span class="up-badge ok"><%= c.counts.approved %> approved</span><% } %>
+        <% if (c.counts.rejected) { %><span class="up-badge bad"><%= c.counts.rejected %> rejected</span><% } %>
+      </p>
+      <ul class="up-thumbs">
+        <% c.files.forEach(function (f) { %>
+          <li>
+            <% if (f.is_video) { %>
+              <span class="tile up-thumb missing up-video" role="img" aria-label="Video: <%= f.name %>"></span>
+            <% } else { %>
+              <span class="tile up-thumb"><img src="/media/contrib/<%= f.id %>" alt="<%= f.name %>" width="160" height="160" loading="lazy" decoding="async"></span>
+            <% } %>
+            <span class="up-badge <%= STATUS_CLASS[f.status] || '' %>"><%= f.status_label %></span>
+            <% if (f.is_duplicate && f.status === 'pending') { %><span class="up-dup small-text">May already be in the archive</span><% } %>
+          </li>
+        <% }) %>
+      </ul>
+    </li>
+  <% }) %>
+  </ul>
+<% } %>

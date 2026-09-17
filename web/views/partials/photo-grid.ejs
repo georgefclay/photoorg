@@ -1,0 +1,20 @@
+<%
+// Square-thumbnail grid with infinite scroll (public/js/grid.js) and a
+// "More photos" link as the no-JS fallback.
+//
+// Params:
+//   items    photos from services/photos.listPhotos
+//   from     list key for prev/next on the photo page (e.g. 'b.recent')
+//   apiUrl   JSON endpoint for the next page, without cursor (e.g. '/api/photos?sort=liked&limit=60')
+//   next     composite cursor or null
+//   moreUrl  page URL for the next page (no-JS)
+//   label    accessible name for the list (default 'Photos')
+%>
+<ul class="photo-grid" data-grid data-api="<%= apiUrl %>" data-next="<%= next || '' %>" data-from="<%= from %>" aria-label="<%= locals.label || 'Photos' %>">
+<% items.forEach(function (p) { %><%- include('tile', { p: p, from: from }) %><% }) %>
+</ul>
+<% if (next) { %>
+<div class="grid-more">
+  <a class="btn secondary" data-grid-more href="<%= moreUrl %>">More photos</a>
+</div>
+<% } %>

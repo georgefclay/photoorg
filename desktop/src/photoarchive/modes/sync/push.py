@@ -310,6 +310,9 @@ def push(
         stats.tables["faces"] = n_faces
 
         # -------- photo_backs (metadata) + back files -----------------
+        # The web answers each batch with `need_files`: backs whose image
+        # isn't on its disk yet. Those are uploaded after the metadata.
+        back_need: list[int] = []
         n_backs = _push_meta_stage(conn, client, "photo_backs",
             """
             select id, photo_id, master_path, sha256, working_path,
@@ -331,8 +334,12 @@ def push(
                 "transcription_confirmed": r["transcription_confirmed"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }, progress, should_stop,
+            on_response=lambda resp: back_need.extend(resp.get("need_files") or []),
         )
         stats.tables["photo_backs"] = n_backs
+        stats.tables["back_files"] = _push_back_files(
+            conn, client, working_dir, back_need, files_only_for_grouped, progress, should_stop,
+        )
 
         # -------- suggestions -----------------------------------------
         stats.tables["suggestions"] = _push_meta_stage(conn, client, "suggestions",
@@ -381,7 +388,7 @@ def push(
 
 def _push_meta_stage(
     conn, client: WebSyncClient, stage: str, sql: str, marshaller,
-    progress, should_stop,
+    progress, should_stop, on_response=None,
 ) -> int:
     with conn.cursor(row_factory=dict_row) as cur:
         # Stage queries may filter `id < %(web_id_floor)s` (web-origin rows stay put).
@@ -397,9 +404,56 @@ def _push_meta_stage(
             continue
         resp = client.push_batch(stage, chunk)
         n += resp.get("upserted", 0)
+        if on_response:
+            on_response(resp)
         if progress:
             progress(PushProgress(stage=stage, done=min(i + META_BATCH, len(rows)), total=len(rows)))
     return n
+
+
+def _push_back_files(
+    conn, client: WebSyncClient, working_dir: Path, back_ids: list[int],
+    files_only_for_grouped: bool, progress, should_stop,
+) -> int:
+    """Upload the back images the web reported missing. Same file scope as
+    photos: with files_only_for_grouped, only backs of photos in a live
+    group. A missing or undecodable file logs and is skipped (the next push
+    asks for it again)."""
+    if not back_ids:
+        return 0
+    grouped_clause = """
+               and exists (select 1 from photo_groups pg
+                            where pg.photo_id = pb.photo_id and pg.is_deleted = false)
+    """ if files_only_for_grouped else ""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            select pb.id, pb.working_path
+              from photo_backs pb
+             where pb.id = any(%s::bigint[])
+               and pb.working_path is not null
+               {grouped_clause}
+             order by pb.id
+            """,
+            (list(back_ids),),
+        )
+        rows = cur.fetchall()
+    sent = 0
+    for i, r in enumerate(rows):
+        if should_stop and should_stop():
+            break
+        path = resolve_working_path(working_dir, r["working_path"])
+        if not path.exists():
+            log.warning("push: missing back file for back %s (%s)", r["id"], path)
+            continue
+        try:
+            client.push_back_file(r["id"], path)
+            sent += 1
+        except WebSyncError as e:
+            log.warning("push: back %s upload failed: %s", r["id"], e)
+        if progress:
+            progress(PushProgress(stage="back_files", done=i + 1, total=len(rows)))
+    return sent
 
 
 def _push_faces(

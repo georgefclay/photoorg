@@ -1,4 +1,4 @@
-<%- include('partials/head', { title: 'Deny request' }) %>
+<% page.title = 'Deny request' %>
 <h1>Deny this request?</h1>
 <div class="card">
   <p><strong>Email:</strong> <%= request.email %></p>
@@ -12,4 +12,3 @@
     <a class="button secondary" href="/">Cancel</a>
   </div>
 </form>
-<%- include('partials/foot') %>

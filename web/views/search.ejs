@@ -1,0 +1,100 @@
+<%
+page.title = filters.q ? `Search: ${filters.q}` : 'Search';
+page.wide = true;
+page.css.push('/css/people.css');
+page.js.push('/js/grid.js', '/js/autocomplete.js', '/js/search.js');
+const people = result.people || [];
+const photos = result.photos;
+const scoped = groupScope && groupScope.kind !== 'all';
+%>
+<div class="page-head">
+  <h1>Search</h1>
+</div>
+
+<form class="search-page-form" method="get" action="/search" role="search" data-search-form>
+  <div class="people-find">
+    <label class="sr-only" for="search-q">Search for</label>
+    <input id="search-q" type="search" name="q" value="<%= filters.q || '' %>" placeholder="A name, a place, words on the back…" autocomplete="off">
+    <button class="btn" type="submit">Search</button>
+  </div>
+
+  <details class="search-filters card" <%= advanced ? 'open' : '' %>>
+    <summary>More ways to search</summary>
+    <div class="filter-grid">
+      <fieldset class="year-range">
+        <legend>Years</legend>
+        <div class="row">
+          <label class="sr-only" for="year-from">From year</label>
+          <input id="year-from" type="number" name="year_from" inputmode="numeric" min="1800" max="2100" placeholder="From" value="<%= filters.year_from != null ? filters.year_from : '' %>">
+          <span aria-hidden="true">to</span>
+          <label class="sr-only" for="year-to">To year</label>
+          <input id="year-to" type="number" name="year_to" inputmode="numeric" min="1800" max="2100" placeholder="To" value="<%= filters.year_to != null ? filters.year_to : '' %>">
+        </div>
+      </fieldset>
+
+      <div class="field">
+        <label for="search-person">Person in the photo</label>
+        <input id="search-person" type="text" name="person" value="<%= personText %>" placeholder="Start typing a name" autocomplete="off" data-search-person>
+        <input type="hidden" name="person_id" value="<%= person ? person.id : '' %>" data-search-person-id>
+      </div>
+
+      <div class="field">
+        <label for="search-place">Place</label>
+        <input id="search-place" type="text" name="place" value="<%= placeText %>" placeholder="Start typing a place" autocomplete="off" data-search-place>
+        <input type="hidden" name="place_id" value="<%= place ? place.id : '' %>" data-search-place-id>
+      </div>
+
+      <div class="field">
+        <label for="search-album">Album</label>
+        <select id="search-album" name="album_id">
+          <option value="">Any album</option>
+          <% albums.forEach(function (a) { %>
+            <option value="<%= a.id %>" <%= filters.album_id === a.id ? 'selected' : '' %>><%= a.name %></option>
+          <% }) %>
+        </select>
+      </div>
+
+      <div>
+        <label class="check"><input type="checkbox" name="has_no_date" value="1" <%= filters.has_no_date ? 'checked' : '' %>> No date yet</label>
+        <label class="check"><input type="checkbox" name="has_untagged_faces" value="1" <%= filters.has_untagged_faces ? 'checked' : '' %>> Has faces nobody has tagged</label>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn" type="submit">Search</button>
+      <a class="btn ghost" href="/search">Clear all</a>
+    </div>
+  </details>
+</form>
+
+<% notes.forEach(function (n) { %><p class="notice info" role="status"><%= n %></p><% }) %>
+<% if (personSuggestions.length) { %>
+  <ul class="chips search-suggest" aria-label="Did you mean">
+    <% personSuggestions.forEach(function (c) { %><li><a class="chip accent" href="<%= suggestionUrl(c.id) %>"><%= c.display_name %></a></li><% }) %>
+  </ul>
+<% } %>
+
+<% if (!any) { %>
+  <%- include('partials/empty', { icon: 'search', title: 'What are you looking for?', text: 'Search by name, words on the back of a photo, a place, a year… or use “More ways to search” above.' }) %>
+<% } else { %>
+  <% if (people.length) { %>
+    <section class="search-people" aria-labelledby="search-people-h">
+      <h2 id="search-people-h">People</h2>
+      <ul class="chips">
+        <% people.forEach(function (p) { %>
+          <li><a class="chip" href="/people/<%= p.id %>"><%- include('partials/icon', { name: 'people' }) %> <%= p.display_name %><% if (p.birth_year || p.death_year) { %> <span class="rel-note">(<%= fmt.yearSpan(p.birth_year, p.death_year) %>)</span><% } %></a></li>
+        <% }) %>
+      </ul>
+    </section>
+  <% } %>
+
+  <section aria-labelledby="search-photos-h">
+    <h2 id="search-photos-h">Photos</h2>
+    <% if (photoCount != null) { %><p class="muted small-text"><%= fmt.plural(photoCount, 'photo') %> found<% if (scoped) { %> in <%= groupScope.label %><% } %></p><% } %>
+    <% if (isContinuation) { %><p class="small-text"><a href="<%= startUrl %>">Back to the start</a></p><% } %>
+    <% if (!photos.items.length) { %>
+      <%- include('partials/empty', { icon: 'search', title: 'No photos matched', text: scoped ? `Nothing in ${groupScope.label} matched. Try fewer filters, or switch the group at the top.` : 'Try fewer words or filters, or a different spelling.', action: { href: '/search', label: 'Start a new search' } }) %>
+    <% } else { %>
+      <%- include('partials/photo-grid', { items: photos.items, from: 'b.recent', apiUrl: apiUrl, next: photos.next, moreUrl: moreUrl, label: 'Search results' }) %>
+    <% } %>
+  </section>
+<% } %>

@@ -59,7 +59,8 @@ test('POST /a/:token signs in, sets last_login_at, and marks the link used', asy
 
   // Session cookie was set; hitting / now shows the signed-in view.
   const home = await agent.get('/');
-  assert.match(home.text, /Welcome/);
+  assert.match(home.text, /Sign out/);
+  assert.ok(home.text.includes('<h1>Photos</h1>'), 'signed-in home is Browse');
 
   const ml = (await pool.query(`select used_at from magic_links order by id desc limit 1`)).rows[0];
   assert.ok(ml.used_at, 'used_at set on POST');

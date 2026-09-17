@@ -1,0 +1,62 @@
+<% page.title = 'Admin'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css') %>
+<%
+function stat(href, n, label, sub, hot) {
+  return { href, n, label, sub, hot: hot && n > 0 };
+}
+const review = [];
+if (isAdmin) {
+  review.push(stat('/admin/suggestions', d.suggestions.total, 'Suggestions', d.suggestions.total ? `${fmt.plural(d.suggestions.bySource.human || 0, 'from family', 'from family')} · ${(d.suggestions.bySource.ai || 0).toLocaleString('en-US')} from AI` : 'Nothing waiting', true));
+  review.push(stat('/admin/disputes', d.disputes, 'Disputed tags', d.disputes ? '“This isn’t them”' : 'None', true));
+}
+review.push(stat('/admin/contributions', d.contributions.files, 'Uploads to review', d.contributions.files ? `in ${fmt.plural(d.contributions.contributions, 'batch', 'batches')}` : 'Nothing waiting', true));
+if (isAdmin) review.push(stat('/admin/access', d.access, 'Access requests', d.access ? 'waiting for you' : 'None', true));
+%>
+<div class="admin-head">
+  <h1>Admin</h1>
+  <p class="muted"><%= isAdmin ? 'Everything that needs a decision, in one place.' : 'You moderate ' + fmt.plural(d.groups.length, 'group') + '.' %></p>
+</div>
+
+<h2 class="section-title">To review</h2>
+<ul class="admin-tiles">
+  <% review.forEach(function (s) { %>
+  <li><a class="stat <%= s.hot ? 'hot' : '' %>" href="<%= s.href %>">
+    <span class="stat-n"><%= Number(s.n).toLocaleString('en-US') %></span>
+    <span class="stat-label"><%= s.label %></span>
+    <span class="stat-sub"><%= s.sub %></span>
+  </a></li>
+  <% }) %>
+</ul>
+<% if (isAdmin && d.suggestions.byKind.length) { %>
+<div class="chips kind-chips" aria-label="Pending suggestions by kind">
+  <% d.suggestions.byKind.forEach(function (k) { %>
+    <a class="chip" href="/admin/suggestions?source=all&amp;kind=<%= k.kind %>"><%= k.label %> <span class="badge"><%= k.n.toLocaleString('en-US') %></span></a>
+  <% }) %>
+</div>
+<% } %>
+
+<% if (isAdmin) { %>
+<h2 class="section-title">Manage</h2>
+<ul class="admin-tiles">
+  <li><a class="stat" href="/admin/users"><span class="stat-n"><%= d.users.active %></span><span class="stat-label">Users</span><span class="stat-sub"><%= fmt.plural(d.users.admins, 'admin') %><%= d.users.suspended ? ` · ${d.users.suspended} suspended` : '' %></span></a></li>
+  <li><a class="stat" href="/admin/groups"><span class="stat-n"><%= d.groups.length %></span><span class="stat-label">Groups</span><span class="stat-sub">members and moderators</span></a></li>
+  <li><a class="stat <%= d.unfiled ? 'warm' : '' %>" href="/admin/unfiled"><span class="stat-n"><%= d.unfiled.toLocaleString('en-US') %></span><span class="stat-label">Unfiled photos</span><span class="stat-sub">only admins can see these</span></a></li>
+</ul>
+
+<h2 class="section-title">Records</h2>
+<ul class="list">
+  <li><a class="list-link" href="/admin/rescan"><%- include('../partials/icon', { name: 'refresh' }) %><span>Rescan list</span><span class="meta"><%= d.rescan ? fmt.plural(d.rescan, 'photo') : 'empty' %></span></a></li>
+  <li><a class="list-link" href="/admin/report"><%- include('../partials/icon', { name: 'calendar' }) %><span>Monthly report</span><span class="meta">who did what</span></a></li>
+  <li><a class="list-link" href="/admin/audit"><%- include('../partials/icon', { name: 'flag' }) %><span>Audit log</span><span class="meta"><%= d.auditLast ? 'last ' + fmt.relTime(d.auditLast) : 'no entries yet' %></span></a></li>
+</ul>
+<% } else { %>
+<h2 class="section-title">Your groups</h2>
+<% if (!d.groups.length) { %>
+  <%- include('../partials/empty', { icon: 'people', title: 'No groups', text: 'You are not a moderator of any group right now.' }) %>
+<% } else { %>
+<ul class="list">
+  <% d.groups.forEach(function (g) { %>
+  <li><a class="list-link" href="/admin/groups/<%= g.id %>"><%- include('../partials/icon', { name: 'people' }) %><span><%= g.name %></span><span class="meta"><%= fmt.plural(g.member_count, 'member') %> · <%= fmt.plural(g.photo_count, 'photo') %></span></a></li>
+  <% }) %>
+</ul>
+<% } %>
+<% } %>

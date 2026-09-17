@@ -4,22 +4,40 @@
 //   POST /api/admin/suggestions/:id/reject
 //   GET  /api/admin/disputes
 //   POST /api/admin/faces/:id/resolve          (keep | unassign | reassign)
-//   GET  /api/admin/audit?entity_type=&entity_id=&limit=&cursor=
+//   GET  /api/admin/audit?entity_type=&entity_id=&action=&actor=&limit=&cursor=
+//        (action ending in '*' is a prefix match, e.g. auth.*)
 //   GET  /api/admin/report/monthly?month=YYYY-MM
 //   GET  /api/admin/rescan-list                (JSON)
-//   GET  /admin/rescan-list                    (printable page; wired elsewhere)
+//   GET  /admin/rescan                         (printable page; routes/pages-admin.js)
 //   GET  /api/admin/unfiled                    (paginated list of unfiled photos)
+//   GET  /api/admin/counts                     (dashboard counts, JSON)
 
 const express = require('express');
 const { requireAdmin } = require('../middleware/require-user');
 const { audit } = require('../services/audit');
 const { parseListQuery } = require('../services/pagination');
+const adminSvc = require('../services/admin');
 
 function toInt(v) { const n = parseInt(v, 10); return Number.isInteger(n) ? n : null; }
 
+// Sibling routers mounted under /api/admin AFTER this one in app.js that
+// admit moderators too; the admin gate below must not swallow them.
+const MODERATOR_SIBLINGS = /^\/contributions(\/|$)/;
+
 module.exports = function apiAdminRoutes({ pool }) {
   const router = express.Router();
-  router.use(requireAdmin);
+  router.use((req, res, next) => (MODERATOR_SIBLINGS.test(req.path) ? next('router') : requireAdmin(req, res, next)));
+
+  router.get('/counts', async (req, res, next) => {
+    try {
+      const d = await adminSvc.dashboard(pool, req.user);
+      res.json({
+        suggestions: d.suggestions, disputes: d.disputes, access_requests: d.access,
+        contributions: d.contributions, users: d.users, groups: d.groups.length,
+        unfiled: d.unfiled, rescan: d.rescan,
+      });
+    } catch (err) { next(err); }
+  });
   router.use(express.json({ limit: '32kb' }));
 
   // -----------------------------------------------------------------
@@ -429,17 +447,7 @@ module.exports = function apiAdminRoutes({ pool }) {
     try {
       const { limit, cursor } = parseListQuery(req.query, { max: 500, def: 100 });
       const params = [];
-      const clauses = [];
-      if (req.query.entity_type) {
-        params.push(String(req.query.entity_type));
-        clauses.push(`entity_type = $${params.length}`);
-      }
-      const eid = toInt(req.query.entity_id);
-      if (eid != null) { params.push(eid); clauses.push(`entity_id = $${params.length}`); }
-      if (req.query.action) {
-        params.push(String(req.query.action));
-        clauses.push(`action = $${params.length}`);
-      }
+      const clauses = adminSvc.auditWhere(req.query, params);
       if (cursor != null) {
         params.push(cursor);
         clauses.push(`id < $${params.length}`);
@@ -470,51 +478,7 @@ module.exports = function apiAdminRoutes({ pool }) {
     try {
       const month = String(req.query.month || '').match(/^\d{4}-\d{2}$/) ? req.query.month : null;
       if (!month) return res.status(400).json({ error: 'month=YYYY-MM required' });
-      const start = `${month}-01`;
-      const perUserRes = await pool.query(
-        `with in_month as (
-           select * from audit_log
-            where created_at >= $1::date and created_at < ($1::date + interval '1 month')
-         )
-         select
-           u.id as user_id,
-           u.display_name, u.email,
-           count(*) filter (where a.action = 'auth.login')            as logins,
-           count(*) filter (where a.action = 'face.create')           as faces_tagged,
-           count(*) filter (where a.action = 'comment.create')        as comments,
-           count(*) filter (where a.action in ('like.create','like.delete')) as likes_toggled,
-           count(*) filter (where a.action = 'suggestion.create')     as suggestions_made,
-           count(*) filter (where a.action = 'suggestion.accept')     as suggestions_accepted,
-           count(*) filter (where a.action = 'suggestion.reject')     as suggestions_rejected,
-           count(*) filter (where a.action = 'photo.capture_date.set') as dates_confirmed
-         from users u
-    left join in_month a on a.user_id = u.id
-        group by u.id, u.display_name, u.email
-        having count(a.*) > 0
-        order by u.display_name`,
-        [start],
-      );
-      const totalLikes = (await pool.query(
-        `select count(*)::int as n from likes
-          where created_at >= $1::date and created_at < ($1::date + interval '1 month')`,
-        [start],
-      )).rows[0].n;
-      res.json({
-        month,
-        per_user: perUserRes.rows.map((r) => ({
-          user_id: r.user_id != null ? Number(r.user_id) : null,
-          display_name: r.display_name || r.email,
-          logins: Number(r.logins),
-          faces_tagged: Number(r.faces_tagged),
-          comments: Number(r.comments),
-          likes_toggled: Number(r.likes_toggled),
-          suggestions_made: Number(r.suggestions_made),
-          suggestions_accepted: Number(r.suggestions_accepted),
-          suggestions_rejected: Number(r.suggestions_rejected),
-          dates_confirmed: Number(r.dates_confirmed),
-        })),
-        total_likes_in_month: totalLikes,
-      });
+      res.json(await adminSvc.monthlyReport(pool, month));
     } catch (err) { next(err); }
   });
 

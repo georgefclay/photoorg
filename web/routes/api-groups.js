@@ -13,6 +13,10 @@
 //   POST   /api/admin/groups/:id/members/:uid/remove
 //   POST   /api/admin/photos/bulk-assign-groups {filter, add:[gid], remove:[gid]}
 //     — synchronous, cap 20,000 rows per call, one transaction, returns counts.
+//     filter may include only_unfiled: true (non-private photos in no live group).
+//   POST   /api/admin/photos/bulk-assign-groups/preview {filter, ids?, add?}
+//     — { photos, new_rows, cap, over_cap }; writes nothing.
+//   GET    /api/groups/:groupId/user-lookup?q=   (moderator of group or admin)
 //   GET    /api/admin/unfiled                    (in api-admin.js)
 //
 // Moderator (of :groupId):
@@ -27,8 +31,7 @@ const { requireUser, requireAdmin } = require('../middleware/require-user');
 const { requireModerator } = require('../middleware/require-moderator');
 const { audit } = require('../services/audit');
 const { userGroupIds, userModeratorGroupIds } = require('../middleware/visibility');
-
-const BULK_CAP = 20000;
+const { bulkFilterClauses, lookupUsers, BULK_CAP } = require('../services/admin');
 
 function toInt(v) { const n = parseInt(v, 10); return Number.isInteger(n) ? n : null; }
 function toIntArr(v) {
@@ -109,6 +112,18 @@ module.exports = function apiGroupsRoutes({ pool }) {
       res.json({ ...group, id: Number(group.id), members });
     } catch (err) { next(err); }
   });
+
+  // ---- Moderator (or admin): find a user to add as a member --------
+  // ≥ 2 characters; email prefix or display-name substring; active users only.
+  router.get(
+    '/:groupId(\\d+)/user-lookup',
+    ...requireModerator({ pool, groupIdParam: 'groupId' }),
+    async (req, res, next) => {
+      try {
+        res.json({ items: await lookupUsers(pool, req.query.q, req.moderatedGroupId) });
+      } catch (err) { next(err); }
+    },
+  );
 
   // ---- Moderator: remove photo from group / manage members ---------
 
@@ -444,6 +459,44 @@ module.exports.adminBulkAssignRouter = function adminBulkAssignRouter({ pool }) 
   router.use(requireAdmin);
   router.use(express.json({ limit: '2mb' }));
 
+  // Count preview for the /admin/unfiled page — same filter shape (plus
+  // optional `only_unfiled: true`), writes nothing. `add` is optional; when
+  // given, `new_rows` says how many photos are not yet live in those groups.
+  router.post('/bulk-assign-groups/preview', async (req, res, next) => {
+    try {
+      const b = req.body || {};
+      const add = toIntArr(b.add);
+      const ids = toIntArr(b.ids);
+      const params = [];
+      let where;
+      if (ids.length) {
+        params.push(ids);
+        where = `p.id = any($1::bigint[]) and p.is_deleted = false`;
+      } else {
+        where = bulkFilterClauses(b, params).join(' and ');
+      }
+      let newRows = null;
+      if (add.length) {
+        params.push(add);
+        newRows = `(select count(*)::int from photos p cross join unnest($${params.length}::bigint[]) g(gid)
+                     where ${where}
+                       and not exists (select 1 from photo_groups x where x.photo_id = p.id and x.group_id = g.gid and x.is_deleted = false))`;
+      }
+      const { rows } = await pool.query(
+        `select (select count(*)::int from photos p where ${where}) as photos
+                ${newRows ? `, ${newRows} as new_rows` : ''}`,
+        params,
+      );
+      const photos = rows[0].photos;
+      res.json({
+        photos,
+        new_rows: rows[0].new_rows != null ? rows[0].new_rows : null,
+        cap: BULK_CAP,
+        over_cap: photos > BULK_CAP,
+      });
+    } catch (err) { next(err); }
+  });
+
   router.post('/bulk-assign-groups', async (req, res, next) => {
     const b = req.body || {};
     const add = toIntArr(b.add);
@@ -455,23 +508,7 @@ module.exports.adminBulkAssignRouter = function adminBulkAssignRouter({ pool }) 
     let ids = toIntArr(b.ids);
     if (ids.length === 0) {
       const params = [];
-      const clauses = ['p.is_deleted = false'];
-      const albumId = toInt(b.album_id);
-      if (albumId != null) {
-        params.push(albumId);
-        clauses.push(`exists (select 1 from album_photos ap where ap.photo_id = p.id and ap.album_id = $${params.length})`);
-      }
-      if (b.scan_batch) { params.push(String(b.scan_batch)); clauses.push(`p.scan_batch = $${params.length}`); }
-      const personId = toInt(b.person_id);
-      if (personId != null) {
-        params.push(personId);
-        clauses.push(`exists (select 1 from faces f where f.photo_id = p.id and f.person_id = $${params.length} and f.is_deleted = false and f.is_disputed = false)`);
-      }
-      const year = toInt(b.year);
-      if (year != null) { params.push(year); clauses.push(`extract(year from p.capture_date) = $${params.length}`); }
-      const decade = toInt(b.decade);
-      if (decade != null) { params.push(decade, decade + 9); clauses.push(`extract(year from p.capture_date) between $${params.length - 1} and $${params.length}`); }
-      if (b.source_folder) { params.push(String(b.source_folder)); clauses.push(`p.source_folder = $${params.length}`); }
+      const clauses = bulkFilterClauses(b, params);
       const q = await pool.query(
         `select id from photos p where ${clauses.join(' and ')} order by id limit ${BULK_CAP + 1}`,
         params,

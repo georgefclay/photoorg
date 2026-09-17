@@ -1,0 +1,33 @@
+<% page.title = 'Rescan list'; page.nav = 'admin'; page.css.push('/css/admin.css'); page.bodyClass = 'print-compact'; page.js.push('/js/admin.js') %>
+<%- include('_head', { title: 'Rescan list', sub: total ? `${fmt.plural(total, 'print')} to rescan, in ${fmt.plural(batches.length, 'envelope')}. Take this list to the boxes.` : null }) %>
+
+<% if (!total) { %>
+  <%- include('../partials/empty', { icon: 'refresh', title: 'Nothing to rescan', text: 'Mark a photo “Rescan wanted” from its page and it will show up here, grouped by envelope.' }) %>
+<% } else { %>
+<div class="actions no-print">
+  <button type="button" class="btn" data-print hidden>Print</button>
+  <% if (thumbs) { %><a class="btn secondary" href="/admin/rescan">Hide thumbnails</a><% } else { %><a class="btn secondary" href="/admin/rescan?thumbs=1">Show thumbnails</a><% } %>
+</div>
+
+<% batches.forEach(function (b) { %>
+<section class="rescan-batch">
+  <h2><%= b.batch %> <span class="muted small-text">· <%= fmt.plural(b.items.length, 'print') %></span></h2>
+  <div class="table-wrap">
+  <table class="data rescan-table">
+    <thead><tr><th scope="col" class="c-tick"><span class="sr-only">Done</span></th><% if (thumbs) { %><th scope="col">Photo</th><% } %><th scope="col">#</th><th scope="col">File</th><th scope="col">Note</th></tr></thead>
+    <tbody>
+    <% b.items.forEach(function (r) { %>
+      <tr>
+        <td class="c-tick"><span class="tickbox" aria-hidden="true"></span></td>
+        <% if (thumbs) { %><td><a href="/photos/<%= r.id %>"><img src="/media/thumbs/<%= r.id %>" alt="" width="64" height="64" loading="lazy" class="rescan-thumb"></a></td><% } %>
+        <td class="c-seq"><%= r.scan_sequence != null ? String(r.scan_sequence).padStart(3, '0') : '—' %></td>
+        <td><a href="/photos/<%= r.id %>"><%= r.source_filename || ('photo #' + r.id) %></a><% if (r.source_folder && r.source_folder !== b.batch) { %><br><span class="muted small-text"><%= r.source_folder %></span><% } %></td>
+        <td><%= r.physical_ref_note || '' %></td>
+      </tr>
+    <% }) %>
+    </tbody>
+  </table>
+  </div>
+</section>
+<% }) %>
+<% } %>

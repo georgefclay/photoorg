@@ -1,0 +1,38 @@
+<%
+page.title = 'Who is this?';
+page.nav = 'photos';
+page.wide = true;
+page.css.push('/css/upload.css');
+page.js.push('/js/autocomplete.js');
+page.js.push('/js/who.js');
+%>
+<div class="page-head">
+  <h1>Who is this?</h1>
+</div>
+<p class="muted wi-intro">Nobody has been able to name these faces yet. If you recognise someone, tell us — an admin will check before it's added.</p>
+
+<% if (isContinuation) { %>
+  <p class="small-text"><a href="/who-is-this">Back to the start</a></p>
+<% } %>
+
+<% if (!faces.length) { %>
+  <% if (isContinuation) { %>
+    <%- include('partials/empty', { icon: 'check', title: 'That was the last one', text: 'Thank you for looking.', action: { href: '/who-is-this', label: 'Back to the start' } }) %>
+  <% } else { %>
+    <%- include('partials/empty', {
+      icon: 'check',
+      title: 'Nobody to identify right now',
+      text: feedScope && feedScope.kind !== 'all' ? `Every face in ${feedScope.label} has a name, or is waiting for one. Try “${user.role === 'admin' ? 'All photos' : 'All my groups'}” in the menu above.` : 'Every face you can see has a name, or is waiting for one. Check back later.',
+      action: { href: '/', label: 'Browse photos' },
+    }) %>
+  <% } %>
+<% } else { %>
+  <ul class="wi-feed" data-wi-feed data-api="<%= apiUrl %>" data-next="<%= next || '' %>" aria-label="Faces nobody has named">
+    <% faces.forEach(function (f) { %><%- include('partials/who-card', { f: f }) %><% }) %>
+  </ul>
+  <% if (next) { %>
+    <div class="grid-more">
+      <a class="btn secondary" data-wi-more href="/who-is-this?cursor=<%= encodeURIComponent(next) %>">More faces</a>
+    </div>
+  <% } %>
+<% } %>

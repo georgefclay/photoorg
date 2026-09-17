@@ -152,9 +152,37 @@ exclude. Non-members get 404 (never 403) — the media route, photo
 detail, faces, backs, comments, likes, suggestions, and every list
 and count go through the same fragment.
 
-Minimal Phase 9 pages (replaced in Phase 10): `/upload` (mobile-first
-sequential uploads with sha256 pre-check + progress + retry) and
-`/admin/contributions` (per-file + batch approve/reject).
+## Phase 10 pages
+
+Server-rendered (EJS, `views/layout.ejs`), readable without JavaScript;
+`public/js/*` enhances. Every query goes through `services/` where
+visibility and the header group scope are applied.
+
+| Path | Who | What |
+| ---- | --- | ---- |
+| `/` | anyone | Landing page when signed out; Browse (sorts, infinite scroll, needs-attention strip) when signed in. |
+| `POST /scope` | signed in | Header group switcher (session). |
+| `/photos/:id?from=<list key>` | visible photo | Detail: image, date (confirmed / guess), people, place, physical ref, like, comments, back + transcription, Tag a face, Suggest a date / place, Rescan wanted (admin), groups strip (admin / moderator), prev/next + swipe. 404 when not visible. |
+| `/people`, `/people/:id` | signed in | People list; person page with names, relationships, photos, "Suggest a relationship" (`POST /people/:id/relationships` no-JS fallback). |
+| `/albums`, `/albums/:id` | signed in | Read-only albums. |
+| `/search` | signed in | Small search: words, years, person, place, album, no date, untagged faces. |
+| `/who-is-this` | signed in | Faces marked `unknown`, "I know who this is". |
+| `/upload`, `/upload/mine` | signed in | Uploader (camera / gallery / folder / drag-drop, sha pre-check, per-file progress, retry, resume); own contributions with status. |
+| `/admin` | admin, moderator | Dashboard (moderators: their uploads + groups). |
+| `/admin/contributions`, `/admin/groups[/:id]` | admin, moderator (own groups) | Review uploads (dup badges, per file / batch); group members. |
+| `/admin/suggestions`, `/disputes`, `/unfiled`, `/rescan`, `/report`, `/audit`, `/access`, `/users` | admin | Queues and reports. |
+
+JSON added in Phase 10: `GET /api/attention`, `GET /api/faces/unknown`,
+`GET /api/dates/interpret?text=`, `GET /api/places/autocomplete?q=`,
+`GET /api/search`, `GET /api/admin/counts`,
+`POST /api/admin/photos/bulk-assign-groups/preview`,
+`GET /api/groups/:groupId/user-lookup?q=`. `/api/photos` sorts:
+`recent|liked|incomplete|oldest|newest|position`, composite cursors
+(`value~id`), `?from=` on the detail adds `neighbours`. `POST /api/people`
+is admin-only.
+
+Media added: `/media/display/:id` (≤ 1600 px), on-demand face crops,
+`/media/contrib/:file_id` — all cached under `PHOTO_DIR` (see CLAUDE.md).
 
 ## Local web database (laptop)
 
@@ -182,6 +210,13 @@ Then before each `npm test` run:
 ```
 npm run test:setup   # drops public schema, migrates up to head (PHOTOORG_DB_ROLE=web)
 npm test             # node --test with supertest
+```
+
+To run next to another test run, isolate in a schema:
+
+```
+TEST_DB_SCHEMA=t_mine npm run test:setup
+TEST_DB_SCHEMA=t_mine npm test
 ```
 
 Test scenarios: request-access creates a row and one admin email; GET on

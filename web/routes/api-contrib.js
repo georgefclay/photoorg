@@ -27,6 +27,41 @@ function validateBbox(b) {
   return { x, y, w, h };
 }
 
+// A contributor's "someone new" (answer A2): the person is only created when
+// an admin accepts, from given_name / middle_name / surname / … — so a bare
+// typed name ("Great Aunt Ada", or { display_name }) is split into given
+// name + surname here. Returns null when there is no usable name.
+const PERSON_TEXT_FIELDS = ['given_name', 'middle_name', 'surname', 'maiden_name', 'nickname', 'suffix', 'display_name'];
+function normalizeNewPerson(np) {
+  if (typeof np === 'string') np = { display_name: np };
+  if (!np || typeof np !== 'object' || Array.isArray(np)) return null;
+  const out = {};
+  for (const k of PERSON_TEXT_FIELDS) {
+    const v = typeof np[k] === 'string' ? np[k].trim().replace(/\s+/g, ' ').slice(0, 100) : '';
+    if (v) out[k] = v;
+  }
+  if (!out.display_name && typeof np.name === 'string' && np.name.trim()) {
+    out.display_name = np.name.trim().replace(/\s+/g, ' ').slice(0, 100);
+  }
+  for (const k of ['birth_year', 'death_year']) {
+    const n = toInt(np[k]);
+    if (n != null && n > 1700 && n < 2200) out[k] = n;
+  }
+  if (typeof np.notes === 'string' && np.notes.trim()) out.notes = np.notes.trim().slice(0, 1000);
+  if (!out.given_name && !out.surname && !out.nickname && out.display_name) {
+    const parts = out.display_name.split(' ');
+    out.given_name = parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0];
+    if (parts.length > 1) out.surname = parts[parts.length - 1];
+  }
+  return out.given_name || out.surname || out.nickname ? out : null;
+}
+
+function normalizeNewPlace(np) {
+  const name = typeof np === 'string' ? np : (np && typeof np.name === 'string' ? np.name : '');
+  const clean = name.trim().replace(/\s+/g, ' ').slice(0, 200);
+  return clean ? { name: clean } : null;
+}
+
 module.exports = function apiContribRoutes({ pool }) {
   const router = express.Router();
   router.use(requireUser);
@@ -57,12 +92,23 @@ module.exports = function apiContribRoutes({ pool }) {
       const personId = toInt(b.person_id);
       const faceId = toInt(b.face_id);
       if (!personId && !b.new_person) return res.status(400).json({ error: 'need person_id or new_person' });
-      payload = personId ? { person_id: personId } : { new_person: b.new_person };
-      if (faceId != null) payload.face_id = faceId;
+      const newPerson = personId ? null : normalizeNewPerson(b.new_person);
+      if (!personId && !newPerson) return res.status(400).json({ error: 'need a name for the new person' });
+      payload = personId ? { person_id: personId } : { new_person: newPerson };
+      if (faceId != null) {
+        if (!Number.isSafeInteger(faceId)) return res.status(400).json({ error: 'bad face_id' });
+        const onPhoto = await pool.query(
+          `select 1 from faces where id = $1 and photo_id = $2 and is_deleted = false`, [faceId, photoId],
+        );
+        if (!onPhoto.rows.length) return res.status(400).json({ error: "that face isn't on this photo" });
+        payload.face_id = faceId;
+      }
     } else if (kind === 'place') {
       const placeId = toInt(b.place_id);
       if (!placeId && !b.new_place) return res.status(400).json({ error: 'need place_id or new_place' });
-      payload = placeId ? { place_id: placeId } : { new_place: b.new_place };
+      const newPlace = placeId ? null : normalizeNewPlace(b.new_place);
+      if (!placeId && !newPlace) return res.status(400).json({ error: 'need a name for the new place' });
+      payload = placeId ? { place_id: placeId } : { new_place: newPlace };
     } else if (kind === 'description') {
       const text = String(b.text || '').trim();
       if (!text) return res.status(400).json({ error: 'need description text' });
@@ -107,8 +153,9 @@ module.exports = function apiContribRoutes({ pool }) {
     const bbox = validateBbox(b.bbox);
     if (!bbox) return res.status(400).json({ error: 'need a valid bbox {x,y,w,h}' });
     const personId = toInt(b.person_id);
-    const newPerson = b.new_person || null;
-    if (!personId && !newPerson) return res.status(400).json({ error: 'need person_id or new_person' });
+    if (!personId && !b.new_person) return res.status(400).json({ error: 'need person_id or new_person' });
+    const newPerson = personId ? null : normalizeNewPerson(b.new_person);
+    if (!personId && !newPerson) return res.status(400).json({ error: 'need a name for the new person' });
 
     const client = await pool.connect();
     try {

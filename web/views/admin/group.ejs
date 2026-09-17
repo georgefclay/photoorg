@@ -1,0 +1,88 @@
+<% page.title = group.name; page.nav = 'admin'; page.css.push('/css/admin.css'); page.js.push('/js/autocomplete.js'); page.js.push('/js/admin-groups.js') %>
+<div class="admin-head">
+  <a class="back-link" href="/admin/groups"><%- include('../partials/icon', { name: 'left' }) %>Groups</a>
+  <h1><%= group.name %></h1>
+  <p class="muted"><%= group.description || '' %><%= group.description ? ' · ' : '' %><%= fmt.plural(group.members.length, 'member') %> · <%= fmt.plural(group.photo_count, 'photo') %></p>
+</div>
+
+<div data-group="<%= group.id %>" data-admin="<%= isAdmin ? '1' : '' %>">
+
+<% if (isAdmin) { %>
+<details class="card">
+  <summary class="btn secondary">Rename or describe</summary>
+  <form data-edit-group class="stack">
+    <div class="field">
+      <label for="g-name">Name</label>
+      <input id="g-name" name="name" type="text" required maxlength="120" value="<%= group.name %>">
+    </div>
+    <div class="field">
+      <label for="g-desc">Description</label>
+      <input id="g-desc" name="description" type="text" maxlength="500" value="<%= group.description || '' %>">
+    </div>
+    <div class="actions">
+      <button class="btn" type="submit">Save</button>
+      <span class="status muted" role="status"></span>
+    </div>
+  </form>
+</details>
+<% } %>
+
+<section class="card">
+  <h2 class="card-title">Add a member</h2>
+  <form data-add-member class="stack">
+    <div class="field">
+      <label for="m-lookup">Name or email</label>
+      <input id="m-lookup" type="text" data-member-lookup placeholder="Type at least 2 letters" autocomplete="off">
+      <span class="hint">Only people who already have access to the site can be added.<% if (!isAdmin) { %> New members join as members.<% } %></span>
+    </div>
+    <% if (isAdmin) { %>
+    <fieldset class="role-pick">
+      <legend>Role</legend>
+      <label class="check"><input type="radio" name="role" value="member" checked> Member</label>
+      <label class="check"><input type="radio" name="role" value="moderator"> Moderator</label>
+    </fieldset>
+    <% } %>
+    <div class="actions">
+      <button class="btn" type="submit" disabled data-add-btn>Add to <%= group.name %></button>
+      <span class="status muted" role="status"></span>
+    </div>
+  </form>
+</section>
+
+<h2>Members</h2>
+<% if (!group.members.length) { %>
+  <%- include('../partials/empty', { icon: 'people', title: 'No members yet', text: 'Add people above. Members see every photo in this group.' }) %>
+<% } else { %>
+<ul class="list members">
+  <% group.members.forEach(function (m) { %>
+  <li class="member" data-member="<%= m.id %>" data-name="<%= m.display_name || m.email %>">
+    <span class="avatar" aria-hidden="true"><%= fmt.initials(m) %></span>
+    <span class="member-who">
+      <strong><%= m.display_name || m.email %></strong><% if (String(m.id) === String(user.id)) { %> <span class="muted">(you)</span><% } %><br>
+      <span class="muted small-text"><%= m.email %><%= m.status !== 'active' ? ' · ' + m.status : '' %></span>
+    </span>
+    <span class="member-actions">
+      <% if (isAdmin) { %>
+        <label class="sr-only" for="role-<%= m.id %>">Role for <%= m.display_name || m.email %></label>
+        <select id="role-<%= m.id %>" data-role-select>
+          <option value="member" <%= m.role === 'member' ? 'selected' : '' %>>Member</option>
+          <option value="moderator" <%= m.role === 'moderator' ? 'selected' : '' %>>Moderator</option>
+        </select>
+      <% } else { %>
+        <span class="chip <%= m.role === 'moderator' ? 'accent' : '' %>"><%= m.role %></span>
+      <% } %>
+      <button type="button" class="btn small secondary" data-act="remove-member">Remove</button>
+    </span>
+  </li>
+  <% }) %>
+</ul>
+<% } %>
+
+<% if (isAdmin) { %>
+<section class="card danger-zone">
+  <h2 class="card-title">Delete this group</h2>
+  <p class="muted">Members lose access to photos that are only in this group. Those photos become unfiled (admin-only). The group can be restored from the database; nothing is erased.</p>
+  <button type="button" class="btn danger" data-act="delete-group">Delete <%= group.name %></button>
+</section>
+<% } %>
+</div>

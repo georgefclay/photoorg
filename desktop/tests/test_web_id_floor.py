@@ -185,6 +185,11 @@ def test_web_origin_ids_round_trip(two_sided):
         person_id = c.execute("insert into people (given_name) values ('Peggy') returning id").fetchone()[0]
         c.execute("""insert into faces (photo_id, person_id, bbox, source)
                      values (%s, %s, '{"x":10,"y":10,"w":80,"h":80}', 'ai')""", (photo_id, person_id))
+        Image.new("RGB", (600, 400), (240, 240, 230)).save(working_dir / "back_0001.jpg", "JPEG")
+        back_id = c.execute(
+            """insert into photo_backs (photo_id, master_path, sha256, working_path, transcribed_text)
+               values (%s, 'D:/Scanned Photos/B/0002.jpg', 'backsha123456', %s, 'Easter 1962')
+               returning id""", (photo_id, str(working_dir / "back_0001.jpg"))).fetchone()[0]
         sug_id = c.execute(
             """insert into suggestions (photo_id, kind, payload, source, status, model)
                values (%s, 'date', '{"date":"1971-01-01","precision":"year"}', 'ai', 'pending', 'm')
@@ -197,9 +202,12 @@ def test_web_origin_ids_round_trip(two_sided):
         DATABASE_URL = TEST_DATABASE_URL
     pdb.init_pool(_S(), min_size=1, max_size=3)  # type: ignore[arg-type]
     try:
-        push(client, working_dir=working_dir, thumbs_dir=thumbs_dir, state_dir=state_dir,
-             files_only_for_grouped=False,
-             allow_shared_db=True)  # same DB, separate schemas (see module docstring)
+        first = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir, state_dir=state_dir,
+                     files_only_for_grouped=False,
+                     allow_shared_db=True)  # same DB, separate schemas (see module docstring)
+        # Back images travel too (as JPEG under a name derived from id + sha).
+        assert first.tables["back_files"] == 1, first.tables
+        assert (tmp / "web-photodir" / "backs" / f"back_{back_id:08d}_backsha1.jpg").exists()
 
         # ---- Web side: people, group, contributor tag, admin accepts ----
         with _web_conn() as w:
@@ -245,6 +253,7 @@ def test_web_origin_ids_round_trip(two_sided):
                      files_only_for_grouped=False,
              allow_shared_db=True)  # same DB, separate schemas (see module docstring)
         assert stats.tables["faces"] == 2, stats.tables  # desktop faces only
+        assert stats.tables["back_files"] == 0, "second push re-sends no back images"
 
         with _desk_conn() as c:
             f = c.execute("""select person_id, source, embedding, embedding_stale, bbox

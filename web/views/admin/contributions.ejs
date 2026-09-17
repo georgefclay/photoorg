@@ -1,113 +1,81 @@
-<%- include('../partials/head', { title: 'Contributions' }) %>
-<style>
-  .contrib-wrap { max-width: 60rem; margin: 0 auto; padding: 1rem; }
-  .contrib { border: 1px solid #ddd; border-radius: .3rem; padding: 1rem; margin-bottom: 1rem; }
-  .contrib h2 { font-size: 1.05rem; margin: 0 0 .3rem; }
-  .contrib .meta { color: #666; font-size: .9rem; margin-bottom: .5rem; }
-  .files { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: .5rem; }
-  .file { border: 1px solid #ddd; border-radius: .3rem; padding: .4rem; font-size: .8rem; text-align: center; }
-  .file .thumb { background: #eee; width: 100%; aspect-ratio: 1/1; margin-bottom: .3rem; display: flex; align-items: center; justify-content: center; color: #999; overflow: hidden; }
-  .file .thumb img { max-width: 100%; max-height: 100%; }
-  .file .dup { color: #b70; }
-  .file .st  { font-weight: bold; }
-  .file .st.approved { color: #050; }
-  .file .st.rejected { color: #a00; }
-  .file .st.pending  { color: #444; }
-  .file button { font: inherit; font-size: .8rem; margin: .2rem 0; padding: .3rem .6rem; }
-  .actions { margin-top: .5rem; display: flex; gap: .5rem; flex-wrap: wrap; }
-  .primary { background: #06c; color: #fff; border: none; border-radius: .3rem; padding: .5rem 1rem; font: inherit; }
-  .danger  { background: #a00; color: #fff; border: none; border-radius: .3rem; padding: .5rem 1rem; font: inherit; }
-</style>
+<% page.title = 'Uploads to review'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css'); page.js.push('/js/admin.js') %>
+<%
+function mb(n) { return n == null ? '' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+%>
+<%- include('_head', { title: 'Uploads to review', sub: isAdmin
+  ? 'Approved files are pulled into the archive by desktop Sync. Rejected files stay on the server; nothing is deleted.'
+  : 'Approving adds a photo to your group only. Rejecting removes your group from the upload; other groups decide for themselves.' }) %>
 
-<div class="contrib-wrap">
-  <h1>Pending contributions</h1>
-  <p style="color:#666">Approve files to make them pullable by desktop Sync. Rejected files stay on disk and are never deleted.</p>
-  <div id="list">Loading…</div>
-</div>
+<nav class="tabs" aria-label="Status">
+  <% Object.keys(filters).forEach(function (k) { %>
+    <a href="/admin/contributions?status=<%= k %>" <%- k === filter ? 'aria-current="page"' : '' %>><%= filters[k] %></a>
+  <% }) %>
+</nav>
 
-<script>
-(async function () {
-  const csrf = (await fetch('/api/csrf').then(r => r.json())).csrfToken;
-  const list = document.getElementById('list');
-
-  async function refresh() {
-    const res = await fetch('/api/admin/contributions?status=pending').then(r => r.json());
-    if (!res.items || res.items.length === 0) {
-      list.textContent = 'Nothing pending.';
-      return;
-    }
-    list.innerHTML = '';
-    for (const c of res.items) {
-      const detail = await fetch('/api/admin/contributions/' + c.id).then(r => r.json());
-      list.appendChild(renderContribution(detail));
-    }
-  }
-
-  function renderContribution(c) {
-    const wrap = document.createElement('div');
-    wrap.className = 'contrib';
-    wrap.id = 'c' + c.id;
-    wrap.innerHTML = `
-      <h2>Contribution #${c.id} — ${escapeHtml(c.uploader || '')}</h2>
-      <div class="meta">Groups: ${c.group_ids && c.group_ids.length ? c.group_ids.join(', ') : '(none — you decide)'} · ${c.files.length} files · ${escapeHtml(c.note || '(no note)')}</div>
-      <div class="files"></div>
-      <div class="actions">
-        <button type="button" class="primary" data-op="approve-all">Approve all</button>
-        <button type="button" class="danger"  data-op="reject-all">Reject all</button>
+<% if (!items.length) { %>
+  <%- include('../partials/empty', {
+    icon: 'upload',
+    title: filter === 'review' ? 'Nothing to review' : 'No uploads here',
+    text: filter === 'review' ? 'When family members upload photos they will appear here.' : 'Try another status.',
+  }) %>
+<% } else { %>
+<div class="contrib-list" <%- isAdmin ? 'data-admin' : '' %>>
+  <% items.forEach(function (c) { %>
+  <section class="card contrib" id="c<%= c.id %>" data-contribution="<%= c.id %>">
+    <header class="contrib-head">
+      <div>
+        <h2><%= c.uploader %> <span class="muted small-text">· <%= fmt.plural(c.counts.total, 'file') %> · <%= fmt.relTime(c.created_at) %></span></h2>
+        <p class="chips">
+          <% if (!c.targets.length) { %><span class="chip warn">No group chosen</span><% } %>
+          <% c.targets.forEach(function (g) { %><span class="chip <%= g.mine ? 'accent' : '' %>"><%= g.name %></span><% }) %>
+          <span class="chip status-<%= c.status %>"><%= c.status %></span>
+          <% if (c.counts.dups) { %><span class="chip warn"><%= fmt.plural(c.counts.dups, 'possible duplicate') %></span><% } %>
+          <% if (c.pulled_at) { %><span class="chip">pulled to desktop</span><% } %>
+        </p>
+        <% if (c.note) { %><p class="evidence">“<%= c.note %>”</p><% } %>
+        <% if (!c.finished_at && c.status === 'pending') { %><p class="muted small-text">Upload may still be in progress.</p><% } %>
       </div>
-    `;
-    const filesEl = wrap.querySelector('.files');
-    for (const f of c.files) filesEl.appendChild(renderFile(c.id, f));
-    wrap.querySelector('[data-op="approve-all"]').onclick = () => bulk(c.id, 'approve-all');
-    wrap.querySelector('[data-op="reject-all"]').onclick  = () => bulk(c.id, 'reject-all');
-    return wrap;
-  }
-
-  function renderFile(cid, f) {
-    const el = document.createElement('div');
-    el.className = 'file';
-    el.innerHTML = `
-      <div class="thumb">${f.mime && f.mime.startsWith('image/') ? '<span>(file)</span>' : '(no preview)'}</div>
-      <div>${escapeHtml(f.original_filename)}</div>
-      <div class="meta">${f.mime || ''} · ${f.size ? (f.size / 1024 / 1024).toFixed(2) + ' MB' : ''}</div>
-      ${f.duplicate_of_photo_id ? `<div class="dup">dup of #${f.duplicate_of_photo_id}${f.duplicate_distance != null ? ' (d=' + f.duplicate_distance + ')' : ''}</div>` : ''}
-      <div class="st ${f.status}">${f.status}</div>
-      <button type="button" data-op="approve">Approve</button>
-      <button type="button" data-op="reject">Reject</button>
-    `;
-    el.querySelector('[data-op="approve"]').onclick = () => single(cid, f.id, 'approve');
-    el.querySelector('[data-op="reject"]').onclick  = () => single(cid, f.id, 'reject');
-    return el;
-  }
-
-  async function single(cid, fid, op) {
-    const res = await fetch(`/api/admin/contributions/${cid}/files/${fid}/${op}`, {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
-      body: '{}',
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(err.error || ('http ' + res.status));
-    }
-    refresh();
-  }
-  async function bulk(cid, op) {
-    const res = await fetch(`/api/admin/contributions/${cid}/${op}`, {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
-      body: '{}',
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(err.error || ('http ' + res.status));
-    }
-    refresh();
-  }
-  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
-
-  refresh();
-})();
-</script>
-
-<%- include('../partials/foot') %>
+      <% if (isAdmin && c.counts.pending) { %>
+      <div class="actions batch-actions">
+        <button type="button" class="btn" data-act="approve-all">Approve all <%= c.counts.pending %></button>
+        <button type="button" class="btn secondary" data-act="reject-all">Reject all</button>
+      </div>
+      <% } %>
+    </header>
+    <ul class="file-grid">
+      <% c.files.forEach(function (f) { %>
+      <li class="file status-<%= f.status %>" data-file="<%= f.id %>">
+        <span class="file-thumb">
+          <% if (f.is_video || !(f.mime || '').startsWith('image/')) { %>
+            <span class="noprev"><%- include('../partials/icon', { name: 'camera' }) %><%= f.is_video ? 'Video' : 'No preview' %></span>
+          <% } else { %>
+            <img src="/media/contrib/<%= f.id %>" alt="<%= f.original_filename %>" loading="lazy" data-fallback="No preview">
+          <% } %>
+        </span>
+        <span class="file-name" title="<%= f.original_filename %>"><%= f.original_filename %></span>
+        <span class="muted small-text"><%= mb(f.size) %><%= f.width ? ` · ${f.width}×${f.height}` : '' %><%= f.exif_taken_at ? ` · ${new Date(f.exif_taken_at).toISOString().slice(0, 10)}` : '' %></span>
+        <% if (f.duplicate_of_photo_id) { %>
+          <% if (f.dup_kind === 'exact') { %>
+            <a class="chip warn dup" href="/photos/<%= f.duplicate_of_photo_id %>">Exact copy of #<%= f.duplicate_of_photo_id %></a>
+          <% } else { %>
+            <a class="chip warn dup" href="/photos/<%= f.duplicate_of_photo_id %>">Looks like #<%= f.duplicate_of_photo_id %> (distance <%= f.duplicate_distance %>)</a>
+          <% } %>
+        <% } %>
+        <span class="file-status" role="status"><%= f.status === 'pending' ? '' : f.status %><%= f.status === 'approved' && f.approved_groups.length ? ' → ' + f.approved_groups.join(', ') : '' %></span>
+        <% if (f.status === 'pending') { %>
+        <span class="file-actions">
+          <button type="button" class="btn small" data-act="approve" aria-label="Approve <%= f.original_filename %>">Approve</button>
+          <button type="button" class="btn small secondary" data-act="reject" aria-label="Reject <%= f.original_filename %>">Reject</button>
+        </span>
+        <% } %>
+      </li>
+      <% }) %>
+    </ul>
+  </section>
+  <% }) %>
+</div>
+<div class="pager">
+  <% if (cursor) { %><a class="btn ghost" href="<%= firstUrl %>">Newest</a><% } %>
+  <% if (nextUrl) { %><a class="btn secondary" href="<%= nextUrl %>">Older</a><% } %>
+</div>
+<% } %>

@@ -84,6 +84,13 @@ async function generateThumbFromWorking(photoId, workingBuffer) {
   return { absolute: dest };
 }
 
+// Where a back's JPEG lives: backs/back_<id:08d>_<sha8>.jpg. Derived from
+// id + sha256 so a later metadata push (which carries the desktop's own
+// working_path) can't point the web at a file that doesn't exist.
+function backPath(backId, sha256) {
+  return path.join(root(), 'backs', backBasename(backId, sha256, 'image/jpeg'));
+}
+
 function fileExists(absPath) {
   try { return fsSync.statSync(absPath).isFile(); } catch { return false; }
 }
@@ -100,5 +107,6 @@ module.exports = {
   writeFaceCrop,
   writeUploadFile,
   generateThumbFromWorking,
+  backPath,
   fileExists,
 };

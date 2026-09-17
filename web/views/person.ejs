@@ -1,0 +1,133 @@
+<%
+page.title = person.display_name || 'Person';
+page.nav = 'people';
+page.wide = true;
+page.css.push('/css/people.css');
+page.js.push('/js/grid.js', '/js/autocomplete.js', '/js/people.js');
+
+const name = person.display_name || 'this person';
+const words = String(person.display_name || '?').split(/\s+/).filter(Boolean);
+const initials = ((words[0] || '?')[0] + (words.length > 1 ? words[words.length - 1][0] : '')).toUpperCase();
+const nameRows = [
+  ['Given name', person.given_name],
+  ['Middle name', person.middle_name],
+  ['Surname', person.surname],
+  ['Maiden name', person.maiden_name],
+  ['Nickname', person.nickname],
+  ['Suffix', person.suffix],
+].filter(function (r) { return r[1]; });
+const variants = (person.variants || []).map(function (v) { return v.variant; });
+const rel = person.relationships || { parents: [], spouses: [], siblings: [], children: [] };
+const groups = [
+  { key: 'parents', title: 'Parents', items: rel.parents },
+  { key: 'spouses', title: rel.spouses.length === 1 ? 'Spouse' : 'Spouses', items: rel.spouses },
+  { key: 'siblings', title: 'Brothers and sisters', items: rel.siblings },
+  { key: 'children', title: 'Children', items: rel.children },
+].filter(function (g) { return g.items.length; });
+const scoped = groupScope && groupScope.kind !== 'all';
+const shortName = person.nickname || person.given_name || name;
+%>
+<a class="back-link" href="/people"><%- include('partials/icon', { name: 'left' }) %> People</a>
+
+<div class="person-layout">
+<div class="person-info">
+  <header class="person-head">
+    <span class="person-avatar big" aria-hidden="true"><%= initials %></span>
+    <div>
+      <h1><%= person.display_name %></h1>
+      <% if (lifeSpan) { %><p class="muted person-life"><%= lifeSpan %></p><% } %>
+    </div>
+  </header>
+
+  <% if (nameRows.length || variants.length || person.birth_year != null || person.death_year != null) { %>
+  <dl class="person-facts card">
+    <% nameRows.forEach(function (r) { %><div><dt><%= r[0] %></dt><dd><%= r[1] %></dd></div><% }) %>
+    <% if (variants.length) { %><div><dt>Also known as</dt><dd><%= variants.join(', ') %></dd></div><% } %>
+    <% if (person.birth_year != null) { %><div><dt>Born</dt><dd><%= person.birth_year %></dd></div><% } %>
+    <% if (person.death_year != null) { %><div><dt>Died</dt><dd><%= person.death_year %></dd></div><% } %>
+  </dl>
+  <% } %>
+
+  <% if (person.notes) { %>
+    <div class="card person-notes"><h2 class="sr-only">Notes</h2><p><%= person.notes %></p></div>
+  <% } %>
+
+  <section id="family" aria-labelledby="family-h">
+    <h2 id="family-h">Family</h2>
+    <% if (!groups.length) { %>
+      <p class="muted">No family links recorded yet. If you know one, suggest it below.</p>
+    <% } %>
+    <% groups.forEach(function (g) { %>
+      <h3 class="rel-title"><%= g.title %></h3>
+      <ul class="chips rel-list" data-rel="<%= g.key %>">
+        <% g.items.forEach(function (r) { %>
+          <li><a class="chip" href="/people/<%= r.id %>"><%= r.display_name %><% if (r.derived) { %> <span class="rel-note">(same parents)</span><% } else if (!r.confirmed) { %> <span class="rel-note">(not yet confirmed)</span><% } %></a></li>
+        <% }) %>
+      </ul>
+    <% }) %>
+    <div data-pending-wrap <%= pending.length ? '' : 'hidden' %>>
+      <h3 class="rel-title">Suggested, waiting for review</h3>
+      <ul class="pending-list" data-pending-list>
+        <% pending.forEach(function (s) { %>
+          <li><a href="/people/<%= s.other.id %>"><%= s.other.display_name %></a> — their <%= s.role %></li>
+        <% }) %>
+      </ul>
+    </div>
+  </section>
+
+</div>
+
+<section id="photos" class="person-photos" aria-labelledby="photos-h">
+  <h2 id="photos-h">Photos of <%= shortName %></h2>
+  <p class="muted small-text"><%= fmt.plural(photoCount, 'photo') %><% if (scoped) { %> in <%= groupScope.label %><% } %></p>
+  <% if (isContinuation) { %><p class="small-text"><a href="/people/<%= person.id %>#photos">Back to the start</a></p><% } %>
+  <% if (!photos.items.length) { %>
+    <% if (scoped) { %>
+      <%- include('partials/empty', { icon: 'photos', title: `No photos of ${name} in ${groupScope.label}`, text: 'Switch the group at the top of the page to look in other groups.' }) %>
+    <% } else { %>
+      <%- include('partials/empty', { icon: 'photos', title: `No photos of ${name} you can see yet`, text: 'Photos show up here once someone tags this person in a photo from one of your groups.' }) %>
+    <% } %>
+  <% } else { %>
+    <%- include('partials/photo-grid', { items: photos.items, from: from, apiUrl: apiUrl, next: photos.next, moreUrl: moreUrl, label: `Photos of ${name}` }) %>
+  <% } %>
+</section>
+
+  <section id="suggest" class="card suggest-card" aria-labelledby="suggest-h">
+    <h2 id="suggest-h">Suggest a relationship</h2>
+    <div data-rel-thanks role="status" aria-live="polite">
+    <% if (relForm.sent === 'sent') { %>
+      <p class="notice ok">Thank you! Your suggestion is waiting for review.</p>
+    <% } else if (relForm.sent === 'dup') { %>
+      <p class="notice info">Someone has already suggested that. It is waiting for review.</p>
+    <% } else if (relForm.sent === 'known') { %>
+      <p class="notice info">We already have that relationship recorded. Thank you!</p>
+    <% } %>
+    </div>
+    <% if (relForm.error) { %><p class="notice error" role="alert"><%= relForm.error %></p><% } %>
+    <form method="post" action="/people/<%= person.id %>/relationships" data-rel-form data-person-id="<%= person.id %>">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <div class="field">
+        <label for="rel-other">Who?</label>
+        <input id="rel-other" type="text" name="other_name" value="<%= relForm.other_name || '' %>" placeholder="Start typing a name" autocomplete="off" required data-rel-other>
+        <input type="hidden" name="other_id" value="" data-rel-other-id>
+        <span class="hint">Pick someone who is already in the archive.</span>
+      </div>
+      <% if (relForm.candidates && relForm.candidates.length) { %>
+        <fieldset class="rel-candidates">
+          <legend>Which one?</legend>
+          <% relForm.candidates.forEach(function (c, i) { %>
+            <label class="check"><input type="radio" name="other_id" value="<%= c.id %>" <%= i === 0 ? 'required' : '' %>> <%= c.display_name %><% if (c.birth_year || c.death_year) { %> <span class="muted">(<%= fmt.yearSpan(c.birth_year, c.death_year) %>)</span><% } %></label>
+          <% }) %>
+        </fieldset>
+      <% } %>
+      <fieldset>
+        <legend>How are they related to <%= name %>?</legend>
+        <% Object.keys(relations).forEach(function (k, i) { %>
+          <label class="check"><input type="radio" name="relation" value="<%= k %>" <%= relForm.relation === k ? 'checked' : '' %> <%= i === 0 ? 'required' : '' %>> <span><span class="muted">… </span><%= relations[k].label %></span></label>
+        <% }) %>
+      </fieldset>
+      <button class="btn" type="submit">Send suggestion</button>
+      <p class="hint small-text muted">An admin checks every suggestion before it is added.</p>
+    </form>
+  </section>
+</div>

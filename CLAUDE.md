@@ -519,6 +519,64 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   when the archive is quiescent and we're doing the one-time full
   file push.
 
+## Web pages (Phase 10 onwards)
+- **Queries live in `web/services/`, never in routes or views.** Photos:
+  `services/photos.js` (`listPhotos`, `getPhotoDetail`, `photoNeighbours`,
+  `attentionCounts`); people, albums, faces ("Who is this?"), places,
+  search, admin, contributions each have their own file. Visibility
+  (`middleware/visibility.js`) and the group scope are applied there, so
+  the JSON API and the server-rendered pages share one code path.
+- **Group scope** (`services/scope.js`): `req.session.scope` = `all` |
+  `unfiled` (admins) | `<group id>` (contributors: only their own groups),
+  set by the header switcher (`POST /scope`, return_to must be a local
+  path). Every photo grid and count applies it on top of visibility;
+  people and album *lists* stay site-wide. API clients may pass
+  `?scope=`. The view local is `groupScope` — never `scope`, which EJS
+  treats as a reserved render option.
+- **Keyset cursors are composite** `(sort_value, id)` for every sort
+  (`services/cursor.js`, encoded `value~id`). Sorts: recent, liked,
+  incomplete, oldest, newest (dates NULLS LAST), position (album order).
+- **List keys** carry prev/next context on the photo page:
+  `?from=b.<sort>|nd.<sort>|ut.<sort>|wi.<sort>|p.<personId>|a.<albumId>`;
+  anything else falls back to Browse order. Never dump filters into URLs.
+- **Layout**: every `res.render` is wrapped in `views/layout.ejs`
+  (`middleware/layout.js`). Views describe themselves by mutating `page`
+  (`page.title`, `page.nav`, `page.wide`, `page.css.push`, `page.js.push`)
+  and pass `layout: false` to opt out. Shared partials: `photo-grid`,
+  `tile`, `empty`, `icon`. `site.css` holds tokens + components (light
+  and dark); page extras live in `photo.css`, `upload.css`, `admin.css`,
+  `people.css`.
+- **JS enhances, never required for reading.** Plain `<script defer>`
+  modules in `public/js/`; `site.js` provides `CD.api` (JSON + CSRF
+  header), `CD.csrf`, `CD.toast`; `autocomplete.js` is the one combobox
+  (people, places). Writes go through the JSON API. Tap targets ≥ 44 px,
+  inputs 16 px, no hover-only affordances.
+- **Contributors never create people directly.** `POST /api/people` is
+  admin-only; a new name travels inside a `person` suggestion
+  (`new_person`) and the person is created at accept (web id ≥ floor).
+  A person suggestion's `face_id` must belong to that photo.
+- **Albums are read-only on the web** (no create / rename / add) until
+  album changes can be pulled back to the desktop.
+- **Media derivatives are cut on demand and cached under `PHOTO_DIR`**,
+  behind the same visibility gate as every `/media` route:
+  `/media/display/:id` (≤ 1600 px, `display/<id>_v<synced_file_version>.jpg`),
+  `/media/faces/:id` (the pushed crop if present, else cut from the working
+  copy after `sharp().rotate()` so the bbox's display frame matches —
+  `faces/gen_<id>_v<version>_<bbox hash>.jpg`), `/media/contrib/:file_id`
+  (uploader, admin, moderator of a target group). Back images are pushed
+  as JPEG to `backs/back_<id:08d>_<sha8>.jpg`; `/sync/photo_backs` answers
+  `need_files` (file missing on disk), so a second push sends zero backs.
+- **Moderators**: `/admin`, `/admin/contributions`, `/admin/groups[/:id]`
+  for their own groups only (404 for other groups); every other admin page
+  is admin-only (403). Moderators never accept suggestions. The groups
+  strip on the photo page shows "Remove from my group" for groups they
+  moderate. `/api/admin/contributions` is reachable by moderators (the
+  `/api/admin` router passes it through).
+- **Tests run in parallel-safe schemas**: `TEST_DB_SCHEMA=<name> npm run
+  test:setup` migrates that schema in `photoorg_test` and the tests' pool
+  uses `search_path=<name>,public`. `test/page-helpers.js` `seedWorld()`
+  is the shared fixture. Tests always use a temp `PHOTO_DIR`.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site

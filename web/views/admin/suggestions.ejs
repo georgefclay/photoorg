@@ -1,0 +1,69 @@
+<% page.title = 'Suggestions'; page.nav = 'admin'; page.css.push('/css/admin.css'); page.js.push('/js/admin.js') %>
+<%- include('_head', { title: 'Suggestions', sub: 'Accepting writes the fact and updates the photo’s completeness. Rejected suggestions are kept.' }) %>
+
+<nav class="tabs" aria-label="Source">
+  <% ['human', 'ai', 'import', 'all'].forEach(function (s) { %>
+    <a href="/admin/suggestions?source=<%= s %><%= kind ? '&kind=' + kind : '' %>" <%- s === source ? 'aria-current="page"' : '' %>><%= sourceLabels[s] %> <span class="badge"><%= (sourceTotals[s] || 0).toLocaleString('en-US') %></span></a>
+  <% }) %>
+</nav>
+<nav class="tabs sub" aria-label="Kind">
+  <a href="/admin/suggestions?source=<%= source %>" <%- !kind ? 'aria-current="page"' : '' %>>Every kind</a>
+  <% kinds.forEach(function (k) { if (!kindTotals[k] && k !== kind) return; %>
+    <a href="/admin/suggestions?source=<%= source %>&kind=<%= k %>" <%- k === kind ? 'aria-current="page"' : '' %>><%= kindLabels[k] %> <span class="count"><%= (kindTotals[k] || 0).toLocaleString('en-US') %></span></a>
+  <% }) %>
+</nav>
+
+<% if (!items.length) { %>
+  <%- include('../partials/empty', {
+    icon: 'check',
+    title: cursor ? 'No more suggestions' : 'All caught up',
+    text: cursor ? 'You have reached the end of this list.' : 'There are no pending suggestions here.',
+    action: cursor ? { href: firstUrl, label: 'Back to the newest' } : null,
+  }) %>
+<% } else { %>
+<div class="review-list" data-suggestions>
+  <% let lastKind = null; items.forEach(function (s) { %>
+    <% if (!kind && s.kind !== lastKind) { lastKind = s.kind; %><h2 class="group-title"><%= s.kindLabel %></h2><% } %>
+    <article class="card review-card" id="s<%= s.id %>" data-suggestion="<%= s.id %>" data-kind="<%= s.kind %>"
+             data-current="<%= s.current || '' %>" data-proposed="<%= s.proposed || '' %>">
+      <div class="review-media">
+        <% if (s.photo_id && !s.photo_gone) { %>
+          <a class="thumb" href="/photos/<%= s.photo_id %>" aria-label="Open photo <%= s.photo_id %>"><img src="/media/thumbs/<%= s.photo_id %>" alt="" width="96" height="96" loading="lazy"></a>
+        <% } else if (s.photo_id) { %>
+          <span class="thumb gone">Photo removed</span>
+        <% } %>
+        <% if (s.crop_url) { %><span class="thumb face"><img src="<%= s.crop_url %>" alt="The face being named" width="96" height="96" loading="lazy"></span><% } %>
+      </div>
+      <div class="review-body">
+        <p class="review-what"><span class="chip small-chip"><%= s.kindLabel.replace(/s$/, '') %></span> <strong class="proposed"><%= s.proposed %></strong></p>
+        <dl class="kv">
+          <% if (s.current) { %><dt>Currently</dt><dd class="<%= s.conflict ? 'conflict-text' : '' %>"><%= s.current %></dd><% } %>
+          <% if (s.evidence) { %><dt><%= s.source === 'ai' ? 'Detail' : 'They wrote' %></dt><dd class="evidence">“<%= s.evidence %>”</dd><% } %>
+          <% if (s.source === 'ai') { %>
+            <dt>Model</dt><dd><%= s.model || 'unknown' %><%= s.prompt_version ? ' · prompt ' + s.prompt_version : '' %><%= s.confidence != null ? ' · ' + Math.round(s.confidence * 100) + '% sure' : '' %></dd>
+          <% } %>
+          <dt>From</dt><dd><span title="<%= s.who_email || '' %>"><%= s.who %></span> ·<time datetime="<%= new Date(s.created_at).toISOString() %>"><%= fmt.relTime(s.created_at) %></time><% if (s.photo_id) { %> · <a href="/photos/<%= s.photo_id %>">photo #<%= s.photo_id %></a><% } %></dd>
+          <% s.links.forEach(function (l) { %><dt class="sr-only">Link</dt><dd><a href="<%= l.href %>"><%= l.label %></a></dd><% }) %>
+        </dl>
+        <div class="conflict" hidden role="alert">
+          <p><strong>This already has a confirmed value.</strong></p>
+          <dl class="kv"><dt>Now</dt><dd data-now></dd><dt>Proposed</dt><dd data-new></dd></dl>
+          <div class="actions">
+            <button type="button" class="btn danger" data-act="force">Replace anyway</button>
+            <button type="button" class="btn secondary" data-act="cancel">Keep current</button>
+          </div>
+        </div>
+        <div class="actions review-actions">
+          <button type="button" class="btn" data-act="accept"><%- include('../partials/icon', { name: 'check' }) %>Accept</button>
+          <button type="button" class="btn secondary" data-act="reject">Reject</button>
+          <span class="status muted" role="status"></span>
+        </div>
+      </div>
+    </article>
+  <% }) %>
+</div>
+<div class="pager">
+  <% if (cursor) { %><a class="btn ghost" href="<%= firstUrl %>">Newest</a><% } %>
+  <% if (nextUrl) { %><a class="btn secondary" href="<%= nextUrl %>">Older</a><% } %>
+</div>
+<% } %>

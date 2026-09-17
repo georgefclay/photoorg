@@ -1,0 +1,29 @@
+<%
+page.title = 'Albums';
+page.nav = 'albums';
+page.css.push('/css/people.css');
+page.js.push('/js/people.js');
+const scoped = groupScope && groupScope.kind !== 'all';
+%>
+<div class="page-head">
+  <h1>Albums</h1>
+</div>
+<% if (scoped && albums.length) { %>
+  <p class="muted small-text">Photo counts are for <strong><%= groupScope.label %></strong>.</p>
+<% } %>
+
+<% if (!albums.length) { %>
+  <%- include('partials/empty', { icon: 'albums', title: 'No albums yet', text: 'Albums made in the family archive app will show up here.', action: { href: '/', label: 'Browse all photos' } }) %>
+<% } else { %>
+  <ul class="list album-list" aria-label="Albums">
+    <% albums.forEach(function (a) { %>
+      <li><a class="list-link album-row<%= a.photo_count ? '' : ' no-photos' %>" href="/albums/<%= a.id %>">
+        <span class="album-cover" aria-hidden="true"><% if (a.cover_thumb_url) { %><img src="<%= a.cover_thumb_url %>" alt="" width="64" height="64" loading="lazy" decoding="async"><% } else { %><%- include('partials/icon', { name: 'albums' }) %><% } %></span>
+        <span class="person-text">
+          <span class="person-name"><%= a.name %></span>
+          <span class="person-sub"><%= a.photo_count ? fmt.plural(a.photo_count, 'photo') : (scoped ? `No photos in ${groupScope.label}` : 'No photos you can see yet') %></span>
+        </span>
+      </a></li>
+    <% }) %>
+  </ul>
+<% } %>

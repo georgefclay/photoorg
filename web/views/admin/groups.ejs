@@ -1,0 +1,35 @@
+<% page.title = 'Groups'; page.nav = 'admin'; page.css.push('/css/admin.css'); if (isAdmin) page.js.push('/js/admin-groups.js') %>
+<%- include('_head', { title: 'Groups', sub: isAdmin
+  ? 'A photo is visible to the members of every group it is in. Photos in no group are admin-only.'
+  : 'The groups you moderate. You can add and remove members.' }) %>
+
+<% if (isAdmin) { %>
+<details class="card create-group" <%- groups.length ? '' : 'open' %>>
+  <summary class="btn secondary">New group</summary>
+  <form data-create-group class="stack">
+    <div class="field">
+      <label for="g-name">Name</label>
+      <input id="g-name" name="name" type="text" required maxlength="120" placeholder="e.g. Clay Family">
+    </div>
+    <div class="field">
+      <label for="g-desc">Description <span class="muted">(optional)</span></label>
+      <input id="g-desc" name="description" type="text" maxlength="500">
+    </div>
+    <div class="actions"><button class="btn" type="submit">Create group</button><span class="status muted" role="status"></span></div>
+  </form>
+</details>
+<% } %>
+
+<% if (!groups.length) { %>
+  <%- include('../partials/empty', { icon: 'people', title: 'No groups yet', text: isAdmin ? 'Create the first group, then add members and photos.' : 'You are not a moderator of any group.' }) %>
+<% } else { %>
+<ul class="list">
+  <% groups.forEach(function (g) { %>
+  <li><a class="list-link" href="/admin/groups/<%= g.id %>">
+    <%- include('../partials/icon', { name: 'people' }) %>
+    <span><strong><%= g.name %></strong><% if (g.description) { %><br><span class="muted small-text"><%= g.description %></span><% } %></span>
+    <span class="meta"><%= fmt.plural(g.member_count, 'member') %><br><%= fmt.plural(g.photo_count, 'photo') %></span>
+  </a></li>
+  <% }) %>
+</ul>
+<% } %>

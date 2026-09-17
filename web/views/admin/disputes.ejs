@@ -1,0 +1,38 @@
+<% page.title = 'Disputed tags'; page.nav = 'admin'; page.css.push('/css/admin.css'); page.js.push('/js/autocomplete.js'); page.js.push('/js/admin.js') %>
+<%- include('_head', { title: 'Disputed tags', sub: 'Someone said “this isn’t them”. Keep the name, remove it, or pick the right person.' }) %>
+
+<% if (!items.length) { %>
+  <%- include('../partials/empty', { icon: 'check', title: 'No disputes', text: 'Nobody has questioned a face tag.' }) %>
+<% } else { %>
+<div class="review-list">
+  <% items.forEach(function (d) { %>
+  <article class="card review-card" data-dispute="<%= d.face_id %>">
+    <div class="review-media">
+      <span class="thumb face"><img src="/media/faces/<%= d.face_id %>" alt="The disputed face" width="96" height="96" loading="lazy"></span>
+      <a class="thumb" href="/photos/<%= d.photo_id %>" aria-label="Open photo <%= d.photo_id %>"><img src="/media/thumbs/<%= d.photo_id %>" alt="" width="96" height="96" loading="lazy"></a>
+    </div>
+    <div class="review-body">
+      <p class="review-what">Tagged as <% if (d.person_id) { %><a href="/people/<%= d.person_id %>"><strong><%= d.person_name || 'Person #' + d.person_id %></strong></a><% } else { %><strong>nobody</strong><% } %></p>
+      <dl class="kv">
+        <dt>Disputed by</dt><dd><span title="<%= d.by_email || '' %>"><%= d.by %></span><% if (d.disputed_at) { %> · <%= fmt.relTime(d.disputed_at) %><% } %></dd>
+        <% if (d.note) { %><dt>Their note</dt><dd class="evidence">“<%= d.note %>”</dd><% } %>
+      </dl>
+      <div class="reassign" hidden>
+        <label class="label" for="re-<%= d.face_id %>">Who is it really?</label>
+        <input id="re-<%= d.face_id %>" type="text" data-reassign-input placeholder="Start typing a name">
+        <div class="actions">
+          <button type="button" class="btn" data-act="reassign-go" disabled>Tag as this person</button>
+          <button type="button" class="btn ghost" data-act="reassign-cancel">Cancel</button>
+        </div>
+      </div>
+      <div class="actions review-actions">
+        <button type="button" class="btn" data-act="keep">Keep <%= d.person_name ? d.person_name.split(' ')[0] : 'tag' %></button>
+        <button type="button" class="btn secondary" data-act="unassign">Remove name</button>
+        <button type="button" class="btn secondary" data-act="reassign">Someone else…</button>
+        <span class="status muted" role="status"></span>
+      </div>
+    </div>
+  </article>
+  <% }) %>
+</div>
+<% } %>

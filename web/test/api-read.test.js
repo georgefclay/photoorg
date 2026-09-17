@@ -125,10 +125,16 @@ test('GET /api/albums lists albums with visibility-scoped counts', async () => {
   assert.equal(findWedding(aliceRes.body).photo_count, 1, 'alice sees only her group photo');
 });
 
-test('POST /api/people creates a person with an audit row', async () => {
-  const { alice } = await seed();
+test('POST /api/people: admin creates a person with an audit row; contributors get 403', async () => {
+  const { admin, alice } = await seed();
+  const aliceAgent = request.agent(app);
+  const aliceCsrf = await signIn(aliceAgent, alice.id);
+  const denied = await aliceAgent.post('/api/people')
+    .set('X-CSRF-Token', aliceCsrf)
+    .send({ given_name: 'John', surname: 'Doe' });
+  assert.equal(denied.status, 403, 'contributors name new people inside a person suggestion (answer A2)');
   const agent = request.agent(app);
-  const csrf = await signIn(agent, alice.id);
+  const csrf = await signIn(agent, admin.id);
   const res = await agent.post('/api/people')
     .set('X-CSRF-Token', csrf)
     .send({ given_name: 'John', surname: 'Doe' });
@@ -136,7 +142,7 @@ test('POST /api/people creates a person with an audit row', async () => {
   assert.match(res.body.display_name, /John Doe/);
   const audit = await pool.query(`select action, user_id from audit_log where entity_type = 'person' and entity_id = $1`, [res.body.id]);
   assert.equal(audit.rows[0].action, 'person.create');
-  assert.equal(Number(audit.rows[0].user_id), Number(alice.id));
+  assert.equal(Number(audit.rows[0].user_id), Number(admin.id));
 });
 
 test('GET /api/people/autocomplete finds prefix and nickname variants', async () => {

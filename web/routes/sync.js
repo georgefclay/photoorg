@@ -48,6 +48,7 @@ const multer = require('multer');
 const { requireService } = require('../middleware/require-service');
 const { audit } = require('../services/audit');
 const storage = require('../services/photo-storage');
+const sharp = require('sharp');
 const { WEB_ID_FLOOR, idsAtOrAboveFloor, checkIdFloor } = require('../services/id-floor');
 
 const upload = multer({
@@ -248,7 +249,19 @@ module.exports = function syncRoutes({ pool }) {
       if (!row) return bad(res, 'not found', 404);
       if (row.is_private) return bad(res, 'private photo back cannot receive a file');
       await storage.ensureDirs();
-      const { basename } = await storage.writeBack(id, row.sha256, 'image/jpeg', req.file.buffer);
+      // Backs arrive as whatever the scan was (often TIFF); browsers need
+      // JPEG. Normalise once here.
+      let jpeg;
+      try {
+        jpeg = await sharp(req.file.buffer, { failOn: 'none' })
+          .rotate()
+          .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+      } catch (e) {
+        return bad(res, `could not decode back image: ${e.message}`);
+      }
+      const { basename } = await storage.writeBack(id, row.sha256, 'image/jpeg', jpeg);
       await client.query('begin');
       await client.query(`update photo_backs set working_path = $1 where id = $2`, [basename, id]);
       await auditDesktop(client, 'sync.back.upload', 'photo_back', id, { basename });
@@ -316,7 +329,8 @@ module.exports = function syncRoutes({ pool }) {
         }
         await auditDesktop(client, `sync.${name}.upsert`, name, null, { count, skipped });
         await client.query('commit');
-        res.json({ upserted: count, skipped });
+        const extra = opts.extra ? await opts.extra(rows) : {};
+        res.json({ upserted: count, skipped, ...extra });
       } catch (err) {
         await client.query('rollback').catch(() => {});
         next(err);
@@ -557,6 +571,26 @@ module.exports = function syncRoutes({ pool }) {
     (r) => [Number(r.id), r.photo_id, r.master_path, r.sha256, r.working_path,
             r.source_folder, r.source_filename, r.scan_sequence,
             r.transcribed_text, r.transcription_confidence, !!r.transcription_confirmed, r.created_at],
+    {
+      // Backs whose image isn't on disk yet (the file lives under a name
+      // derived from id + sha256, independent of the pushed working_path).
+      // The desktop uploads exactly these via PUT /sync/photo_backs/:id/file.
+      extra: async (rows) => {
+        const ids = rows.map((r) => Number(r.id)).filter(Boolean);
+        if (!ids.length) return { need_files: [] };
+        const { rows: live } = await pool.query(
+          `select pb.id, pb.sha256 from photo_backs pb join photos p on p.id = pb.photo_id
+            where pb.id = any($1::bigint[]) and p.is_private = false and p.is_deleted = false`,
+          [ids],
+        );
+        const need = [];
+        for (const b of live) {
+          const abs = storage.backPath(Number(b.id), b.sha256);
+          if (!(await storage.fileExists(abs))) need.push(Number(b.id));
+        }
+        return { need_files: need };
+      },
+    },
   ));
 
   router.post('/suggestions', batchUpsert('suggestions',

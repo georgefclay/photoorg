@@ -1,0 +1,50 @@
+<% page.title = 'Monthly report'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css') %>
+<%
+const [yy, mm] = month.split('-').map(Number);
+const monthName = `${fmt.MONTHS[mm - 1]} ${yy}`;
+const cols = [
+  ['logins', 'Sign-ins'], ['faces_tagged', 'Faces tagged'], ['comments', 'Comments'], ['likes_toggled', 'Likes'],
+  ['suggestions_made', 'Suggested'], ['suggestions_accepted', 'Accepted'], ['suggestions_rejected', 'Rejected'],
+  ['dates_confirmed', 'Dates set'],
+];
+const totals = {};
+cols.forEach(function (c) { totals[c[0]] = report.per_user.reduce(function (a, u) { return a + u[c[0]]; }, 0); });
+%>
+<%- include('_head', { title: 'Monthly report' }) %>
+
+<form class="month-form row" method="get" action="/admin/report">
+  <a class="btn ghost" href="/admin/report?month=<%= prevMonth %>" aria-label="Previous month"><%- include('../partials/icon', { name: 'left' }) %></a>
+  <label class="sr-only" for="month">Month</label>
+  <input id="month" name="month" type="month" value="<%= month %>" required>
+  <button class="btn secondary" type="submit">Show</button>
+  <% if (nextMonth) { %><a class="btn ghost" href="/admin/report?month=<%= nextMonth %>" aria-label="Next month"><%- include('../partials/icon', { name: 'right' }) %></a><% } %>
+</form>
+
+<h2><%= monthName %></h2>
+<ul class="admin-tiles compact">
+  <li><span class="stat"><span class="stat-n"><%= report.per_user.length %></span><span class="stat-label">Active people</span></span></li>
+  <li><span class="stat"><span class="stat-n"><%= report.total_likes_in_month %></span><span class="stat-label">Likes given</span></span></li>
+  <li><span class="stat"><span class="stat-n"><%= extras.comments %></span><span class="stat-label">Comments</span></span></li>
+  <li><span class="stat"><span class="stat-n"><%= extras.suggestions %></span><span class="stat-label">Family suggestions</span></span></li>
+  <li><span class="stat"><span class="stat-n"><%= extras.files_uploaded %></span><span class="stat-label">Files uploaded</span></span></li>
+  <li><span class="stat"><span class="stat-n"><%= extras.people_approved %></span><span class="stat-label">New people let in</span></span></li>
+</ul>
+
+<% if (!report.per_user.length) { %>
+  <%- include('../partials/empty', { icon: 'calendar', title: 'A quiet month', text: 'Nobody signed in or did anything recorded in ' + monthName + '.' }) %>
+<% } else { %>
+<div class="table-wrap">
+<table class="data rtable">
+  <thead><tr><th scope="col">Person</th><% cols.forEach(function (c) { %><th scope="col" class="num"><%= c[1] %></th><% }) %></tr></thead>
+  <tbody>
+  <% report.per_user.forEach(function (u) { %>
+    <tr>
+      <th scope="row" data-label="Person"><%= u.display_name %></th>
+      <% cols.forEach(function (c) { %><td class="num" data-label="<%= c[1] %>"><%= u[c[0]] || '·' %></td><% }) %>
+    </tr>
+  <% }) %>
+  </tbody>
+  <tfoot><tr><th scope="row" data-label="Total">Total</th><% cols.forEach(function (c) { %><td class="num" data-label="<%= c[1] %>"><%= totals[c[0]] %></td><% }) %></tr></tfoot>
+</table>
+</div>
+<% } %>

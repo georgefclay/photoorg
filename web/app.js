@@ -8,6 +8,9 @@ const { loadUserFactory } = require('./middleware/load-user');
 const { makeAuthLimiter } = require('./middleware/rate-limit');
 
 const { requireService } = require('./middleware/require-service');
+const { layoutMiddleware } = require('./middleware/layout');
+const { scopeLocals } = require('./services/scope');
+const fmt = require('./services/format');
 
 const homeRoutes = require('./routes/home');
 const requestAccessRoutes = require('./routes/request-access');
@@ -24,7 +27,12 @@ const apiAdminRoutes = require('./routes/api-admin');
 const apiGroupsModule = require('./routes/api-groups');
 const syncRoutes = require('./routes/sync');
 const apiContributionsModule = require('./routes/api-contributions');
-const { requireUser: requireUserMw, requireAdmin: requireAdminMw } = require('./middleware/require-user');
+const apiMiscRoutes = require('./routes/api-misc');
+const pageRoutes = require('./routes/pages');
+const photoPageRoutes = require('./routes/pages-photo');
+const contribPageRoutes = require('./routes/pages-contrib');
+const peoplePageRoutes = require('./routes/pages-people');
+const adminPageRoutes = require('./routes/pages-admin');
 
 function createApp({ pool }) {
   const app = express();
@@ -33,9 +41,17 @@ function createApp({ pool }) {
   app.set('trust proxy', 1);
   app.set('view engine', 'ejs');
   app.set('views', path.join(__dirname, 'views'));
+  app.locals.fmt = fmt;
 
-  app.use('/css', express.static(path.join(__dirname, 'public', 'css')));
+  const staticOpts = { maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 };
+  app.use('/css', express.static(path.join(__dirname, 'public', 'css'), staticOpts));
+  app.use('/js', express.static(path.join(__dirname, 'public', 'js'), staticOpts));
   app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
+  app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'favicon.svg'), { maxAge: '7d' }));
+  app.get('/favicon.ico', (_req, res) => res.redirect(301, '/favicon.svg'));
+
+  // Every res.render goes through views/layout.ejs (page.title etc.).
+  app.use(layoutMiddleware);
 
   app.use(express.urlencoded({ extended: false, limit: '32kb' }));
 
@@ -60,18 +76,29 @@ function createApp({ pool }) {
   app.use(loadUserFactory({ pool }));
   app.use(csrfMiddleware);
 
+  // Header group switcher for every server-rendered page.
+  const scopeForPages = scopeLocals({ pool });
+  const NO_PAGE = /^\/(api|media|sync|service)\//;
+  app.use((req, res, next) => (NO_PAGE.test(req.path) ? next() : scopeForPages(req, res, next)));
+
+  app.use('/', pageRoutes({ pool }));
   app.use('/', homeRoutes({ pool }));
   // Independent limiter per route so exhausting one doesn't block the other.
   app.use('/', requestAccessRoutes({ pool, authLimiter: makeAuthLimiter() }));
   app.use('/', loginRoutes({ pool, authLimiter: makeAuthLimiter() }));
   app.use('/', magicRoutes({ pool }));
   app.use('/admin', adminRoutes({ pool }));
+  app.use('/admin', adminPageRoutes({ pool }));
+  app.use('/', photoPageRoutes({ pool }));
+  app.use('/', contribPageRoutes({ pool }));
+  app.use('/', peoplePageRoutes({ pool }));
   app.use('/media', mediaRoutes({ pool }));
   app.use('/api/csrf', apiCsrfRoutes());
   app.use('/api/photos', apiPhotosRoutes({ pool }));
   app.use('/api/people', apiPeopleModule({ pool }));
   app.use('/api/relationships', apiPeopleModule.relationshipsRouter({ pool }));
   app.use('/api/albums', apiAlbumsRoutes({ pool }));
+  app.use('/api', apiMiscRoutes({ pool }));
   app.use('/api', apiContribRoutes({ pool }));
   app.use('/api/groups', apiGroupsModule({ pool }));
   app.use('/api/admin/groups', apiGroupsModule.adminGroupsRouter({ pool }));
@@ -79,10 +106,6 @@ function createApp({ pool }) {
   app.use('/api/admin', apiAdminRoutes({ pool }));
   app.use('/api/contributions', apiContributionsModule({ pool }));
   app.use('/api/admin/contributions', apiContributionsModule.adminContribRouter({ pool }));
-
-  // Minimal Phase 9 pages — replaced in Phase 10.
-  app.get('/upload', requireUserMw, (_req, res) => res.render('upload'));
-  app.get('/admin/contributions', requireAdminMw, (_req, res) => res.render('admin/contributions'));
 
   // Phase 9 sync endpoints (service-token authed).
   app.use('/sync', syncRoutes({ pool }));

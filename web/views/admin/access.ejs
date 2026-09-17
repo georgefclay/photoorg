@@ -1,39 +1,40 @@
-<%- include('../partials/head', { title: 'Access requests' }) %>
-<h1>Pending access requests</h1>
+<% page.title = 'Access requests'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css') %>
+<%- include('_head', { title: 'Access requests', sub: 'Approving sends the person a sign-in link. Denying sends nothing.' }) %>
 
 <% if (!requests.length) { %>
-  <p class="muted">No pending requests. Nice and quiet.</p>
+  <%- include('../partials/empty', { icon: 'people', title: 'No pending requests', text: 'Nice and quiet. New requests also arrive by email.' }) %>
 <% } else { %>
-  <table class="data">
+<div class="table-wrap">
+  <table class="data rtable">
     <thead>
       <tr>
-        <th>Email</th>
-        <th>Name</th>
-        <th>Message</th>
-        <th>Requested</th>
-        <th>Actions</th>
+        <th scope="col">Email</th>
+        <th scope="col">Name</th>
+        <th scope="col">Message</th>
+        <th scope="col">Requested</th>
+        <th scope="col"><span class="sr-only">Actions</span></th>
       </tr>
     </thead>
     <tbody>
       <% requests.forEach(function (r) { %>
         <tr>
-          <td><%= r.email %></td>
-          <td><%= r.display_name || '' %></td>
-          <td class="muted"><%= r.message || '' %></td>
-          <td><%= new Date(r.created_at).toISOString().slice(0, 10) %></td>
-          <td>
-            <form method="post" action="/admin/access/<%= r.id %>/approve" style="display:inline">
+          <td data-label="Email" class="strong wrap"><%= r.email %></td>
+          <td data-label="Name"><%= r.display_name || '' %></td>
+          <td data-label="Message" class="muted"><%= r.message || '' %></td>
+          <td data-label="Requested"><time datetime="<%= new Date(r.created_at).toISOString() %>"><%= new Date(r.created_at).toISOString().slice(0, 10) %></time> <span class="muted small-text">(<%= fmt.relTime(r.created_at) %>)</span></td>
+          <td class="row-actions">
+            <form method="post" action="/admin/access/<%= r.id %>/approve">
               <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-              <button class="button" type="submit">Approve</button>
+              <button class="btn" type="submit">Approve</button>
             </form>
-            <form method="post" action="/admin/access/<%= r.id %>/deny" style="display:inline">
+            <form method="post" action="/admin/access/<%= r.id %>/deny">
               <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-              <button class="button danger" type="submit">Deny</button>
+              <button class="btn danger" type="submit">Deny</button>
             </form>
           </td>
         </tr>
       <% }); %>
     </tbody>
   </table>
+</div>
 <% } %>
-<%- include('../partials/foot') %>

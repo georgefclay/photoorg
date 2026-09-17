@@ -1,0 +1,54 @@
+<%
+page.title = heading;
+page.nav = 'photos';
+page.wide = true;
+page.js.push('/js/grid.js');
+%>
+<div class="page-head">
+  <h1><%= heading %></h1>
+  <form class="sort-form" method="get" action="/">
+    <% if (filters.has_no_date) { %><input type="hidden" name="has_no_date" value="1"><% } %>
+    <% if (filters.has_untagged_faces) { %><input type="hidden" name="has_untagged_faces" value="1"><% } %>
+    <% if (filters.has_unknown_faces) { %><input type="hidden" name="has_unknown_faces" value="1"><% } %>
+    <label for="sort" class="sr-only">Sort</label>
+    <select id="sort" name="sort" data-autosubmit>
+      <% sorts.forEach(function (s) { %>
+        <option value="<%= s.key %>" <%= s.key === sort ? 'selected' : '' %>><%= s.label %></option>
+      <% }) %>
+    </select>
+    <noscript><button class="btn secondary small" type="submit">Sort</button></noscript>
+  </form>
+</div>
+
+<% if (filtered) { %>
+  <p class="row"><a class="chip accent" href="/<%= sort !== 'recent' ? `?sort=${sort}` : '' %>"><%- include('partials/icon', { name: 'close' }) %> Show all photos</a>
+  <% if (filters.has_unknown_faces) { %><a class="chip" href="/who-is-this"><%- include('partials/icon', { name: 'question' }) %> Go to Who is this?</a><% } %></p>
+<% } else if (attention && (attention.no_date || attention.untagged_faces || attention.unknown_faces)) { %>
+  <nav class="attention" aria-label="Needs attention">
+    <% if (attention.no_date) { %>
+      <a class="chip" href="/?has_no_date=1&amp;sort=liked"><%- include('partials/icon', { name: 'calendar' }) %> <%= fmt.plural(attention.no_date, 'photo') %> with no date</a>
+    <% } %>
+    <% if (attention.untagged_faces) { %>
+      <a class="chip" href="/?has_untagged_faces=1&amp;sort=liked"><%- include('partials/icon', { name: 'tag' }) %> <%= fmt.plural(attention.untagged_faces, 'photo') %> with untagged faces</a>
+    <% } %>
+    <% if (attention.unknown_faces) { %>
+      <a class="chip" href="/who-is-this"><%- include('partials/icon', { name: 'question' }) %> Who is this? (<%= attention.unknown_faces.toLocaleString('en-US') %>)</a>
+    <% } %>
+  </nav>
+<% } %>
+
+<% if (isContinuation) { %>
+  <p class="small-text"><a href="/<%= sort !== 'recent' ? `?sort=${sort}` : '' %>">Back to the start</a></p>
+<% } %>
+
+<% if (!photos.items.length) { %>
+  <% if (filtered) { %>
+    <%- include('partials/empty', { icon: 'check', title: 'Nothing to do here', text: 'Every photo you can see is sorted on this one. Thank you!', action: { href: '/', label: 'Browse all photos' } }) %>
+  <% } else if (groupScope && groupScope.kind === 'group') { %>
+    <%- include('partials/empty', { icon: 'photos', title: `No photos in ${groupScope.label} yet`, text: 'Photos show up here once they have been added to this group.', action: { href: '/upload', label: 'Upload photos' } }) %>
+  <% } else { %>
+    <%- include('partials/empty', { icon: 'photos', title: 'No photos yet', text: user.role === 'admin' ? 'Push from the desktop app, or assign unfiled photos to a group.' : "Photos appear here once they've been added to one of your groups.", action: { href: '/upload', label: 'Upload photos' } }) %>
+  <% } %>
+<% } else { %>
+  <%- include('partials/photo-grid', { items: photos.items, from: from, apiUrl: apiUrl, next: photos.next, moreUrl: moreUrl, label: heading }) %>
+<% } %>

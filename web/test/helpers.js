@@ -30,7 +30,14 @@ if (TEST_URL === MAIN_URL) {
 }
 
 // One pool per Node process. Individual tests share it via the exports.
-const pool = makePool(TEST_URL);
+// TEST_DB_SCHEMA (see tools/test-setup.js) isolates a run in its own schema.
+const TEST_SCHEMA = (process.env.TEST_DB_SCHEMA || '').trim();
+function withSearchPath(url, schema) {
+  if (!schema) return url;
+  const opt = encodeURIComponent(`-c search_path=${schema},public`);
+  return `${url}${url.includes('?') ? '&' : '?'}options=${opt}`;
+}
+const pool = makePool(withSearchPath(TEST_URL, TEST_SCHEMA));
 
 // Late require: services and app modules read env at load, so we import
 // them AFTER forcing NODE_ENV=test etc. above.

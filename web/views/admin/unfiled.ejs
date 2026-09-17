@@ -1,0 +1,95 @@
+<% page.title = 'Unfiled photos'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css'); page.js.push('/js/autocomplete.js'); page.js.push('/js/admin-unfiled.js') %>
+<%- include('_head', { title: 'Unfiled photos', sub: 'Photos in no group. Only admins can see them until they are put into a group.' }) %>
+
+<form class="card filter-form" method="get" action="/admin/unfiled" data-unfiled-filter>
+  <div class="filter-grid">
+    <div class="field">
+      <label for="f-album">Album</label>
+      <select id="f-album" name="album_id">
+        <option value="">Any album</option>
+        <% options.albums.forEach(function (a) { %><option value="<%= a.id %>" <%= filter.album_id === a.id ? 'selected' : '' %>><%= a.name %></option><% }) %>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-batch">Scan batch</label>
+      <input id="f-batch" name="scan_batch" type="text" list="dl-batch" value="<%= filter.scan_batch || '' %>" placeholder="e.g. Batch 00012">
+      <datalist id="dl-batch"><% options.batches.forEach(function (b) { %><option value="<%= b.v %>"><%= b.n %> unfiled</option><% }) %></datalist>
+    </div>
+    <div class="field">
+      <label for="f-person-name">Person</label>
+      <input id="f-person-name" type="text" data-person-name value="<%= personName || '' %>" placeholder="Start typing a name">
+      <input name="person_id" type="hidden" value="<%= filter.person_id || '' %>" data-person-id>
+    </div>
+    <div class="field">
+      <label for="f-year">Year</label>
+      <input id="f-year" name="year" type="number" min="1800" max="2100" inputmode="numeric" value="<%= filter.year || '' %>">
+    </div>
+    <div class="field">
+      <label for="f-decade">Decade</label>
+      <select id="f-decade" name="decade">
+        <option value="">Any decade</option>
+        <% options.decades.forEach(function (d) { %><option value="<%= d.v %>" <%= filter.decade === d.v ? 'selected' : '' %>><%= d.v %>s (<%= d.n %>)</option><% }) %>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-folder">Source folder</label>
+      <input id="f-folder" name="source_folder" type="text" list="dl-folder" value="<%= filter.source_folder || '' %>">
+      <datalist id="dl-folder"><% options.folders.forEach(function (f) { %><option value="<%= f.v %>"><%= f.n %> unfiled</option><% }) %></datalist>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn" type="submit">Show matching</button>
+    <% if (filtered) { %><a class="btn ghost" href="/admin/unfiled">Clear filters</a><% } %>
+  </div>
+</form>
+
+<p class="result-line"><strong data-total="<%= result.total %>"><%= fmt.plural(result.total, 'unfiled photo') %></strong><%= filtered ? ' match these filters' : '' %>.</p>
+
+<% if (!result.items.length) { %>
+  <%- include('../partials/empty', {
+    icon: 'check',
+    title: filtered ? 'Nothing matches' : 'Everything is filed',
+    text: filtered ? 'No unfiled photos match these filters.' : 'Every photo is in at least one group.',
+    action: filtered ? { href: '/admin/unfiled', label: 'Clear filters' } : null,
+  }) %>
+<% } else { %>
+
+<section class="card assign-panel" data-assign-panel
+         data-filter="<%= JSON.stringify(filter) %>" <%- options.groups.length ? '' : 'data-no-groups' %>>
+  <h2 class="card-title">Put into a group</h2>
+  <noscript><p class="notice">Bulk assign needs JavaScript.</p></noscript>
+  <% if (!options.groups.length) { %>
+    <p class="notice">There are no groups yet. <a href="/admin/groups">Create one first.</a></p>
+  <% } else { %>
+  <div class="field">
+    <label for="a-group">Group</label>
+    <select id="a-group" data-assign-group>
+      <% options.groups.forEach(function (g) { %><option value="<%= g.id %>"><%= g.name %></option><% }) %>
+    </select>
+  </div>
+  <fieldset>
+    <legend>Which photos</legend>
+    <label class="check"><input type="radio" name="which" value="filter" checked> All <%= fmt.plural(result.total, 'photo') %> <%= filtered ? 'matching the filters' : 'that are unfiled' %></label>
+    <label class="check"><input type="radio" name="which" value="ids"> Only the ones I tick below (<span data-picked-count>0</span>)</label>
+  </fieldset>
+  <div class="actions">
+    <button type="button" class="btn secondary" data-act="preview">Preview count</button>
+    <button type="button" class="btn" data-act="apply" disabled>Add to group</button>
+  </div>
+  <p class="assign-status" role="status" aria-live="polite"></p>
+  <% } %>
+</section>
+
+<ul class="photo-grid pick-grid" aria-label="Unfiled photos">
+  <% result.items.forEach(function (p) { %>
+  <li>
+    <a class="tile" href="/photos/<%= p.id %>"><img src="<%= p.thumb_url %>" alt="Unfiled photo <%= p.id %><%= p.scan_batch ? ', ' + fmt.physicalRef(p) : '' %>" width="320" height="320" loading="lazy" decoding="async"></a>
+    <label class="pick" hidden><input type="checkbox" value="<%= p.id %>" data-pick><span class="sr-only">Select photo <%= p.id %></span></label>
+  </li>
+  <% }) %>
+</ul>
+<div class="pager">
+  <% if (cursor) { %><a class="btn ghost" href="<%= firstUrl %>">First page</a><% } %>
+  <% if (nextUrl) { %><a class="btn secondary" href="<%= nextUrl %>">More photos</a><% } %>
+</div>
+<% } %>

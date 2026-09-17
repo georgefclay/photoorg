@@ -1,0 +1,346 @@
+<%
+// Photo detail page. Data: photo (services/photos.getPhotoDetail), faces
+// (+ style, suggested_by_me), suggestions (services/photo-page), neighbours,
+// fromQ, back, alt, isAdmin. Readable without JavaScript; elements marked
+// data-js-only are hidden when scripts are off (see the <noscript> style).
+const d = fmt.captureDate(photo);
+page.title = d.text ? `Photo, ${d.text}` : 'Photo';
+page.nav = 'photos';
+page.wide = true;
+page.css.push('/css/photo.css');
+page.js.push('/js/autocomplete.js', '/js/like.js', '/js/datefield.js', '/js/tagger.js', '/js/photo.js');
+const ref = fmt.physicalRef(photo);
+const hasDims = photo.width > 0 && photo.height > 0;
+const humanSuggestions = suggestions.filter(function (s) { return !s.ai; });
+const aiSuggestions = suggestions.filter(function (s) { return s.ai; });
+const prevUrl = neighbours.prev ? `/photos/${neighbours.prev}${fromQ}` : '';
+const nextUrl = neighbours.next ? `/photos/${neighbours.next}${fromQ}` : '';
+const meName = user.display_name || String(user.email || '').replace(/@.*/, '');
+function faceState(f) {
+  if (f.person_id) return f.is_disputed ? 'disputed' : 'named';
+  return f.review_status === 'unknown' ? 'unknown' : 'unnamed';
+}
+%>
+<noscript><style>[data-js-only] { display: none !important; }</style></noscript>
+
+<article class="photo-page" data-photo-page
+  data-photo-id="<%= photo.id %>"
+  data-width="<%= photo.width || '' %>" data-height="<%= photo.height || '' %>"
+  data-prev="<%= prevUrl %>" data-next="<%= nextUrl %>"
+  data-can-moderate="<%= photo.can_moderate ? '1' : '' %>"
+  data-me="<%= meName %>">
+
+  <nav class="photo-toolbar" aria-label="Photo navigation">
+    <a class="back-link" href="<%= back.href %>"><%- include('partials/icon', { name: 'left' }) %><span><%= back.label %></span></a>
+    <span class="spacer"></span>
+    <% if (prevUrl) { %>
+      <a class="btn secondary small nav-btn" rel="prev" href="<%= prevUrl %>"><%- include('partials/icon', { name: 'left' }) %><span>Previous</span></a>
+    <% } else { %>
+      <span class="btn secondary small nav-btn" aria-disabled="true"><%- include('partials/icon', { name: 'left' }) %><span>Previous</span></span>
+    <% } %>
+    <% if (nextUrl) { %>
+      <a class="btn secondary small nav-btn" rel="next" href="<%= nextUrl %>"><span>Next</span><%- include('partials/icon', { name: 'right' }) %></a>
+    <% } else { %>
+      <span class="btn secondary small nav-btn" aria-disabled="true"><span>Next</span><%- include('partials/icon', { name: 'right' }) %></span>
+    <% } %>
+  </nav>
+
+  <div class="photo-layout">
+    <div class="photo-main">
+      <div class="photo-frame" id="photo-frame" data-photo-frame
+        <% if (hasDims) { %>style="--ratio: <%= (photo.width / photo.height).toFixed(4) %>"<% } %>>
+        <img class="photo-img" data-photo-img src="/media/display/<%= photo.id %>"
+          <% if (hasDims) { %>width="<%= photo.width %>" height="<%= photo.height %>"<% } %>
+          alt="<%= alt %>" decoding="async" fetchpriority="high">
+        <div class="photo-missing" data-photo-missing hidden>
+          <%- include('partials/icon', { name: 'photos' }) %>
+          <p>The picture isn't on the site yet.<br><span class="muted">Everything else about it is below.</span></p>
+        </div>
+        <% if (hasDims) { %>
+        <div class="face-layer" data-face-layer data-js-only>
+          <% faces.forEach(function (f) { if (!f.style) return; const st = faceState(f); %>
+            <button type="button" class="face-box face-<%= st %><%= f.suggested_by_me ? ' suggested' : '' %>" style="<%= f.style %>"
+              data-face-id="<%= f.id %>" data-state="<%= st %>" data-crop="<%= f.crop_url %>"
+              data-person-id="<%= f.person_id || '' %>" data-person-name="<%= f.person_display_name || '' %>"
+              aria-label="<%= f.person_id ? `${f.person_display_name}${f.is_disputed ? ' (someone doubts this)' : ''}` : (st === 'unknown' ? 'Who is this? Tap to name' : 'Unnamed face. Tap to name') %>">
+              <span class="face-label"><%= f.person_id ? (f.person_display_name + (f.is_disputed ? '?' : '')) : (f.suggested_by_me ? 'Thanks!' : (st === 'unknown' ? 'Who is this?' : '?')) %></span>
+            </button>
+          <% }) %>
+        </div>
+        <% } %>
+      </div>
+
+      <div class="tag-bar" data-tag-bar hidden role="status">
+        <p>Tap a box to name someone. Missed a face? Drag across it, or tap two opposite corners.</p>
+        <button type="button" class="btn small" data-tag-done>Done</button>
+      </div>
+
+      <section class="card tag-panel" id="tag-panel" data-tag-panel hidden tabindex="-1" aria-labelledby="tag-title">
+        <div class="tag-head">
+          <img class="tag-crop" data-tag-crop alt="" width="64" height="64" hidden>
+          <h2 id="tag-title" data-tag-title>Who is this?</h2>
+          <button type="button" class="icon-btn" data-tag-close aria-label="Close"><%- include('partials/icon', { name: 'close' }) %></button>
+        </div>
+        <div data-tag-named hidden>
+          <p>Tagged as <a data-tag-person href="#"></a>.</p>
+          <button type="button" class="btn secondary" data-dispute-open><%- include('partials/icon', { name: 'flag' }) %> This isn't them</button>
+          <form class="dispute-form" data-dispute-form hidden>
+            <div class="field">
+              <label for="dispute-note">What's wrong? <span class="muted">(optional)</span></label>
+              <textarea id="dispute-note" name="note" rows="2" maxlength="1000" placeholder="e.g. That's her sister Joan"></textarea>
+            </div>
+            <p class="notice error" role="alert" data-form-error hidden></p>
+            <div class="actions"><button class="btn" type="submit">Send</button></div>
+          </form>
+        </div>
+        <form class="name-form" data-name-form>
+          <div class="field">
+            <label for="tag-name" data-name-label>Their name</label>
+            <input id="tag-name" type="text" data-name-input autocomplete="off" placeholder="Start typing a name">
+            <span class="hint">Pick from the list, or choose “someone new”.</span>
+          </div>
+          <p class="notice error" role="alert" data-form-error hidden></p>
+          <div class="actions">
+            <button class="btn" type="submit" data-name-submit disabled>Suggest this name</button>
+            <button class="btn ghost" type="button" data-tag-cancel>Cancel</button>
+          </div>
+        </form>
+        <div class="notice ok" data-tag-thanks hidden tabindex="-1"></div>
+      </section>
+    </div>
+
+    <div class="photo-side">
+      <section class="caption" aria-label="About this photo">
+        <p class="caption-date">
+          <%- include('partials/icon', { name: 'calendar' }) %>
+          <% if (d.confirmed) { %>
+            <strong><%= d.text %></strong>
+            <span class="chip date-mark confirmed"><%- include('partials/icon', { name: 'check' }) %>Confirmed</span>
+          <% } else if (d.guess) { %>
+            <strong><%= d.text %></strong>
+            <span class="chip date-mark guess">Guess</span>
+            <a href="#panel-date" data-open-panel="date" data-js-only>Help us date this</a>
+          <% } else { %>
+            <strong>No date yet</strong>
+            <a href="#panel-date" data-open-panel="date" data-js-only>Help us date this</a>
+          <% } %>
+        </p>
+
+        <% if (photo.people.length || photo.unknown_face_count) { %>
+        <div class="caption-row">
+          <%- include('partials/icon', { name: 'people' }) %>
+          <ul class="chips" aria-label="People in this photo">
+            <% photo.people.forEach(function (p) { %>
+              <li><a class="chip accent" href="/people/<%= p.id %>"><%= p.display_name %></a></li>
+            <% }) %>
+            <% if (photo.unknown_face_count && hasDims) { %>
+              <li data-js-only><button type="button" class="chip who-chip" data-start-tagging><%- include('partials/icon', { name: 'question' }) %>Who is this? (<%= photo.unknown_face_count %>)</button></li>
+            <% } %>
+          </ul>
+        </div>
+        <% } %>
+
+        <% if (photo.places.length) { %>
+        <div class="caption-row">
+          <%- include('partials/icon', { name: 'pin' }) %>
+          <ul class="chips" aria-label="Places">
+            <% photo.places.forEach(function (pl) { %>
+              <li><span class="chip"><%= pl.name %><% if (!pl.confirmed) { %> <span class="muted">(guess)</span><% } %></span></li>
+            <% }) %>
+          </ul>
+        </div>
+        <% } %>
+
+        <% if (ref) { %>
+        <p class="caption-row caption-ref"><%- include('partials/icon', { name: 'folder' }) %><span><span class="muted">Print:</span> <%= ref %></span></p>
+        <% } %>
+
+        <% if (photo.albums.length) { %>
+        <div class="caption-row">
+          <%- include('partials/icon', { name: 'albums' }) %>
+          <ul class="chips" aria-label="Albums">
+            <% photo.albums.forEach(function (a) { %><li><a class="chip" href="/albums/<%= a.id %>"><%= a.name %></a></li><% }) %>
+          </ul>
+        </div>
+        <% } %>
+
+        <% if (photo.description_ai) { %><p class="caption-desc"><%= photo.description_ai %></p><% } %>
+      </section>
+
+      <div class="photo-actions">
+        <button type="button" class="like-btn" data-like data-url="/api/photos/<%= photo.id %>/like"
+          aria-pressed="<%= photo.likes.me ? 'true' : 'false' %>">
+          <%- include('partials/icon', { name: 'heart' }) %>
+          <span class="like-word">Like</span>
+          <span class="like-count" data-like-count aria-label="<%= fmt.plural(photo.likes.count, 'like') %>"><%= photo.likes.count %></span>
+        </button>
+
+        <div class="action-row" role="group" aria-label="Help with this photo" data-js-only>
+          <button type="button" class="action-btn" data-action="tag" aria-pressed="false" aria-controls="photo-frame" <%= hasDims ? '' : 'disabled' %>>
+            <%- include('partials/icon', { name: 'tag' }) %><span>Tag a face</span>
+          </button>
+          <button type="button" class="action-btn" data-open-panel="date" aria-expanded="false" aria-controls="panel-date">
+            <%- include('partials/icon', { name: 'calendar' }) %><span>Suggest a date</span>
+          </button>
+          <button type="button" class="action-btn" data-open-panel="place" aria-expanded="false" aria-controls="panel-place">
+            <%- include('partials/icon', { name: 'pin' }) %><span>Suggest a place</span>
+          </button>
+          <% if (isAdmin) { %>
+          <button type="button" class="action-btn" data-rescan data-url="/api/photos/<%= photo.id %>/rescan_wanted"
+            aria-pressed="<%= photo.rescan_wanted ? 'true' : 'false' %>">
+            <%- include('partials/icon', { name: 'refresh' }) %><span>Rescan wanted</span>
+          </button>
+          <% } %>
+        </div>
+      </div>
+      <noscript><p class="notice info">Turn on JavaScript to like, comment, tag faces or suggest a date or place.</p></noscript>
+
+      <section class="card action-panel" id="panel-date" data-panel="date" hidden aria-labelledby="panel-date-h">
+        <h2 id="panel-date-h">Suggest a date</h2>
+        <form data-datefield data-post-url="/api/photos/<%= photo.id %>/suggestions" novalidate>
+          <div class="field">
+            <label for="date-text">When was this taken?</label>
+            <input id="date-text" name="text" type="text" autocomplete="off" maxlength="100" data-date-input
+              placeholder="1962, March 1962, summer 1971…" aria-describedby="date-hint date-interp">
+            <span class="hint" id="date-hint">A guess is fine. “Sometime in the 60s” helps too.</span>
+            <output class="date-interp" id="date-interp" for="date-text" data-date-output aria-live="polite"></output>
+          </div>
+          <p class="notice error" role="alert" data-form-error hidden></p>
+          <div class="actions">
+            <button class="btn" type="submit" data-date-submit disabled>Suggest this date</button>
+            <button class="btn ghost" type="button" data-close-panel>Cancel</button>
+          </div>
+        </form>
+        <div class="thanks" data-thanks hidden tabindex="-1">
+          <p class="notice ok" data-thanks-text></p>
+          <button type="button" class="btn secondary small" data-again>Suggest another</button>
+        </div>
+      </section>
+
+      <section class="card action-panel" id="panel-place" data-panel="place" hidden aria-labelledby="panel-place-h">
+        <h2 id="panel-place-h">Suggest a place</h2>
+        <form data-place-form data-post-url="/api/photos/<%= photo.id %>/suggestions" novalidate>
+          <div class="field">
+            <label for="place-text">Where was this taken?</label>
+            <input id="place-text" type="text" autocomplete="off" maxlength="200" data-place-input placeholder="A town, a house, a lake…">
+            <span class="hint">Pick from the list, or add a new place.</span>
+          </div>
+          <p class="notice error" role="alert" data-form-error hidden></p>
+          <div class="actions">
+            <button class="btn" type="submit" data-place-submit disabled>Suggest this place</button>
+            <button class="btn ghost" type="button" data-close-panel>Cancel</button>
+          </div>
+        </form>
+        <div class="thanks" data-thanks hidden tabindex="-1">
+          <p class="notice ok" data-thanks-text></p>
+          <button type="button" class="btn secondary small" data-again>Suggest another</button>
+        </div>
+      </section>
+
+      <section class="pending" data-pending aria-labelledby="pending-h" <%= suggestions.length ? '' : 'hidden' %>>
+        <h2 id="pending-h" class="section-h">Waiting to be checked</h2>
+        <ul class="pending-list" data-pending-list>
+          <% humanSuggestions.forEach(function (s) { %>
+            <li class="<%= s.mine ? 'mine' : '' %>"><strong><%= s.who %></strong> suggested <%= s.text %></li>
+          <% }) %>
+        </ul>
+        <% if (aiSuggestions.length) { %>
+        <details class="ai-guesses">
+          <summary>Computer guesses (<%= aiSuggestions.length %>)</summary>
+          <ul class="pending-list">
+            <% aiSuggestions.forEach(function (s) { %><li>AI suggested <%= s.text %></li><% }) %>
+          </ul>
+        </details>
+        <% } %>
+      </section>
+
+      <% if (photo.groups) { %>
+      <section class="groups-strip" aria-labelledby="groups-h">
+        <h2 id="groups-h" class="section-h">Shared with</h2>
+        <% if (!photo.groups.length) { %>
+          <p class="muted">Not in any group yet, so only admins can see it.</p>
+        <% } else { %>
+        <ul class="group-list" data-group-list>
+          <% photo.groups.forEach(function (g) { %>
+            <li data-group-item>
+              <span class="chip"><%= g.name %></span>
+              <% if (g.can_remove) { %>
+                <button type="button" class="btn ghost small" data-js-only data-remove-group
+                  data-url="/api/groups/<%= g.id %>/photos/<%= photo.id %>/remove" data-group-name="<%= g.name %>">
+                  <%= isAdmin ? 'Remove from group' : 'Remove from my group' %>
+                </button>
+              <% } %>
+            </li>
+          <% }) %>
+        </ul>
+        <% } %>
+      </section>
+      <% } %>
+
+      <% if (photo.backs.length) { %>
+      <section class="backs" aria-labelledby="backs-h">
+        <h2 id="backs-h" class="section-h">On the back</h2>
+        <% photo.backs.forEach(function (b) { %>
+        <figure class="back">
+          <a class="back-img-link" href="<%= b.image_url %>" data-back-link>
+            <img src="<%= b.image_url %>" alt="The back of the print" loading="lazy" decoding="async" data-back-img>
+          </a>
+          <p class="back-missing muted" data-back-missing hidden>The picture of the back isn't on the site yet.</p>
+          <figcaption>
+            <% if (b.transcribed_text) { %>
+              <blockquote class="transcription"><%= b.transcribed_text %></blockquote>
+              <p class="muted small-text"><%= b.transcription_confirmed ? 'Checked by a person.' : 'Read by computer, so it may have mistakes.' %></p>
+            <% } else { %>
+              <p class="muted">Nobody has written out the back yet.</p>
+            <% } %>
+          </figcaption>
+        </figure>
+        <% }) %>
+      </section>
+      <% } %>
+
+      <section class="comments" id="comments" aria-labelledby="comments-h">
+        <h2 id="comments-h" class="section-h">Comments</h2>
+        <p class="muted" data-comments-empty <%= photo.comments.length ? 'hidden' : '' %>>No comments yet. Know who's here, or where? Share a memory.</p>
+        <ol class="comment-list" data-comment-list>
+          <% photo.comments.forEach(function (c) { %>
+          <li class="comment<%= c.is_hidden ? ' is-hidden' : '' %>" data-comment-id="<%= c.id %>">
+            <div class="comment-head">
+              <span class="avatar" aria-hidden="true"><%= fmt.initials({ display_name: c.author_display_name }) %></span>
+              <strong><%= c.author_display_name %></strong>
+              <time class="muted small-text" datetime="<%= new Date(c.created_at).toISOString() %>"><%= fmt.relTime(c.created_at) %></time>
+            </div>
+            <p class="comment-body"><%= c.body %></p>
+            <p class="hidden-note" data-hidden-note <%= c.is_hidden ? '' : 'hidden' %>>Hidden. Only moderators can see this.</p>
+            <% if (photo.can_moderate) { %>
+              <button type="button" class="btn ghost small" data-js-only data-comment-toggle
+                data-hidden="<%= c.is_hidden ? '1' : '' %>"><%= c.is_hidden ? 'Unhide' : 'Hide' %></button>
+            <% } %>
+          </li>
+          <% }) %>
+        </ol>
+        <form class="comment-form" data-comment-form data-url="/api/photos/<%= photo.id %>/comments" data-js-only>
+          <label for="comment-body">Add a comment</label>
+          <textarea id="comment-body" name="body" rows="3" maxlength="4000" required
+            placeholder="Who's here? Where was this? Share a memory."></textarea>
+          <p class="notice error" role="alert" data-form-error hidden></p>
+          <div class="actions"><button class="btn" type="submit">Post comment</button></div>
+        </form>
+      </section>
+
+      <details class="photo-about">
+        <summary>More about this photo</summary>
+        <dl>
+          <dt>Full size</dt><dd><a href="<%= photo.working_url %>">Open the original</a></dd>
+          <% if (photo.exif && photo.exif.camera) { %><dt>Camera</dt><dd><%= photo.exif.camera %></dd><% } %>
+          <% if (photo.width && photo.height) { %><dt>Size</dt><dd><%= photo.width %> × <%= photo.height %> pixels</dd><% } %>
+          <% if (isAdmin) { %>
+            <% if (photo.source_folder || photo.source_filename) { %><dt>File</dt><dd class="wrap"><%= [photo.source_folder, photo.source_filename].filter(Boolean).join('/') %></dd><% } %>
+            <dt>Completeness</dt><dd><%= photo.completeness_score != null ? `${photo.completeness_score}%` : 'n/a' %></dd>
+            <dt>Photo id</dt><dd><%= photo.id %></dd>
+          <% } %>
+        </dl>
+      </details>
+    </div>
+  </div>
+</article>

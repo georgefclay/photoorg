@@ -1,191 +1,86 @@
-<%- include('partials/head', { title: 'Upload' }) %>
-<style>
-  .upload-wrap { max-width: 42rem; margin: 0 auto; padding: 1rem; }
-  .upload-wrap h1 { font-size: 1.4rem; margin: .3rem 0 1rem; }
-  .upload-form label { display: block; margin: .8rem 0 .3rem; font-weight: bold; }
-  .upload-form input, .upload-form select, .upload-form textarea {
-    width: 100%; padding: .6rem; font: inherit; box-sizing: border-box;
-  }
-  .upload-form textarea { min-height: 4rem; }
-  .field-row { display: flex; gap: .4rem; flex-wrap: wrap; }
-  .field-row > * { flex: 1 1 45%; }
-  .file-input-wrap { margin: .6rem 0; }
-  .file-list { list-style: none; padding: 0; margin: 1rem 0; }
-  .file-list li { padding: .4rem 0; border-bottom: 1px solid #ddd; font-size: .95rem; }
-  .file-list .name  { display: block; word-break: break-all; }
-  .file-list .meta  { color: #666; font-size: .85rem; }
-  .file-list .bar   { display: block; margin-top: .3rem; background: #eee; height: .5rem; overflow: hidden; border-radius: 3px; }
-  .file-list .bar > span { display: block; height: 100%; background: #4c9; width: 0%; transition: width .2s; }
-  .file-list .status { font-size: .85rem; }
-  .file-list .status.err { color: #a00; }
-  .file-list .status.dup { color: #b70; }
-  .actions { display: flex; gap: .5rem; margin-top: 1rem; }
-  .actions button { padding: .7rem 1rem; font: inherit; min-height: 44px; }
-  .primary { background: #06c; color: #fff; border: none; border-radius: .3rem; }
-  .primary:disabled { background: #99b; }
-</style>
-
-<div class="upload-wrap">
+<%
+page.title = 'Upload photos';
+page.nav = 'upload';
+page.css.push('/css/upload.css');
+page.js.push('/js/upload.js');
+%>
+<div class="page-head">
   <h1>Upload photos</h1>
-  <p>Files stay private (only you and the admin see them) until they're approved. Family photos only — please skip anything sensitive.</p>
-
-  <form class="upload-form" id="upload-form">
-    <label for="groups">Which groups is this for?</label>
-    <select id="groups" multiple size="4"></select>
-    <p style="font-size:.85rem;color:#666;margin-top:.2rem">Hold Ctrl / Cmd to pick more than one. If you leave this blank the admin will decide where they go.</p>
-
-    <label for="note">Note (optional)</label>
-    <textarea id="note" maxlength="1000" placeholder="e.g. Grandad's 1962 fishing trip photos"></textarea>
-
-    <div class="file-input-wrap">
-      <label for="files-gallery">Choose photos or take a picture</label>
-      <input id="files-gallery" type="file" accept="image/*,video/*" multiple />
-      <input id="files-camera"  type="file" accept="image/*" capture="environment" style="margin-top:.4rem" />
-      <input id="files-dir"     type="file" webkitdirectory directory style="margin-top:.4rem" />
-    </div>
-
-    <ul class="file-list" id="file-list"></ul>
-
-    <div class="actions">
-      <button type="button" class="primary" id="start-btn" disabled>Send</button>
-      <span id="status-line" style="align-self:center;color:#444"></span>
-    </div>
-  </form>
+  <a class="back-link" href="/upload/mine">My uploads <%- include('partials/icon', { name: 'right' }) %></a>
 </div>
 
-<script>
-(async function () {
-  const csrf = (await fetch('/api/csrf').then(r => r.json())).csrfToken;
+<p class="notice info up-private">
+  <strong>Your photos stay private until they're approved.</strong>
+  Only you and the people who look after the archive can see them until then.
+  Family photos only, please.
+</p>
 
-  // Load groups the user is a member of.
-  const groupsSel = document.getElementById('groups');
-  const groupsRes = await fetch('/api/groups').then(r => r.json());
-  for (const g of groupsRes.items || []) {
-    const opt = document.createElement('option');
-    opt.value = g.id;
-    opt.textContent = g.name;
-    groupsSel.appendChild(opt);
-  }
+<p class="muted up-loading" data-loading><span class="spinner" aria-hidden="true"></span> Getting the uploader ready…</p>
+<noscript>
+  <style>.up-loading { display: none; }</style>
+  <p class="notice error">Uploading needs JavaScript. Please turn it on in your browser settings, or ask George to add the photos for you.</p>
+</noscript>
 
-  const fileList = document.getElementById('file-list');
-  const startBtn = document.getElementById('start-btn');
-  const statusLine = document.getElementById('status-line');
-  const chosen = [];
+<form id="upload-form" class="up-form" data-upload novalidate hidden>
+  <fieldset class="up-groups">
+    <legend>Who should see them once approved?</legend>
+    <% if (!groups.length) { %>
+      <p class="muted small-text">You're not in a group yet, so the admin will decide where these go.</p>
+    <% } else { %>
+      <% groups.forEach(function (g) { %>
+        <label class="check">
+          <input type="checkbox" name="group_ids" value="<%= g.id %>" <%= preselect === g.id ? 'checked' : '' %>>
+          <span><%= g.name %></span>
+        </label>
+      <% }) %>
+      <p class="muted small-text"><%= groups.length === 1 ? '' : 'Tick one or more. ' %>Leave them all unticked and the admin will decide.</p>
+    <% } %>
+  </fieldset>
 
-  function addFilesFrom(input) {
-    for (const f of input.files) chosen.push(f);
-    input.value = '';
-    renderList();
-    if (chosen.length > 0) startBtn.disabled = false;
-  }
-  document.getElementById('files-gallery').addEventListener('change', (e) => addFilesFrom(e.target));
-  document.getElementById('files-camera').addEventListener('change',  (e) => addFilesFrom(e.target));
-  document.getElementById('files-dir').addEventListener('change',     (e) => addFilesFrom(e.target));
+  <div class="field">
+    <label for="up-note">Note <span class="muted">(optional)</span></label>
+    <textarea id="up-note" name="note" maxlength="1000" rows="2" placeholder="e.g. Grandad's fishing trip, summer 1962"></textarea>
+  </div>
 
-  function renderList() {
-    fileList.innerHTML = '';
-    chosen.forEach((f, i) => {
-      const li = document.createElement('li');
-      li.dataset.i = i;
-      li.innerHTML = `
-        <span class="name">${escapeHtml(f.name)}</span>
-        <span class="meta">${f.type || 'file'} — ${(f.size / 1024 / 1024).toFixed(2)} MB</span>
-        <span class="bar"><span></span></span>
-        <span class="status">queued</span>
-      `;
-      fileList.appendChild(li);
-    });
-  }
-  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+  <div class="up-pickers">
+    <span class="up-pick up-camera">
+      <input id="up-camera" class="sr-only" type="file" accept="image/*" capture="environment" data-pick>
+      <label class="btn up-big" for="up-camera"><%- include('partials/icon', { name: 'camera' }) %> Take a photo</label>
+    </span>
+    <span class="up-pick">
+      <input id="up-files" class="sr-only" type="file" accept="image/*,video/*" multiple data-pick>
+      <label class="btn up-big" for="up-files"><%- include('partials/icon', { name: 'photos' }) %> Choose photos</label>
+    </span>
+    <span class="up-pick up-folder">
+      <input id="up-folder" class="sr-only" type="file" webkitdirectory directory multiple data-pick>
+      <label class="btn secondary up-big" for="up-folder"><%- include('partials/icon', { name: 'folder' }) %> Choose a folder</label>
+    </span>
+  </div>
 
-  async function sha256Of(file) {
-    const buf = await file.arrayBuffer();
-    const hash = await crypto.subtle.digest('SHA-256', buf);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, '0')).join('');
-  }
+  <div class="up-drop" data-drop hidden>
+    <%- include('partials/icon', { name: 'upload' }) %>
+    <p><strong>Drop photos or folders here</strong></p>
+  </div>
 
-  startBtn.addEventListener('click', async () => {
-    startBtn.disabled = true;
-    statusLine.textContent = 'Preparing…';
+  <div class="up-status" role="status" aria-live="polite" data-status></div>
 
-    // Create a contribution.
-    const groupIds = Array.from(groupsSel.selectedOptions).map((o) => Number(o.value));
-    const note = document.getElementById('note').value.trim();
-    const create = await fetch('/api/contributions', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
-      body: JSON.stringify({ group_ids: groupIds, note }),
-    });
-    if (!create.ok) {
-      const err = await create.json().catch(() => ({}));
-      statusLine.textContent = 'Could not start: ' + (err.error || create.status);
-      startBtn.disabled = false;
-      return;
-    }
-    const cid = (await create.json()).id;
-    statusLine.textContent = 'Uploading ' + chosen.length + ' file' + (chosen.length === 1 ? '' : 's') + '…';
+  <ul class="up-list" data-list aria-label="Files to send"></ul>
 
-    // Sequential per-file uploads with sha pre-check + progress + retry.
-    for (let i = 0; i < chosen.length; i++) {
-      const li = fileList.children[i];
-      const setStatus = (t, cls) => {
-        const el = li.querySelector('.status');
-        el.textContent = t;
-        el.className = 'status' + (cls ? ' ' + cls : '');
-      };
-      const setProgress = (pct) => {
-        li.querySelector('.bar > span').style.width = pct + '%';
-      };
-      const file = chosen[i];
-      try {
-        setStatus('hashing…');
-        const sha = await sha256Of(file);
-        setStatus('checking…');
-        // HEAD pre-check.
-        const head = await fetch(`/api/contributions/${cid}/files?sha256=` + sha, { method: 'HEAD' });
-        if (head.status === 204) {
-          setProgress(100);
-          setStatus('already on the archive — skipped', 'dup');
-          continue;
-        }
-        setStatus('sending…');
-        await uploadOne(cid, csrf, file, setProgress);
-        setProgress(100);
-        setStatus('sent');
-      } catch (err) {
-        setStatus('failed — ' + err.message, 'err');
-      }
-    }
+  <div class="up-bar" data-bar hidden>
+    <p class="up-count" data-count></p>
+    <div class="actions">
+      <button type="submit" class="btn" data-send>Send</button>
+      <button type="button" class="btn secondary" data-finish hidden>Finish</button>
+      <button type="button" class="btn ghost" data-clear>Clear list</button>
+    </div>
+  </div>
+</form>
 
-    // Finish.
-    await fetch(`/api/contributions/${cid}/finish`, {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
-      body: '{}',
-    });
-    statusLine.textContent = 'Done. The admin has been notified.';
-  });
-
-  function uploadOne(cid, csrf, file, onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/contributions/${cid}/files`);
-      xhr.setRequestHeader('x-csrf-token', csrf);
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
-      };
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText || '{}'));
-        else reject(new Error('http ' + xhr.status));
-      };
-      xhr.onerror = () => reject(new Error('network error'));
-      const fd = new FormData();
-      fd.append('file', file, file.name);
-      xhr.send(fd);
-    });
-  }
-})();
-</script>
-
-<%- include('partials/foot') %>
+<section class="card up-done" data-done hidden tabindex="-1">
+  <h2><%- include('partials/icon', { name: 'check' }) %> <span data-done-title>All sent — thank you!</span></h2>
+  <p data-done-text></p>
+  <div class="actions">
+    <a class="btn" href="/upload/mine">See my uploads</a>
+    <button type="button" class="btn secondary" data-more>Send more photos</button>
+  </div>
+</section>

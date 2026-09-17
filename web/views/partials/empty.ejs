@@ -1,0 +1,9 @@
+<%
+// Designed empty state. Params: icon, title, text, action { href, label } (optional)
+%>
+<div class="empty">
+  <%- include('icon', { name: locals.icon || 'photos' }) %>
+  <h2><%= title %></h2>
+  <% if (locals.text) { %><p><%= text %></p><% } %>
+  <% if (locals.action) { %><p><a class="btn" href="<%= action.href %>"><%= action.label %></a></p><% } %>
+</div>

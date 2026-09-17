@@ -1,13 +1,10 @@
-<%- include('partials/head', { title: 'Home' }) %>
-<% if (locals.user) { %>
-  <h1>Welcome, <%= user.display_name || user.email %></h1>
-  <p class="muted">The archive is coming soon. Uploads, browsing, and search will land in the next phases.</p>
-<% } else { %>
-  <h1>Photo Archive</h1>
-  <p>This is a private family photo archive. If someone has invited you, sign in below. Otherwise you can ask for access.</p>
+<% page.title = null %>
+<section class="landing">
+  <%- include('partials/icon', { name: 'dino' }) %>
+  <h1>Cyber Dinosaurs</h1>
+  <p>A private family photo archive. If someone in the family has invited you, sign in with your email and we'll send you a link. Otherwise, ask for access.</p>
   <div class="actions">
-    <a class="button" href="/login">Sign in</a>
-    <a class="button secondary" href="/request-access">Request access</a>
+    <a class="btn" href="/login">Sign in</a>
+    <a class="btn secondary" href="/request-access">Request access</a>
   </div>
-<% } %>
-<%- include('partials/foot') %>
+</section>

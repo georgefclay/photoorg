@@ -1,0 +1,30 @@
+<%
+// One "Who is this?" card. Params: f (services/faces.listUnknownFaces item + box).
+// Must match cardHtml() in public/js/who.js.
+const d = fmt.captureDate(f);
+let dateText = 'No date yet';
+if (d.text) dateText = !d.guess ? d.text : (/^around /.test(d.text) ? `Around ${d.text.slice(7)}` : `About ${d.text}`);
+const photoHref = `/photos/${f.photo_id}?from=wi.recent`;
+const ar = f.width > 0 && f.height > 0 ? +(f.width / f.height).toFixed(4) : 1.5;
+%>
+<li class="card wi-card" data-face="<%= f.id %>" data-photo="<%= f.photo_id %>">
+  <div class="wi-media">
+    <span class="wi-crop"><img src="<%= f.crop_url %>" alt="A face nobody has named yet" width="256" height="256" loading="lazy" decoding="async"></span>
+    <a class="wi-photo" href="<%= photoHref %>" style="--ar: <%= ar %>">
+      <img src="<%= f.thumb_url %>" alt="The whole photo — open it" <% if (f.width && f.height) { %>width="<%= f.width %>" height="<%= f.height %>"<% } %> loading="lazy" decoding="async">
+      <% if (f.box) { %><span class="wi-box" style="left: <%= f.box.left %>%; top: <%= f.box.top %>%; width: <%= f.box.width %>%; height: <%= f.box.height %>%" aria-hidden="true"></span><% } %>
+    </a>
+  </div>
+  <p class="wi-meta">
+    <%- include('icon', { name: 'calendar' }) %>
+    <span><%= dateText %></span>
+    <a href="<%= photoHref %>">Open photo</a>
+  </p>
+  <div class="wi-action" data-wi-action>
+    <% if (f.suggested_by_me) { %>
+      <p class="wi-thanks" data-wi-thanks><%- include('icon', { name: 'check' }) %> <span>Thanks — an admin will check it</span></p>
+    <% } else { %>
+      <a class="btn block" href="<%= photoHref %>" data-identify>I know who this is</a>
+    <% } %>
+  </div>
+</li>

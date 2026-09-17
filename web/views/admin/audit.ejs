@@ -1,0 +1,78 @@
+<% page.title = 'Audit log'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css') %>
+<%
+function when(ts) {
+  const d = new Date(ts);
+  return d.toISOString().slice(0, 16).replace('T', ' ');
+}
+function filterLink(over) {
+  const q = new URLSearchParams();
+  const merged = Object.assign({}, f, over);
+  Object.keys(merged).forEach(function (k) { if (merged[k] != null && merged[k] !== '') q.set(k, merged[k]); });
+  return '/admin/audit' + (q.toString() ? '?' + q.toString() : '');
+}
+%>
+<%- include('_head', { title: 'Audit log', sub: 'Every decision and change, newest first. Times are UTC.' }) %>
+
+<form class="card filter-form" method="get" action="/admin/audit">
+  <div class="filter-grid">
+    <div class="field">
+      <label for="a-type">Entity type</label>
+      <select id="a-type" name="entity_type">
+        <option value="">Any</option>
+        <% entityTypes.forEach(function (t) { %><option <%= f.entity_type === t ? 'selected' : '' %>><%= t %></option><% }) %>
+        <% if (f.entity_type && !entityTypes.includes(f.entity_type)) { %><option selected><%= f.entity_type %></option><% } %>
+      </select>
+    </div>
+    <div class="field">
+      <label for="a-id">Entity id</label>
+      <input id="a-id" name="entity_id" type="number" min="1" inputmode="numeric" value="<%= f.entity_id != null ? f.entity_id : '' %>">
+    </div>
+    <div class="field">
+      <label for="a-action">Action</label>
+      <input id="a-action" name="action" type="text" value="<%= f.action %>" placeholder="e.g. suggestion.accept or auth.*">
+    </div>
+    <div class="field">
+      <label for="a-actor">Actor</label>
+      <input id="a-actor" name="actor" type="text" value="<%= f.actor %>" placeholder="email, system, desktop…">
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn" type="submit">Filter</button>
+    <% if (filtered) { %><a class="btn ghost" href="/admin/audit">Clear</a><% } %>
+  </div>
+</form>
+
+<% if (!result.items.length) { %>
+  <%- include('../partials/empty', { icon: 'flag', title: cursor ? 'No older entries' : 'No entries', text: filtered ? 'Nothing matches these filters.' : 'Nothing has been recorded yet.' }) %>
+<% } else { %>
+<ol class="audit-list">
+  <% result.items.forEach(function (r) { const href = entityHref(r); %>
+  <li class="audit-row">
+    <div class="audit-top">
+      <a class="audit-action" href="<%= filterLink({ action: r.action, cursor: null }) %>"><%= r.action %></a>
+      <span class="muted small-text"><time datetime="<%= new Date(r.created_at).toISOString() %>"><%= when(r.created_at) %></time> · #<%= r.id %></span>
+    </div>
+    <div class="audit-meta small-text">
+      <a href="<%= filterLink({ actor: r.actor }) %>"><%= r.actor %></a>
+      → <a href="<%= filterLink({ entity_type: r.entity_type, entity_id: r.entity_id }) %>"><%= r.entity_type %><%= r.entity_id != null ? ' #' + r.entity_id : '' %></a>
+      <% if (href) { %>(<a href="<%= href %>">open</a>)<% } %>
+    </div>
+    <% if (r.previous_value != null || r.new_value != null) { %>
+    <details class="audit-json">
+      <summary>
+        <% if (r.previous_value != null) { %><code class="was"><%= compactJson(r.previous_value, 90) %></code><% } %>
+        <% if (r.previous_value != null && r.new_value != null) { %><span aria-label="changed to">→</span><% } %>
+        <% if (r.new_value != null) { %><code class="now"><%= compactJson(r.new_value, 120) %></code><% } %>
+      </summary>
+      <% if (r.previous_value != null) { %><p class="label">Before</p><pre><%= JSON.stringify(r.previous_value, null, 2) %></pre><% } %>
+      <% if (r.new_value != null) { %><p class="label">After</p><pre><%= JSON.stringify(r.new_value, null, 2) %></pre><% } %>
+    </details>
+    <% } %>
+  </li>
+  <% }) %>
+</ol>
+<div class="pager">
+  <% if (cursor) { %><a class="btn ghost" href="<%= firstUrl %>">Newest</a><% } %>
+  <% if (nextUrl) { %><a class="btn secondary" href="<%= nextUrl %>">Older</a><% } %>
+</div>
+<% } %>

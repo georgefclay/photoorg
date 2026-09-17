@@ -3,6 +3,10 @@
 // Refuses if TEST_DATABASE_URL is unset or equals DATABASE_URL.
 //
 // Run once before `npm test`; individual tests then truncate between cases.
+//
+// TEST_DB_SCHEMA=<name> (optional) resets and migrates that schema instead
+// of `public`, so several test runs can share photoorg_test in parallel
+// (helpers.js points the pool's search_path at the same schema).
 require('dotenv').config();
 
 const path = require('path');
@@ -30,9 +34,16 @@ const migrateBin = path.resolve(
   'node-pg-migrate.js',
 );
 
+const SCHEMA = (process.env.TEST_DB_SCHEMA || '').trim();
+if (SCHEMA && !/^[a-z_][a-z0-9_]*$/.test(SCHEMA)) {
+  console.error('TEST_DB_SCHEMA must match [a-z_][a-z0-9_]*');
+  process.exit(1);
+}
+
 function migrate(direction, target) {
   const args = [migrateBin, direction];
   if (target !== undefined) args.push(String(target));
+  if (SCHEMA) args.push('-s', SCHEMA, '-s', 'public', '--migrations-schema', SCHEMA);
   const result = spawnSync(process.execPath, args, {
     cwd: sharedRoot,
     env: { ...process.env, DATABASE_URL: TEST_URL, PHOTOORG_DB_ROLE: 'web' },
@@ -52,6 +63,14 @@ async function resetPublic() {
   const client = new Client({ connectionString: TEST_URL });
   await client.connect();
   try {
+    if (SCHEMA) {
+      await client.query(`drop schema if exists ${SCHEMA} cascade`);
+      await client.query(`create schema ${SCHEMA}`);
+      // Extensions live in public; make sure they exist there first.
+      await client.query('create extension if not exists pg_trgm with schema public');
+      await client.query('create extension if not exists fuzzystrmatch with schema public');
+      return;
+    }
     await client.query('drop schema if exists public cascade');
     await client.query('create schema public');
     // photo_user owns the schema so migrations can create objects.
@@ -62,7 +81,7 @@ async function resetPublic() {
 }
 
 (async () => {
-  console.log(`Resetting public schema on ${TEST_URL}…`);
+  console.log(`Resetting ${SCHEMA || 'public'} schema on ${TEST_URL}…`);
   await resetPublic();
   console.log('Migrating up to head…');
   migrate('up');

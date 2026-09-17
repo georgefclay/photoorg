@@ -1,53 +1,50 @@
-<%- include('../partials/head', { title: 'Users' }) %>
-<h1>Users</h1>
+<% page.title = 'Users'; page.nav = 'admin'; page.wide = true; page.css.push('/css/admin.css') %>
+<%- include('_head', { title: 'Users', sub: 'Suspending signs the person out everywhere. Group membership is managed under Groups.' }) %>
 
 <% if (!users.length) { %>
-  <p class="muted">No users yet.</p>
+  <%- include('../partials/empty', { icon: 'people', title: 'No users yet', text: 'Approve an access request to add someone.' }) %>
 <% } else { %>
-  <table class="data">
+<div class="table-wrap">
+  <table class="data rtable">
     <thead>
       <tr>
-        <th>Email</th>
-        <th>Name</th>
-        <th>Role</th>
-        <th>Status</th>
-        <th>Last login</th>
-        <th>Actions</th>
+        <th scope="col">Email</th>
+        <th scope="col">Name</th>
+        <th scope="col">Role</th>
+        <th scope="col">Status</th>
+        <th scope="col">Last sign-in</th>
+        <th scope="col"><span class="sr-only">Actions</span></th>
       </tr>
     </thead>
     <tbody>
-      <% users.forEach(function (u) { %>
+      <% users.forEach(function (u) { const me = String(u.id) === String(user.id); %>
         <tr>
-          <td><%= u.email %></td>
-          <td><%= u.display_name || '' %></td>
-          <td>
-            <span class="pill <%= u.role === 'admin' ? 'admin' : '' %>"><%= u.role %></span>
-          </td>
-          <td>
-            <span class="pill <%= u.status %>"><%= u.status %></span>
-          </td>
-          <td><%= u.last_login_at ? new Date(u.last_login_at).toISOString().slice(0, 10) : '' %></td>
-          <td>
+          <td data-label="Email" class="strong wrap"><%= u.email %><%= me ? ' (you)' : '' %></td>
+          <td data-label="Name"><%= u.display_name || '' %></td>
+          <td data-label="Role"><span class="pill <%= u.role === 'admin' ? 'admin' : '' %>"><%= u.role %></span></td>
+          <td data-label="Status"><span class="pill <%= u.status %>"><%= u.status %></span></td>
+          <td data-label="Last sign-in"><%= u.last_login_at ? new Date(u.last_login_at).toISOString().slice(0, 10) : 'never' %></td>
+          <td class="row-actions">
             <% if (u.status === 'active') { %>
-              <form method="post" action="/admin/users/<%= u.id %>/suspend" style="display:inline">
+              <form method="post" action="/admin/users/<%= u.id %>/suspend">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                <button class="button danger" type="submit">Suspend</button>
+                <button class="btn danger small" type="submit" <%= me ? 'disabled' : '' %>>Suspend</button>
               </form>
             <% } else { %>
-              <form method="post" action="/admin/users/<%= u.id %>/reactivate" style="display:inline">
+              <form method="post" action="/admin/users/<%= u.id %>/reactivate">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                <button class="button" type="submit">Reactivate</button>
+                <button class="btn small" type="submit">Reactivate</button>
               </form>
             <% } %>
             <% if (u.role === 'contributor') { %>
-              <form method="post" action="/admin/users/<%= u.id %>/promote" style="display:inline">
+              <form method="post" action="/admin/users/<%= u.id %>/promote">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                <button class="button secondary" type="submit">Promote</button>
+                <button class="btn secondary small" type="submit">Make admin</button>
               </form>
             <% } else { %>
-              <form method="post" action="/admin/users/<%= u.id %>/demote" style="display:inline">
+              <form method="post" action="/admin/users/<%= u.id %>/demote">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                <button class="button secondary" type="submit">Demote</button>
+                <button class="btn secondary small" type="submit" <%= me ? 'disabled' : '' %>>Remove admin</button>
               </form>
             <% } %>
           </td>
@@ -55,5 +52,5 @@
       <% }); %>
     </tbody>
   </table>
+</div>
 <% } %>
-<%- include('../partials/foot') %>
