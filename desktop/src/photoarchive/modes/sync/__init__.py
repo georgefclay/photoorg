@@ -110,6 +110,7 @@ class SyncPanel(QWidget):
                 client,
                 working_dir=Path(settings.WORKING_DIR),
                 thumbs_dir=Path(settings.THUMBS_DIR),
+                state_dir=Path(settings.WORKING_DIR).parent / "sync-state",
                 send_face_embeddings=_env_bool("SYNC_FACE_EMBEDDINGS"),
                 files_only_for_grouped=files_only_for_grouped,
                 progress=prog,
@@ -131,6 +132,7 @@ class SyncPanel(QWidget):
         v = QVBoxLayout(w)
         v.addWidget(QLabel(
             "Pull confirmed values + groups + approved contributions from the web. "
+            "Push always pulls groups + confirmed values first. "
             "Contributions land in the CONTRIB_ROOT master root under _incoming/, "
             "then rename into <uploader>/<contribution_id>/ after a manifest check."
         ))
@@ -164,9 +166,12 @@ class SyncPanel(QWidget):
     def _on_pull_confirmed(self) -> None:
         if self._busy(): return
         client = self._client_lazy()
-        state_dir = Path(self._settings_lazy().WORKING_DIR).parent / "sync-state"
+        settings = self._settings_lazy()
+        state_dir = Path(settings.WORKING_DIR).parent / "sync-state"
         def do(status):
-            n = pull_confirmed(client, state_dir)
+            n = pull_confirmed(client, state_dir,
+                               working_dir=Path(settings.WORKING_DIR),
+                               thumbs_dir=Path(settings.THUMBS_DIR))
             status(f"applied {n} facts")
             return {"facts": n}
         self._run_worker(do, log_widget=self._pull_log)

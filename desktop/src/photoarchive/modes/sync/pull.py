@@ -2,6 +2,11 @@
    1. Groups + memberships + photo_groups from the web (last-writer-wins).
    2. Confirmed values (accepted suggestions, fact-set audit rows) into
       the laptop DB, tagged `source='web'` in audit rows for provenance.
+      First, web-born rows (ids >= WEB_ID_FLOOR: people, places,
+      relationships, faces) are copied down with their web ids so the
+      facts that reference them have something to land on (Phase 9
+      fix-up 1). Web-born faces arrive with `embedding=null`,
+      `embedding_stale=true` and a freshly cut face crop.
    3. Approved contributions: fetch bytes into an append-only `contrib`
       master root at CONTRIB_ROOT, then trigger ingest for that root
       with `triage_status` pre-set to `keep` and provenance
@@ -31,6 +36,8 @@ from typing import Callable, Iterable
 from psycopg.rows import dict_row
 
 from ... import db
+from ...id_ranges import is_web_origin
+from ..ingest.paths import resolve_working_path
 from .client import WebSyncClient
 
 log = logging.getLogger(__name__)
@@ -192,7 +199,212 @@ def pull_groups(client: WebSyncClient, state_dir: Path) -> tuple[int, int, int]:
 # 2. Confirmed values pull
 # ---------------------------------------------------------------------------
 
-def pull_confirmed(client: WebSyncClient, state_dir: Path) -> int:
+_PEOPLE_UPSERT = """
+    insert into people (id, given_name, middle_name, surname, maiden_name,
+                        nickname, suffix, birth_year, death_year, notes,
+                        is_deleted, created_at)
+    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, coalesce(%s::timestamptz, now()))
+    on conflict (id) do update set
+      given_name = excluded.given_name, middle_name = excluded.middle_name,
+      surname = excluded.surname, maiden_name = excluded.maiden_name,
+      nickname = excluded.nickname, suffix = excluded.suffix,
+      birth_year = excluded.birth_year, death_year = excluded.death_year,
+      notes = excluded.notes, is_deleted = excluded.is_deleted
+"""
+
+_PLACES_UPSERT = """
+    insert into places (id, name, latitude, longitude, notes, is_deleted, created_at)
+    values (%s,%s,%s,%s,%s,%s, coalesce(%s::timestamptz, now()))
+    on conflict (id) do update set
+      name = excluded.name, latitude = excluded.latitude,
+      longitude = excluded.longitude, notes = excluded.notes,
+      is_deleted = excluded.is_deleted
+"""
+
+_FACES_UPSERT = """
+    insert into faces (id, photo_id, person_id, bbox, embedding, embedding_stale,
+                       source, is_disputed, dispute_note,
+                       review_status, review_note, reviewed_at,
+                       is_deleted, deleted_at, delete_reason, created_at)
+    values (%(id)s, %(photo_id)s, %(person_id)s, %(bbox)s::jsonb, null, true,
+            'human', %(is_disputed)s, %(dispute_note)s,
+            coalesce(%(review_status)s, 'pending'), %(review_note)s, %(reviewed_at)s,
+            %(is_deleted)s, %(deleted_at)s, %(delete_reason)s,
+            coalesce(%(created_at)s::timestamptz, now()))
+    on conflict (id) do update set
+      person_id = excluded.person_id,
+      bbox = excluded.bbox,
+      embedding = case when %(bbox_changed)s then null else faces.embedding end,
+      embedding_stale = case when %(bbox_changed)s then true else faces.embedding_stale end,
+      is_disputed = excluded.is_disputed,
+      dispute_note = excluded.dispute_note,
+      review_status = excluded.review_status,
+      review_note = excluded.review_note,
+      reviewed_at = excluded.reviewed_at,
+      is_deleted = excluded.is_deleted,
+      deleted_at = excluded.deleted_at,
+      delete_reason = excluded.delete_reason
+"""
+
+
+def pull_web_origin(
+    client: WebSyncClient,
+    state_dir: Path,
+    *,
+    working_dir: Path | None = None,
+    thumbs_dir: Path | None = None,
+) -> dict[str, int]:
+    """Copy web-born people / places / relationships / faces (ids at or
+    above WEB_ID_FLOOR) down with their web ids. The web is authoritative
+    for these rows: a desktop edit to one is overwritten by the next pull
+    and never pushed. Face crops go to THUMBS_DIR/faces/ when both
+    directories are given. Returns per-table counts."""
+    state = _load_state(state_dir)
+    data = client.pull_web_origin(state.get("web_origin_cursor"))
+    counts = {"people": 0, "places": 0, "relationships": 0, "faces": 0, "crops": 0}
+    crops: list[tuple[int, int, dict]] = []  # (face_id, photo_id, bbox)
+    with db.connection() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                for p in data.get("people", []):
+                    if not is_web_origin(p.get("id")):
+                        continue
+                    cur.execute(_PEOPLE_UPSERT, (
+                        p["id"], p.get("given_name"), p.get("middle_name"), p.get("surname"),
+                        p.get("maiden_name"), p.get("nickname"), p.get("suffix"),
+                        p.get("birth_year"), p.get("death_year"), p.get("notes"),
+                        bool(p.get("is_deleted")), p.get("created_at"),
+                    ))
+                    counts["people"] += 1
+
+                for pl in data.get("places", []):
+                    if not is_web_origin(pl.get("id")):
+                        continue
+                    # places.name is unique on lower(name): a same-named
+                    # local place keeps its row; log and skip the web one.
+                    cur.execute(
+                        "select id from places where lower(name) = lower(%s) and id <> %s",
+                        (pl["name"], pl["id"]),
+                    )
+                    clash = cur.fetchone()
+                    if clash:
+                        log.warning("pull web_origin: place %s %r clashes with local place %s; skipped",
+                                    pl["id"], pl["name"], clash[0])
+                        continue
+                    cur.execute(_PLACES_UPSERT, (
+                        pl["id"], pl["name"], pl.get("latitude"), pl.get("longitude"),
+                        pl.get("notes"), bool(pl.get("is_deleted")), pl.get("created_at"),
+                    ))
+                    counts["places"] += 1
+
+                for r in data.get("relationships", []):
+                    if not is_web_origin(r.get("id")):
+                        continue
+                    cur.execute(
+                        """
+                        select id from relationships
+                         where person_a_id = %s and person_b_id = %s and type = %s and id <> %s
+                        """,
+                        (r["person_a_id"], r["person_b_id"], r["type"], r["id"]),
+                    )
+                    local = cur.fetchone()
+                    if local:
+                        # Same triple already here under a desktop id.
+                        cur.execute(
+                            "update relationships set confirmed = confirmed or %s where id = %s",
+                            (bool(r.get("confirmed")), local[0]),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            insert into relationships (id, person_a_id, person_b_id, type, confirmed, created_at)
+                            values (%s,%s,%s,%s,%s, coalesce(%s::timestamptz, now()))
+                            on conflict (id) do update set confirmed = excluded.confirmed
+                            """,
+                            (r["id"], r["person_a_id"], r["person_b_id"], r["type"],
+                             bool(r.get("confirmed")), r.get("created_at")),
+                        )
+                    counts["relationships"] += 1
+
+                for f in data.get("faces", []):
+                    if not is_web_origin(f.get("id")):
+                        continue
+                    cur.execute("select 1 from photos where id = %s", (f["photo_id"],))
+                    if cur.fetchone() is None:
+                        log.warning("pull web_origin: face %s on unknown photo %s; skipped",
+                                    f["id"], f["photo_id"])
+                        continue
+                    bbox = f.get("bbox") or {}
+                    cur.execute("select bbox from faces where id = %s", (f["id"],))
+                    existing = cur.fetchone()
+                    bbox_changed = existing is None or (existing[0] or {}) != bbox
+                    cur.execute(_FACES_UPSERT, {
+                        "id": f["id"], "photo_id": f["photo_id"], "person_id": f.get("person_id"),
+                        "bbox": json.dumps(bbox),
+                        "is_disputed": bool(f.get("is_disputed")), "dispute_note": f.get("dispute_note"),
+                        "review_status": f.get("review_status"), "review_note": f.get("review_note"),
+                        "reviewed_at": f.get("reviewed_at"),
+                        "is_deleted": bool(f.get("is_deleted")), "deleted_at": f.get("deleted_at"),
+                        "delete_reason": f.get("delete_reason"), "created_at": f.get("created_at"),
+                        "bbox_changed": bbox_changed,
+                    })
+                    counts["faces"] += 1
+                    if bbox_changed and not f.get("is_deleted"):
+                        crops.append((int(f["id"]), int(f["photo_id"]), bbox))
+                    cur.execute("select refresh_completeness(%s)", (f["photo_id"],))
+            db.audit(conn, actor="web", action="sync.pull.web_origin",
+                     entity_type="sync", entity_id=None,
+                     new_value={k: v for k, v in counts.items() if k != "crops"})
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+        if crops and working_dir is not None and thumbs_dir is not None:
+            counts["crops"] = _write_web_face_crops(conn, crops, working_dir, thumbs_dir)
+
+    state["web_origin_cursor"] = data.get("cursor")
+    _save_state(state_dir, state)
+    return counts
+
+
+def _write_web_face_crops(conn, crops, working_dir: Path, thumbs_dir: Path) -> int:
+    """THUMBS_DIR/faces/{face_id}.jpg for web-born faces — the same crop
+    detect_faces makes. A missing working file logs and skips; the DB
+    side is already committed."""
+    from ...jobs.detect_faces import _write_face_crops
+
+    out_dir = thumbs_dir / "faces"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    by_photo: dict[int, list[tuple[int, dict]]] = {}
+    for face_id, photo_id, bbox in crops:
+        by_photo.setdefault(photo_id, []).append((face_id, bbox))
+    written = 0
+    with conn.cursor() as cur:
+        for photo_id, faces in by_photo.items():
+            cur.execute("select working_path from photos where id = %s", (photo_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                log.warning("pull web_origin: photo %s has no working_path; no face crops", photo_id)
+                continue
+            _write_face_crops(resolve_working_path(working_dir, row[0]), faces, out_dir)
+            written += sum(1 for fid, _ in faces if (out_dir / f"{fid}.jpg").exists())
+    conn.commit()
+    return written
+
+
+def pull_confirmed(
+    client: WebSyncClient,
+    state_dir: Path,
+    *,
+    working_dir: Path | None = None,
+    thumbs_dir: Path | None = None,
+) -> int:
+    # Web-born rows first: a face.assign / photo.place.set / relationship
+    # fact may point at a face, place or person that only exists on the web.
+    pull_web_origin(client, state_dir, working_dir=working_dir, thumbs_dir=thumbs_dir)
+
     state = _load_state(state_dir)
     since = state.get("confirmed_cursor")
     data = client.pull_confirmed(since)
@@ -225,6 +437,16 @@ def pull_confirmed(client: WebSyncClient, state_dir: Path) -> int:
                 elif action == "relationship.confirm":
                     _apply_relationship(conn, new_value)
                     applied += 1
+                elif action == "photo.rescan_wanted" and eid:
+                    _apply_rescan_wanted(conn, eid, new_value)
+                    applied += 1
+                elif action == "suggestion.reject" and eid and not is_web_origin(eid):
+                    _apply_suggestion_status(conn, eid, "rejected", entry)
+            # Desktop-pushed suggestions (ids below the floor) accepted on
+            # the web: mirror the status so the laptop copy stops being pending.
+            for s in data.get("accepted_suggestions", []):
+                if s.get("id") and not is_web_origin(s["id"]):
+                    _apply_suggestion_status(conn, s["id"], "accepted", s)
             db.audit(conn, actor="web", action="sync.pull.confirmed",
                      entity_type="sync", entity_id=None,
                      new_value={"applied": applied})
@@ -283,6 +505,35 @@ def _apply_place(conn, photo_id: int, nv: dict) -> None:
     db.audit(conn, actor="web", action="photo.place.set",
              entity_type="photo", entity_id=photo_id,
              new_value={"place_id": place_id, "source": "web"})
+
+
+def _apply_rescan_wanted(conn, photo_id: int, nv: dict) -> None:
+    wanted = bool(nv.get("rescan_wanted"))
+    with conn.cursor() as cur:
+        cur.execute(
+            "update photos set rescan_wanted = %s where id = %s and rescan_wanted is distinct from %s",
+            (wanted, photo_id, wanted),
+        )
+        changed = cur.rowcount
+    if changed:
+        db.audit(conn, actor="web", action="photo.rescan_wanted",
+                 entity_type="photo", entity_id=photo_id,
+                 new_value={"rescan_wanted": wanted, "source": "web"})
+
+
+def _apply_suggestion_status(conn, suggestion_id: int, status: str, src: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            update suggestions
+               set status = %s,
+                   resolved_at = coalesce(%s::timestamptz, now()),
+                   resolution_note = coalesce(%s, resolution_note)
+             where id = %s and status = 'pending'
+            """,
+            (status, src.get("resolved_at") or src.get("created_at"),
+             src.get("resolution_note"), suggestion_id),
+        )
 
 
 def _apply_no_people(conn, photo_id: int, _: dict) -> None:

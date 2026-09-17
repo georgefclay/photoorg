@@ -120,7 +120,30 @@ Sync (service token):
 - `PUT  /sync/photos/:id/file`, `PUT /sync/photo_backs/:id/file`, `PUT /sync/faces/:id/crop`.
 - Batched (≤500): `photo_masters`, `people`, `person_name_variants`, `relationships`, `places`, `photo_places`, `albums`, `album_photos`, `faces`, `photo_backs`, `suggestions`, `photo_groups`.
 - `GET  /sync/pull/{groups,confirmed,contributions}?since=<ts>`; `GET .../contributions/:id/files/:file_id` (bytes); `POST .../contributions/:id/pulled`.
-- `GET  /sync/status` — per-table counts + last-touch.
+- `GET  /sync/pull/web_origin?since=<ts>` — web-born people / places / relationships / faces (ids ≥ `WEB_ID_FLOOR`).
+- `GET  /sync/status` — per-table counts + last-touch + `id_floor` (sequence positions; `ok` must be true).
+
+### Id ranges (Phase 9 fix-up 1)
+
+Desktop-born rows keep low ids; rows the web creates in `faces`,
+`people`, `suggestions`, `albums`, `places`, `relationships` and
+`person_name_variants` get ids ≥ `WEB_ID_FLOOR` (1e12, from
+`shared/id-ranges.json`). A web database gets the floor from the
+migration `phase-9-fixup-1-web-origin-ids`, which only acts when
+`PHOTOORG_DB_ROLE=web` is set for `npm run migrate:up` (VM:
+`shared/.env`; laptop `photoorg_web`: set it inline). `server.js` checks
+the sequences at start — production exits if any is below the floor.
+
+```
+node tools/id-floor.js           # report
+node tools/id-floor.js --apply   # raise sequences (web DB only; never photoorg on the laptop)
+```
+
+Every `/sync/<table>` batch for those tables is refused with 400 if any
+id is ≥ floor, and the upserts never update a row ≥ floor. Relationships
+and places whose unique key (`(a, b, type)` / `lower(name)`) is already
+held by a web-born row are skipped (`skipped` in the reply). The
+suggestion upsert never re-opens a suggestion resolved on the web.
 
 Visibility rule (implemented in `middleware/visibility.js`): admin sees
 all non-private non-deleted photos including unfiled; contributor
@@ -157,7 +180,7 @@ createdb -U postgres -O photo_user photoorg_test
 Then before each `npm test` run:
 
 ```
-npm run test:setup   # drops public schema, migrates up to head
+npm run test:setup   # drops public schema, migrates up to head (PHOTOORG_DB_ROLE=web)
 npm test             # node --test with supertest
 ```
 

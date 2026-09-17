@@ -31,6 +31,33 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   `GET /sync/status` and refuses when the web reports our own
   `(current_database, system_identifier)`; `allow_shared_db=True` exists
   only for the one test fixture that deliberately shares `photoorg_test`.
+- **Id ranges: desktop below, web at or above `WEB_ID_FLOOR`** (Phase 9
+  fix-up 1). One constant, `shared/id-ranges.json` (`1 000 000 000 000`;
+  every listed table is bigint), read by the shared migration, the web
+  (`services/id-floor.js`) and the desktop (`photoarchive.id_ranges`).
+  Tables: `faces`, `people`, `suggestions`, `albums`, `places`,
+  `relationships`, `person_name_variants`. On a **web** DB the sequences
+  start at the floor — migration `phase-9-fixup-1-web-origin-ids` moves
+  them only when `PHOTOORG_DB_ROLE=web` is in the migrate environment
+  (VM `shared/.env`; inline for the laptop's `photoorg_web`; the web
+  `test:setup`). Never set it for `photoorg`. The web server checks the
+  sequences on start and refuses to run in production below the floor
+  (`node tools/id-floor.js [--apply]`). Sync never crosses the ranges:
+  every `/sync/<table>` push with an id ≥ floor is a 400 and upserts
+  never update a row ≥ floor; the desktop push selects `id < floor`;
+  `/sync/pull/web_origin` copies web-born people / places /
+  relationships / faces down with their web ids (faces: `source='human'`,
+  `embedding=null`, `embedding_stale=true`, crop cut at pull). Web-born
+  rows are web-authoritative — a desktop edit to one is overwritten by
+  the next pull and never pushed. After any VM restore, check
+  `/sync/status` → `id_floor.ok`.
+- **Push pulls first, always.** `push()` runs `pull_groups` +
+  `pull_confirmed` (which runs `pull_web_origin` first) before sending
+  anything, so a web change (rescan flag, accepted suggestion, group
+  removal, web-drawn face) can't be clobbered by a stale push. A web
+  accept/reject of a desktop-pushed suggestion is mirrored onto the
+  laptop's copy, and the web's suggestion upsert never re-opens a
+  resolved suggestion.
 
 ## Database
 - Local DB `photoorg`, role `photo_user`. Test DB `photoorg_test` (separate,

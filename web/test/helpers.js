@@ -10,6 +10,11 @@ process.env.BASE_URL = 'http://127.0.0.1';
 process.env.ADMIN_EMAIL = 'admin@example.com';
 process.env.SERVICE_TOKEN = 'test-service-token';
 delete process.env.POSTMARK_API_KEY; // ensure the in-memory sink is used
+// Never read the real PHOTO_DIR from .env: the laptop's local web copy
+// holds real thumbs (e.g. thumbs/00000001.jpg) and media tests would see them.
+process.env.PHOTO_DIR = require('fs').mkdtempSync(
+  require('path').join(require('os').tmpdir(), 'photoarchive-test-photodir-'),
+);
 
 const assert = require('node:assert/strict');
 const { makePool } = require('../db');

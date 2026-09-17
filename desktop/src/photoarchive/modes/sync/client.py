@@ -110,6 +110,14 @@ class WebSyncClient:
         )
         return _decode(r, "pull/confirmed")
 
+    def pull_web_origin(self, since_iso: str | None) -> dict:
+        params = {"since": since_iso} if since_iso else {}
+        r = self._session.get(
+            f"{self._base}/sync/pull/web_origin",
+            headers=self._hdr(), params=params, timeout=self._timeout,
+        )
+        return _decode(r, "pull/web_origin")
+
     def pull_contributions(self) -> dict:
         r = self._session.get(
             f"{self._base}/sync/pull/contributions",

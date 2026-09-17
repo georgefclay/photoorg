@@ -188,7 +188,7 @@ def test_push_creates_photos_then_resends_zero_files(web_server, tmp_path):
 
     # allow_shared_db: this fixture deliberately runs web + desktop on one
     # test DB (fix-up 11 PM answer 1). Production push refuses that.
-    stats1 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir,
+    stats1 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir, state_dir=tmp_path / "sync-state",
                   send_face_embeddings=False,
                   files_only_for_grouped=False, allow_shared_db=True)
     assert stats1.photos_upserted == 3, stats1
@@ -203,7 +203,7 @@ def test_push_creates_photos_then_resends_zero_files(web_server, tmp_path):
             # The stronger check is stats1.photos_upserted == 3 (only 3 non-priv/junk).
             pass
 
-    stats2 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir,
+    stats2 = push(client, working_dir=working_dir, thumbs_dir=thumbs_dir, state_dir=tmp_path / "sync-state",
                   send_face_embeddings=False,
                   files_only_for_grouped=False, allow_shared_db=True)
     assert stats2.photos_upserted == 3, stats2
@@ -269,7 +269,7 @@ def test_push_files_only_for_grouped_uploads_only_grouped_photos(web_server, tmp
     pdb.init_pool(_S(), min_size=1, max_size=2)  # type: ignore[arg-type]
 
     stats = push(
-        client, working_dir=working_dir, thumbs_dir=thumbs_dir,
+        client, working_dir=working_dir, thumbs_dir=thumbs_dir, state_dir=tmp_path / "sync-state",
         send_face_embeddings=False,
         files_only_for_grouped=True,
         allow_shared_db=True,

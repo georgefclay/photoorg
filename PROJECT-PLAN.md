@@ -196,6 +196,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 8. UptimeRobot monitor on `https://cyberdinosaurs.com/healthz` — no hurry.
 9. Off-site backup of the VM's nightly pg_dump (S3) — no hurry.
 10. Refresh the fail2ban whitelist IP in GC.md if the ISP changes it.
+11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only). Fold into Phase 11 or 12.
 
 ## 6. Risks
 
@@ -203,3 +204,4 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Inference throughput: 5–15 s per image × ~10k keep-set images is days, not a night. Batch runner must be restartable and jobs prioritised (backs first, then faces, then describe, then date).
 - Disk: full-resolution working copies plus derived versions plus thumbnails. Budget 2× the masters' size on the laptop and on the VM.
 - Scanning continues: ingest, triage, and sync are all incremental by design; new batches are just another run.
+- **Id-range partitioning (Phase 9 fix-up 1).** Desktop-born rows use low ids, web-born rows start at `WEB_ID_FLOOR`. George's DBA instinct: this will bite eventually. Known failure modes: a third writer appears (second web instance, a script inserting directly); a DB restore or `setval` resets the VM sequences below the floor; an int4 table gets close to the floor; someone forgets the rule. Mitigations in place: one shared constant, sync refuses to cross the floor in both directions, tests seed overlapping ids. Escape hatch if it bites: add `origin text` + `origin_id` columns and migrate to UUID/ULID primary keys — contained because every cross-machine id passes through the sync layer. Check `/sync/status` sequence positions after any VM restore.

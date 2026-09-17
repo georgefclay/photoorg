@@ -7,6 +7,12 @@
 // suggestions and moderator/admin decisions taken on the web are
 // pulled back by /sync/pull/confirmed.
 //
+// Id ranges (Phase 9 fix-up 1): for every table in shared/id-ranges.json
+// the desktop owns ids < WEB_ID_FLOOR and the web owns ids ≥ it. Every
+// push into one of those tables is refused (400) if any item's id is at
+// or above the floor, and the upserts never update an existing row ≥
+// floor. Web-born rows go back to the desktop via /sync/pull/web_origin.
+//
 // Structure:
 //   POST /sync/photos                  batch (≤200) upsert
 //   PUT  /sync/photos/:id/file         working copy bytes + auto-thumb + records synced_file_version
@@ -28,6 +34,7 @@
 //   POST /sync/photo_groups            batch upsert (soft-delete rows sync as-is)
 //   GET  /sync/pull/groups             groups + memberships + photo_groups since cursor
 //   GET  /sync/pull/confirmed          accepted-suggestion facts + updates since cursor
+//   GET  /sync/pull/web_origin         web-born people/places/relationships/faces since cursor
 //   GET  /sync/pull/contributions      status=approved, pulled=false
 //   GET  /sync/pull/contributions/:id/files/:file_id
 //   POST /sync/pull/contributions/:id/pulled
@@ -41,6 +48,7 @@ const multer = require('multer');
 const { requireService } = require('../middleware/require-service');
 const { audit } = require('../services/audit');
 const storage = require('../services/photo-storage');
+const { WEB_ID_FLOOR, idsAtOrAboveFloor, checkIdFloor } = require('../services/id-floor');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -52,6 +60,17 @@ const META_BATCH  = 500;
 
 function toArr(x) { return Array.isArray(x) ? x : []; }
 function bad(res, msg, code = 400, extra) { return res.status(code).json({ error: msg, ...(extra || {}) }); }
+
+// 400 when a desktop batch carries an id in the web-origin range.
+// Returns true when it responded.
+function refuseWebOriginIds(res, table, rows) {
+  const ids = idsAtOrAboveFloor(rows);
+  if (ids.length === 0) return false;
+  bad(res, `${table}: ids >= ${WEB_ID_FLOOR} are web-origin and cannot be pushed`, 400, {
+    web_id_floor: WEB_ID_FLOOR, ids: ids.slice(0, 20),
+  });
+  return true;
+}
 
 async function auditDesktop(client, action, entityType, entityId, newValue) {
   await audit(client, { actor: 'desktop', action, entityType, entityId, userId: null, newValue });
@@ -273,24 +292,31 @@ module.exports = function syncRoutes({ pool }) {
   // Metadata batch upserts. Each accepts { items: [...] }, batch cap 500.
   // ------------------------------------------------------------------
 
-  function batchUpsert(name, sql, marshal) {
+  // opts.webOriginIds — the table is in shared/id-ranges.json: refuse any
+  //   item id ≥ floor (400, nothing written).
+  // opts.skip(client, row) — async; true to skip an item that would hit a
+  //   non-id unique key already held by a web-origin row.
+  function batchUpsert(name, sql, marshal, opts = {}) {
     return async (req, res, next) => {
       const rows = toArr(req.body && req.body.items);
       if (rows.length > META_BATCH) return bad(res, `too many items (max ${META_BATCH})`);
       if (rows.length === 0) return res.json({ upserted: 0 });
+      if (opts.webOriginIds && refuseWebOriginIds(res, name, rows)) return;
       const client = await pool.connect();
       try {
         await client.query('begin');
         let count = 0;
+        let skipped = 0;
         for (const r of rows) {
           const params = marshal(r);
           if (!params) continue;
+          if (opts.skip && await opts.skip(client, r)) { skipped += 1; continue; }
           await client.query(sql, params);
           count += 1;
         }
-        await auditDesktop(client, `sync.${name}.upsert`, name, null, { count });
+        await auditDesktop(client, `sync.${name}.upsert`, name, null, { count, skipped });
         await client.query('commit');
-        res.json({ upserted: count });
+        res.json({ upserted: count, skipped });
       } catch (err) {
         await client.query('rollback').catch(() => {});
         next(err);
@@ -337,21 +363,25 @@ module.exports = function syncRoutes({ pool }) {
        death_year = excluded.death_year,
        notes = excluded.notes,
        is_deleted = excluded.is_deleted,
-       updated_at = now()`,
+       updated_at = now()
+     where people.id < ${WEB_ID_FLOOR}`,
     (r) => {
       const id = Number(r.id);
       if (!id) return null;
       return [id, r.given_name, r.middle_name, r.surname, r.maiden_name, r.nickname, r.suffix,
               r.birth_year, r.death_year, r.notes, !!r.is_deleted, r.created_at];
     },
+    { webOriginIds: true },
   ));
 
   router.post('/person_name_variants', batchUpsert('person_name_variants',
     `insert into person_name_variants (id, person_id, variant, kind, created_at)
      values ($1,$2,$3,$4,coalesce($5::timestamptz, now()))
      on conflict (id) do update set
-       variant = excluded.variant, kind = excluded.kind`,
+       variant = excluded.variant, kind = excluded.kind
+     where person_name_variants.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.person_id, r.variant, r.kind, r.created_at],
+    { webOriginIds: true },
   ));
 
   router.post('/relationships', batchUpsert('relationships',
@@ -362,8 +392,19 @@ module.exports = function syncRoutes({ pool }) {
        person_b_id = excluded.person_b_id,
        type = excluded.type,
        confirmed = excluded.confirmed,
-       updated_at = now()`,
+       updated_at = now()
+     where relationships.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.person_a_id, r.person_b_id, r.type, !!r.confirmed, r.created_by, r.created_at],
+    {
+      webOriginIds: true,
+      // A web-accepted relationship (id ≥ floor) already holds the
+      // (a, b, type) triple; the desktop's own copy of it is skipped.
+      skip: async (client, r) => (await client.query(
+        `select 1 from relationships
+          where person_a_id = $1 and person_b_id = $2 and type = $3 and id <> $4`,
+        [r.person_a_id, r.person_b_id, r.type, Number(r.id)],
+      )).rows.length > 0,
+    },
   ));
 
   router.post('/places', batchUpsert('places',
@@ -375,8 +416,18 @@ module.exports = function syncRoutes({ pool }) {
        longitude = excluded.longitude,
        notes = excluded.notes,
        is_deleted = excluded.is_deleted,
-       updated_at = now()`,
+       updated_at = now()
+     where places.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.name, r.latitude, r.longitude, r.notes, !!r.is_deleted, r.created_at],
+    {
+      webOriginIds: true,
+      // places.name is unique on lower(name): a same-named place created
+      // on the web wins; the desktop's duplicate is skipped.
+      skip: async (client, r) => (await client.query(
+        `select 1 from places where lower(name) = lower($1) and id <> $2`,
+        [r.name, Number(r.id)],
+      )).rows.length > 0,
+    },
   ));
 
   router.post('/photo_places', batchUpsert('photo_places',
@@ -394,8 +445,10 @@ module.exports = function syncRoutes({ pool }) {
        description = excluded.description,
        source = excluded.source,
        is_deleted = excluded.is_deleted,
-       updated_at = now()`,
+       updated_at = now()
+     where albums.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.name, r.description, r.source || 'import', r.created_by, !!r.is_deleted, r.created_at],
+    { webOriginIds: true },
   ));
 
   router.post('/album_photos', batchUpsert('album_photos',
@@ -414,6 +467,7 @@ module.exports = function syncRoutes({ pool }) {
     const rows = toArr(req.body && req.body.items);
     if (rows.length > META_BATCH) return bad(res, `too many items (max ${META_BATCH})`);
     if (rows.length === 0) return res.json({ upserted: 0 });
+    if (refuseWebOriginIds(res, 'faces', rows)) return;
     const client = await pool.connect();
     try {
       await client.query('begin');
@@ -459,7 +513,8 @@ module.exports = function syncRoutes({ pool }) {
               is_deleted = excluded.is_deleted,
               deleted_at = excluded.deleted_at,
               delete_reason = excluded.delete_reason,
-              updated_at = now()`,
+              updated_at = now()
+            where faces.id < ${WEB_ID_FLOOR}`,
           [
             id, r.photo_id, r.person_id, r.bbox, embedding, r.embedding_model, !!r.embedding_stale,
             r.source || 'ai', !!r.is_disputed, r.disputed_by, r.dispute_note, r.created_by,
@@ -515,16 +570,24 @@ module.exports = function syncRoutes({ pool }) {
        kind = excluded.kind,
        payload = excluded.payload,
        confidence = excluded.confidence,
-       status = excluded.status,
        source = excluded.source,
        model = excluded.model,
-       resolved_by = excluded.resolved_by,
-       resolved_at = excluded.resolved_at,
-       resolution_note = excluded.resolution_note,
-       updated_at = now()`,
+       -- A suggestion resolved on the web (accept / reject) is never
+       -- re-opened by a push of the desktop's still-pending copy.
+       status = case when suggestions.status <> 'pending' and excluded.status = 'pending'
+                     then suggestions.status else excluded.status end,
+       resolved_by = case when suggestions.status <> 'pending' and excluded.status = 'pending'
+                          then suggestions.resolved_by else excluded.resolved_by end,
+       resolved_at = case when suggestions.status <> 'pending' and excluded.status = 'pending'
+                          then suggestions.resolved_at else excluded.resolved_at end,
+       resolution_note = case when suggestions.status <> 'pending' and excluded.status = 'pending'
+                              then suggestions.resolution_note else excluded.resolution_note end,
+       updated_at = now()
+     where suggestions.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.photo_id, r.user_id, r.kind, r.payload,
             r.confidence, r.status || 'pending', r.source || 'ai',
             r.model, r.resolved_by, r.resolved_at, r.resolution_note, r.created_at],
+    { webOriginIds: true },
   ));
 
   // ------------------------------------------------------------------
@@ -631,6 +694,7 @@ module.exports = function syncRoutes({ pool }) {
               'photo.description.set',
               'photo.place.set',
               'photo.has_no_people.set',
+              'photo.rescan_wanted',
               'face.assign',
               'face.dispute.resolve',
               'relationship.confirm',
@@ -664,6 +728,50 @@ module.exports = function syncRoutes({ pool }) {
         fact_audits: factAudits,
         comments_summary: commentSummary,
         likes_counts: likeCounts,
+      });
+    } catch (err) { next(err); }
+  });
+
+  // /sync/pull/web_origin?since=<ts>
+  //   Rows the web created itself (ids ≥ WEB_ID_FLOOR) in the tables the
+  //   desktop mirrors: people, places, relationships, faces — changed
+  //   since the cursor. The desktop inserts them with the same ids
+  //   (web-authoritative) before applying /pull/confirmed facts, so a
+  //   face.assign on a contributor-drawn face has a row to land on.
+  //   Suggestions, albums and name variants born on the web don't travel.
+  router.get('/pull/web_origin', async (req, res, next) => {
+    try {
+      const since = req.query.since ? new Date(req.query.since) : new Date(0);
+      if (isNaN(since.getTime())) return bad(res, 'bad since');
+      // Cursor is taken BEFORE reading so a row written mid-request is
+      // picked up next time rather than skipped.
+      const cursor = (await pool.query(`select now() as t`)).rows[0].t;
+      const people = (await pool.query(
+        `select id, given_name, middle_name, surname, maiden_name, nickname, suffix,
+                birth_year, death_year, notes, is_deleted, created_at, updated_at
+           from people where id >= $1 and updated_at > $2 order by id`, [WEB_ID_FLOOR, since],
+      )).rows;
+      const places = (await pool.query(
+        `select id, name, latitude, longitude, notes, is_deleted, created_at, updated_at
+           from places where id >= $1 and updated_at > $2 order by id`, [WEB_ID_FLOOR, since],
+      )).rows;
+      const relationships = (await pool.query(
+        `select id, person_a_id, person_b_id, type, confirmed, created_at, updated_at
+           from relationships where id >= $1 and updated_at > $2 order by id`, [WEB_ID_FLOOR, since],
+      )).rows;
+      const faces = (await pool.query(
+        `select f.id, f.photo_id, f.person_id, f.bbox, f.source, f.is_disputed, f.dispute_note,
+                f.review_status, f.review_note, f.reviewed_at,
+                f.is_deleted, f.deleted_at, f.delete_reason, f.created_at, f.updated_at
+           from faces f
+           join photos p on p.id = f.photo_id
+          where f.id >= $1 and f.updated_at > $2 and p.is_private = false
+          order by f.id`, [WEB_ID_FLOOR, since],
+      )).rows;
+      res.json({
+        cursor: new Date(cursor).toISOString(),
+        web_id_floor: WEB_ID_FLOOR,
+        people, places, relationships, faces,
       });
     } catch (err) { next(err); }
   });
@@ -796,7 +904,10 @@ module.exports = function syncRoutes({ pool }) {
         union all select 'contributions', count(*)::int, max(updated_at) from contributions
         union all select 'contribution_files', count(*)::int, max(updated_at) from contribution_files
       `)).rows;
-      res.json({ tables: rows, db });
+      // Sequence positions for the web-origin tables — check these after
+      // any VM restore (a restore can put a sequence back below the floor).
+      const idFloor = await checkIdFloor(pool);
+      res.json({ tables: rows, db, id_floor: idFloor });
     } catch (err) { next(err); }
   });
 

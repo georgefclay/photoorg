@@ -35,7 +35,7 @@ function migrate(direction, target) {
   if (target !== undefined) args.push(String(target));
   const result = spawnSync(process.execPath, args, {
     cwd: sharedRoot,
-    env: { ...process.env, DATABASE_URL: TEST_URL },
+    env: { ...process.env, DATABASE_URL: TEST_URL, PHOTOORG_DB_ROLE: 'web' },
     encoding: 'utf8',
     stdio: 'inherit',
   });

@@ -1,0 +1,12 @@
+{
+  "web_id_floor": 1000000000000,
+  "web_origin_tables": [
+    "faces",
+    "people",
+    "suggestions",
+    "albums",
+    "places",
+    "relationships",
+    "person_name_variants"
+  ]
+}

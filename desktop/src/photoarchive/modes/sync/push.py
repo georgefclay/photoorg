@@ -14,6 +14,15 @@ run skips rows whose synced_file_version == file_version AND synced_at
 > photos.updated_at.
 
 Private and junk photos are excluded at the selector.
+
+Pull first, always (Phase 9 fix-up 1): every push starts with
+pull_groups + pull_confirmed (which copies web-born rows down first), so
+a web change — a rescan flag, an accepted suggestion, a moderator's
+group removal — is on the laptop before the laptop's rows go back up
+and can't be clobbered by a stale push.
+
+Web-origin rows (id >= WEB_ID_FLOOR in the tables of
+shared/id-ranges.json) are never pushed; the web would refuse them.
 """
 
 from __future__ import annotations
@@ -27,8 +36,10 @@ from typing import Callable, Iterable
 from psycopg.rows import dict_row
 
 from ... import db
+from ...id_ranges import WEB_ID_FLOOR
 from ..ingest.paths import resolve_working_path
 from .client import WebSyncClient, WebSyncError
+from .pull import pull_confirmed, pull_groups
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +213,7 @@ def push(
     *,
     working_dir: Path,
     thumbs_dir: Path,
+    state_dir: Path,
     send_face_embeddings: bool = False,
     files_only_for_grouped: bool = True,
     progress: Callable[[PushProgress], None] | None = None,
@@ -219,6 +231,9 @@ def push(
     inference jobs on the laptop stop bumping `file_version`; passing
     False casually would burn hours re-pushing bytes that are about to
     change.
+
+    state_dir holds the pull cursors (sync_state.json); the pre-push pull
+    uses and advances them exactly like the Pull tab does.
     """
     stats = PushStats()
 
@@ -228,6 +243,16 @@ def push(
         # `allow_shared_db=True` is an explicit test-only opt-in.
         if not allow_shared_db:
             guard_not_shared_database(conn, client)
+
+        # Pull first, always — see module docstring.
+        if progress:
+            progress(PushProgress(stage="pull", done=0, total=2, detail="groups"))
+        pull_groups(client, state_dir)
+        if progress:
+            progress(PushProgress(stage="pull", done=1, total=2, detail="confirmed + web-origin rows"))
+        stats.tables["pulled_facts"] = pull_confirmed(
+            client, state_dir, working_dir=working_dir, thumbs_dir=thumbs_dir,
+        )
         total_photos = _photos_total(conn)
 
         # -------- photos + files --------------------------------------
@@ -318,6 +343,7 @@ def push(
               from suggestions s
              left join photos p on p.id = s.photo_id
              where s.source in ('ai', 'import')
+               and s.id < %(web_id_floor)s
                and (p.id is null or (p.is_private = false and p.triage_status <> 'junk'))
             """,
             lambda r: {
@@ -358,7 +384,8 @@ def _push_meta_stage(
     progress, should_stop,
 ) -> int:
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql)
+        # Stage queries may filter `id < %(web_id_floor)s` (web-origin rows stay put).
+        cur.execute(sql, {"web_id_floor": WEB_ID_FLOOR})
         rows = cur.fetchall()
     n = 0
     for i in range(0, len(rows), META_BATCH):
@@ -391,8 +418,10 @@ def _push_faces(
               join photos p on p.id = f.photo_id
              where p.is_private = false
                and p.triage_status <> 'junk'
+               and f.id < %s
              order by f.id asc
-            """
+            """,
+            (WEB_ID_FLOOR,),
         )
         rows = cur.fetchall()
     n = 0
@@ -451,6 +480,7 @@ _META_STAGES = [
         select id, given_name, middle_name, surname, maiden_name, nickname, suffix,
                birth_year, death_year, notes, is_deleted, created_at
           from people
+         where id < %(web_id_floor)s
         """,
         lambda r: {
             "id": r["id"], "given_name": r["given_name"], "middle_name": r["middle_name"],
@@ -466,6 +496,7 @@ _META_STAGES = [
         """
         select id, person_id, variant, kind, created_at
           from person_name_variants
+         where id < %(web_id_floor)s
         """,
         lambda r: {
             "id": r["id"], "person_id": r["person_id"], "variant": r["variant"],
@@ -478,6 +509,7 @@ _META_STAGES = [
         """
         select id, person_a_id, person_b_id, type, confirmed, created_by, created_at
           from relationships
+         where id < %(web_id_floor)s
         """,
         lambda r: {
             "id": r["id"], "person_a_id": r["person_a_id"], "person_b_id": r["person_b_id"],
@@ -490,6 +522,7 @@ _META_STAGES = [
         """
         select id, name, latitude, longitude, notes, is_deleted, created_at
           from places
+         where id < %(web_id_floor)s
         """,
         lambda r: {
             "id": r["id"], "name": r["name"], "latitude": r["latitude"],
@@ -512,6 +545,7 @@ _META_STAGES = [
         """
         select id, name, description, source, created_by, is_deleted, created_at
           from albums
+         where id < %(web_id_floor)s
         """,
         lambda r: {
             "id": r["id"], "name": r["name"], "description": r["description"],

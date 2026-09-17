@@ -13,6 +13,17 @@ The rule that governs the whole schema:
 - All parent/child FKs are `RESTRICT`; rows are soft-deleted, never removed. `SET NULL` is used only on user references (`*_by`, actor `user_id`) so a suspended user's contributions retain a null attribution.
 - Every state change writes an `audit_log` row with `previous_value` and `new_value` (JSONB), never in image metadata.
 
+## Id ranges (Phase 9 fix-up 1)
+
+`shared/id-ranges.json` holds `web_id_floor` (1 000 000 000 000) and the
+tables it covers: `faces`, `people`, `suggestions`, `albums`, `places`,
+`relationships`, `person_name_variants` (all `bigserial`). Desktop-born
+ids stay below the floor; on a web DB those sequences start at it.
+Migration `phase-9-fixup-1-web-origin-ids` is gated on
+`PHOTOORG_DB_ROLE=web` and is a recorded no-op otherwise. `users`,
+`groups`, `comments`, `likes`, `contributions` are web-only tables and
+need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
+
 ## Tables
 
 ### Photos and physical files
