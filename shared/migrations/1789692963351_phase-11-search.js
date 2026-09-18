@@ -117,18 +117,24 @@ export const up = (pgm) => {
   // The span a dated photo actually covers, given its precision. A
   // decade-precision photo overlaps every year in its decade; a
   // year-precision photo overlaps its decade. Search matches on overlap.
+  // The implementation takes the enum, because this is what the GiST index
+  // below is built on, and from Postgres 17 a CREATE INDEX evaluates its
+  // expression with search_path restricted to pg_catalog — so the body may
+  // not name anything in the application schema. Everything here is
+  // pg_catalog: make_date, date_trunc, daterange, and enum equality against
+  // an unknown-typed literal.
   pgm.sql(`
-    create or replace function photo_date_range(d date, precision_text text)
+    create or replace function photo_date_range(d date, p date_precision)
       returns daterange language sql immutable parallel safe as $$
       select case
         when d is null then null
-        when precision_text = 'decade' then
+        when p = 'decade' then
           daterange(make_date((extract(year from d)::int / 10) * 10, 1, 1),
                     make_date((extract(year from d)::int / 10) * 10 + 9, 12, 31), '[]')
-        when precision_text = 'year' then
+        when p = 'year' then
           daterange(make_date(extract(year from d)::int, 1, 1),
                     make_date(extract(year from d)::int, 12, 31), '[]')
-        when precision_text = 'month' then
+        when p = 'month' then
           daterange(date_trunc('month', d::timestamp)::date,
                     (date_trunc('month', d::timestamp) + interval '1 month' - interval '1 day')::date, '[]')
         else daterange(d, d, '[]')
@@ -136,13 +142,16 @@ export const up = (pgm) => {
     $$;
   `);
 
-  // An overload taking the enum directly: an index expression may not
-  // contain the enum→text cast (Postgres calls that not-immutable), and
-  // the search query must use the same expression as the index.
+  // The text overload is for payloads, where the precision is whatever a
+  // writer put in the JSON: an unknown word is treated as an exact date
+  // rather than raising.
   pgm.sql(`
-    create or replace function photo_date_range(d date, p date_precision)
+    create or replace function photo_date_range(d date, precision_text text)
       returns daterange language sql immutable parallel safe as $$
-      select photo_date_range(d, p::text)
+      select photo_date_range(d, case
+        when precision_text in ('exact', 'month', 'year', 'decade', 'unknown')
+          then precision_text::date_precision
+        else 'exact'::date_precision end)
     $$;
   `);
 
