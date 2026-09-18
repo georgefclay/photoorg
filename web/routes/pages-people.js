@@ -7,10 +7,10 @@
 const express = require('express');
 const { requireUser } = require('../middleware/require-user');
 const { getScope } = require('../services/scope');
-const { listPhotos, parseFilters } = require('../services/photos');
+const { listPhotos, parseFilters, SORTS } = require('../services/photos');
 const { listPeople, getPerson } = require('../services/people');
 const { listAlbums, getAlbum } = require('../services/albums');
-const { search, hasAnyCriteria } = require('../services/search');
+const { search, SEARCH_SORTS } = require('../services/search');
 const pp = require('../services/people-pages');
 
 const PEOPLE_PAGE = 100;
@@ -29,7 +29,7 @@ function notFound(res, what) {
 }
 
 // Canonical search query string (no cursor) from effective filters.
-function searchQueryString(f) {
+function searchQueryString(f, sort) {
   const q = new URLSearchParams();
   if (f.q) q.set('q', f.q);
   if (f.year_from != null) q.set('year_from', String(f.year_from));
@@ -39,6 +39,8 @@ function searchQueryString(f) {
   if (f.album_id != null) q.set('album_id', String(f.album_id));
   if (f.has_no_date) q.set('has_no_date', '1');
   if (f.has_untagged_faces) q.set('has_untagged_faces', '1');
+  if (f.completeness_below != null) q.set('completeness_below', String(f.completeness_below));
+  if (sort && sort !== 'relevance') q.set('sort', sort);
   return q;
 }
 
@@ -243,24 +245,27 @@ module.exports = function peoplePageRoutes({ pool }) {
         else notes.push(`We couldn't find a place called “${placeText}”, so that filter was left out.`);
       }
 
-      const qs = searchQueryString(f);
-      const query = Object.fromEntries(qs);
+      const sort = SEARCH_SORTS.includes(String(raw.sort)) ? String(raw.sort) : 'relevance';
       const cursor = raw.cursor ? String(raw.cursor) : null;
       const [result, albums] = await Promise.all([
-        search(pool, req.user, query, { scope, cursor, limit: PHOTO_PAGE }),
+        search(pool, req.user, {
+          q: f.q || '', filters: f, sort, cursor, limit: PHOTO_PAGE, scope, withCount: true,
+        }),
         listAlbums(pool, req.user, scope),
       ]);
-      const any = hasAnyCriteria(result.filters);
-      const photoCount = any && !cursor
-        ? await pp.countPhotos(pool, req.user, { filters: result.filters, scope })
-        : null;
+      if (result.ignored.length) {
+        notes.push(`Ignored: ${result.ignored.map((t) => `“${t}”`).join(', ')}.`);
+      }
+      if (result.truncated) notes.push('Only the first few words were used.');
+
+      const qs = searchQueryString(f, sort);
       const api = new URLSearchParams(qs);
       api.set('limit', String(PHOTO_PAGE));
       const more = new URLSearchParams(qs);
       if (result.photos.next) more.set('cursor', result.photos.next);
       const advanced = f.year_from != null || f.year_to != null || f.person_id != null
         || f.place_id != null || f.album_id != null || f.has_no_date || f.has_untagged_faces
-        || Boolean(personText) || Boolean(placeText);
+        || f.completeness_below != null || Boolean(personText) || Boolean(placeText);
       res.render('search', {
         searchQuery: f.q || '',
         filters: f,
@@ -271,15 +276,18 @@ module.exports = function peoplePageRoutes({ pool }) {
         placeText: place ? place.name : placeText,
         albums,
         result,
-        any,
+        sort,
+        sorts: SEARCH_SORTS.map((k) => ({ key: k, label: k === 'relevance' ? 'Best match' : SORTS[k].label })),
+        any: !result.empty,
         advanced,
         notes,
-        photoCount,
+        photoCount: result.count,
         groupScope: scope,
         isContinuation: Boolean(cursor),
         startUrl: `/search?${qs}`,
         apiUrl: `/api/search?${api}`,
         moreUrl: `/search?${more}`,
+        sortUrl: (key) => { const s = new URLSearchParams(qs); s.set('sort', key); return `/search?${s}`; },
         suggestionUrl: (pid) => { const s = new URLSearchParams(qs); s.set('person_id', String(pid)); return `/search?${s}`; },
       });
     } catch (err) { next(err); }

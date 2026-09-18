@@ -44,7 +44,7 @@ test('every page renders with empty data (no people, albums or photos)', async (
   assert.match(r.text, /No albums yet/);
   r = await a.get('/search');
   assert.equal(r.status, 200);
-  assert.match(r.text, /Search by name, words on the back of a photo, a place/);
+  assert.match(r.text, /Search by name \(a nickname or a maiden name works\)/);
   r = await a.get('/search?q=nothing');
   assert.equal(r.status, 200);
   assert.match(r.text, /No photos matched/);
@@ -291,11 +291,10 @@ test('/search: people and photos by name, words, years and filters', async () =>
   assert.match(r.text, /from=b\.recent/);
   assert.match(r.text, /1 photo found/);
 
-  // Words: seeded search_tsv ("Easter picnic at the lake").
+  // Words: the seeded description ("Easter picnic at the lake").
   r = await alice.get('/search?q=picnic');
   assert.deepEqual(tileIds(r.text), [w.photos.clay1]);
-  // Back transcription via the real tsv builder.
-  await pool.query(`select refresh_photo_tsv($1)`, [w.photos.clay1]);
+  // Back transcription, indexed by the Phase 11 triggers.
   r = await alice.get('/search?q=Easter');
   assert.deepEqual(tileIds(r.text), [w.photos.clay1]);
 

@@ -4,6 +4,7 @@ page.wide = true;
 page.css.push('/css/people.css');
 page.js.push('/js/grid.js', '/js/autocomplete.js', '/js/search.js');
 const people = result.people || [];
+const places = result.places || [];
 const photos = result.photos;
 const scoped = groupScope && groupScope.kind !== 'all';
 %>
@@ -14,7 +15,7 @@ const scoped = groupScope && groupScope.kind !== 'all';
 <form class="search-page-form" method="get" action="/search" role="search" data-search-form>
   <div class="people-find">
     <label class="sr-only" for="search-q">Search for</label>
-    <input id="search-q" type="search" name="q" value="<%= filters.q || '' %>" placeholder="A name, a place, words on the back…" autocomplete="off">
+    <input id="search-q" type="search" name="q" value="<%= filters.q || '' %>" placeholder="A name, a place, a year, words on the back…" autocomplete="off">
     <button class="btn" type="submit">Search</button>
   </div>
 
@@ -54,6 +55,16 @@ const scoped = groupScope && groupScope.kind !== 'all';
         </select>
       </div>
 
+      <div class="field">
+        <label for="search-complete">Less complete than</label>
+        <select id="search-complete" name="completeness_below">
+          <option value="">Any</option>
+          <% [25, 50, 60, 75].forEach(function (n) { %>
+            <option value="<%= n %>" <%= filters.completeness_below === n ? 'selected' : '' %>><%= n %>%</option>
+          <% }) %>
+        </select>
+      </div>
+
       <div>
         <label class="check"><input type="checkbox" name="has_no_date" value="1" <%= filters.has_no_date ? 'checked' : '' %>> No date yet</label>
         <label class="check"><input type="checkbox" name="has_untagged_faces" value="1" <%= filters.has_untagged_faces ? 'checked' : '' %>> Has faces nobody has tagged</label>
@@ -74,27 +85,35 @@ const scoped = groupScope && groupScope.kind !== 'all';
 <% } %>
 
 <% if (!any) { %>
-  <%- include('partials/empty', { icon: 'search', title: 'What are you looking for?', text: 'Search by name, words on the back of a photo, a place, a year… or use “More ways to search” above.' }) %>
+  <%- include('partials/empty', { icon: 'search', title: 'What are you looking for?', text: 'Search by name (a nickname or a maiden name works), by a year or a decade, by a place, or by words written on the back of a photo.' }) %>
 <% } else { %>
-  <% if (people.length) { %>
+  <% if (people.length || places.length) { %>
     <section class="search-people" aria-labelledby="search-people-h">
-      <h2 id="search-people-h">People</h2>
+      <h2 id="search-people-h">Matches by name</h2>
       <ul class="chips">
         <% people.forEach(function (p) { %>
-          <li><a class="chip" href="/people/<%= p.id %>"><%- include('partials/icon', { name: 'people' }) %> <%= p.display_name %><% if (p.birth_year || p.death_year) { %> <span class="rel-note">(<%= fmt.yearSpan(p.birth_year, p.death_year) %>)</span><% } %></a></li>
+          <li><a class="chip" href="/people/<%= p.id %>"><%- include('partials/icon', { name: 'people' }) %> <%= p.name %><% if (p.why) { %> <span class="rel-note">(<%= p.why %>)</span><% } %></a></li>
+        <% }) %>
+        <% places.forEach(function (p) { %>
+          <li><a class="chip" href="/search?place_id=<%= p.id %>"><%= p.name %><% if (p.why) { %> <span class="rel-note">(<%= p.why %>)</span><% } %></a></li>
         <% }) %>
       </ul>
     </section>
   <% } %>
 
   <section aria-labelledby="search-photos-h">
-    <h2 id="search-photos-h">Photos</h2>
+    <div class="list-head">
+      <h2 id="search-photos-h">Photos</h2>
+      <nav class="sort-bar" aria-label="Sort results">
+        <% sorts.forEach(function (s) { %><a class="chip<%= s.key === sort ? ' current' : '' %>" href="<%= sortUrl(s.key) %>" <%= s.key === sort ? 'aria-current="true"' : '' %>><%= s.label %></a><% }) %>
+      </nav>
+    </div>
     <% if (photoCount != null) { %><p class="muted small-text"><%= fmt.plural(photoCount, 'photo') %> found<% if (scoped) { %> in <%= groupScope.label %><% } %></p><% } %>
     <% if (isContinuation) { %><p class="small-text"><a href="<%= startUrl %>">Back to the start</a></p><% } %>
     <% if (!photos.items.length) { %>
-      <%- include('partials/empty', { icon: 'search', title: 'No photos matched', text: scoped ? `Nothing in ${groupScope.label} matched. Try fewer filters, or switch the group at the top.` : 'Try fewer words or filters, or a different spelling.', action: { href: '/search', label: 'Start a new search' } }) %>
+      <%- include('partials/empty', { icon: 'search', title: 'No photos matched', text: scoped ? `Nothing in ${groupScope.label} matched. Try fewer words, or switch the group at the top.` : 'Try fewer words, a different spelling, or just a year.', action: { href: '/search', label: 'Start a new search' } }) %>
     <% } else { %>
-      <%- include('partials/photo-grid', { items: photos.items, from: 'b.recent', apiUrl: apiUrl, next: photos.next, moreUrl: moreUrl, label: 'Search results' }) %>
+      <%- include('partials/result-grid', { items: photos.items, from: 'b.recent', apiUrl: apiUrl, next: photos.next, moreUrl: moreUrl, label: 'Search results' }) %>
     <% } %>
   </section>
 <% } %>

@@ -165,7 +165,7 @@ visibility and the header group scope are applied.
 | `/photos/:id?from=<list key>` | visible photo | Detail: image, date (confirmed / guess), people, place, physical ref, like, comments, back + transcription, Tag a face, Suggest a date / place, Rescan wanted (admin), groups strip (admin / moderator), prev/next + swipe. 404 when not visible. |
 | `/people`, `/people/:id` | signed in | People list; person page with names, relationships, photos, "Suggest a relationship" (`POST /people/:id/relationships` no-JS fallback). |
 | `/albums`, `/albums/:id` | signed in | Read-only albums. |
-| `/search` | signed in | Small search: words, years, person, place, album, no date, untagged faces. |
+| `/search` | signed in | Search (Phase 11): names incl. nicknames / maiden names / misspellings, tolerant dates, places, full text, with a plain-words reason per hit. Filters: person, place, album, years, `no_date`, `untagged_faces`, `completeness_below`. |
 | `/who-is-this` | signed in | Faces marked `unknown`, "I know who this is". |
 | `/upload`, `/upload/mine` | signed in | Uploader (camera / gallery / folder / drag-drop, sha pre-check, per-file progress, retry, resume); own contributions with status. |
 | `/admin` | admin, moderator | Dashboard (moderators: their uploads + groups). |
@@ -183,6 +183,58 @@ is admin-only.
 
 Media added: `/media/display/:id` (≤ 1600 px), on-demand face crops,
 `/media/contrib/:file_id` — all cached under `PHOTO_DIR` (see CLAUDE.md).
+
+## Phase 11 search
+
+One box, one service (`services/search.js` + the pure parser
+`services/search-parse.js`). The query is split into terms; each term is
+resolved to every layer it could mean; layers are OR-ed inside a term and
+AND-ed across terms; each hit carries `why` — the sentence the result card
+shows ("Margaret \"Peggy\" Clay (“Peggy” is a nickname) is in this
+photo", "Back of print: “…”", "Date estimated 1958–1965").
+
+Layers and the score a term contributes: person exact 100 / variant 95 /
+nickname 90, place 88, description + tagged names (tsv weight A) 80,
+confirmed date 75, back transcription (B) 70, comment / album / place /
+pending description / date evidence (C) 60, unconfirmed date 55, person
+phonetic 50, place phonetic 45, folder / filename / print locator (D) 40,
+pending date suggestion 35. A suggested (not accepted) person or place
+scores 30 below the fact; a date whose own span sits inside the asked-for
+range scores 8 above one that merely overlaps it.
+
+A phonetic hit needs the two spellings to look alike as well as sound
+alike: `similarity >= 0.3`, or a shared first four letters on names of five
+letters or more (Katherine/Kathryn scores 0.29 on trigrams). Schmitt finds
+Schmidt; Smith stays out.
+
+Sorts: `relevance` (default) then the Browse sorts, all with composite
+`value~id` cursors — relevance pages on `(score, id)`.
+
+Query-string vocabulary, shared with Browse: `q`, `sort`, `year_from`,
+`year_to`, `person_id`, `place_id`, `album_id`, `no_date` (alias
+`has_no_date`), `untagged_faces` (alias `has_untagged_faces`),
+`unknown_faces`, `completeness_below=<0-100>` (wins over
+`low_completeness=1`), `scope`, `cursor`, `limit`. Anything unparseable is
+ignored — an empty search, a search with no hits and an unknown filter
+value are all 200 pages (the fail2ban rule in CLAUDE.md).
+
+JSON: `GET /api/search` (adds `understood`, `ignored`, `people`, `places`,
+`count` with `?count=1`, `took_ms`, and `why` per photo) and
+`GET /api/search/autocomplete?q=` for the header box (people and places
+that have at least one photo this user can open).
+
+Two tables do the work, both maintained by SQL triggers in
+`shared/migrations/*phase-11-search*` — no Node or Python knows about
+them: `photo_search(photo_id, tsv, names, updated_at)` and
+`person_search(person_id, token, kind, phonetic)`. Rebuild either with
+`select rebuild_search()`. Re-running `shared/seed/nicknames.js` rebuilds
+`person_search` itself.
+
+**Fresh clone:** the migration creates `pg_trgm`, `fuzzystrmatch` and
+`unaccent`. All three are trusted extensions, so the app's role can create
+them if it has CREATE on the database; if it doesn't, the migration stops
+and prints the exact `psql -d <db> -c "create extension if not exists
+unaccent"` for a superuser to run.
 
 ## Local web database (laptop)
 

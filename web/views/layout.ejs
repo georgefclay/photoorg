@@ -42,7 +42,7 @@
       </form>
       <form class="search-form" method="get" action="/search" role="search">
         <label class="sr-only" for="site-search">Search</label>
-        <input id="site-search" type="search" name="q" placeholder="Search names and words" value="<%= locals.searchQuery || '' %>" autocomplete="off">
+        <input id="site-search" type="search" name="q" placeholder="Names, years, words on the back" value="<%= locals.searchQuery || '' %>" autocomplete="off">
         <button type="submit" class="icon-btn" aria-label="Search"><%- include('partials/icon', { name: 'search' }) %></button>
       </form>
     </div>
@@ -81,7 +81,13 @@
 </nav>
 <% } %>
 <script src="/js/site.js" defer></script>
-<% page.js.forEach(function (src) { %><script src="<%= src %>" defer></script>
+<%
+// The header search box is on every page, so its two helpers load
+// everywhere; the Set keeps a page that also asks for autocomplete.js
+// from loading it twice.
+const scripts = [...new Set(user ? ['/js/autocomplete.js', '/js/header-search.js', ...page.js] : page.js)];
+%>
+<% scripts.forEach(function (src) { %><script src="<%= src %>" defer></script>
 <% }) %>
 </body>
 </html>

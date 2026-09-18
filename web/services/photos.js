@@ -32,9 +32,16 @@ function visibleSql(user, params, alias = 'p') {
   return photoVisibleSql(user, { alias, paramIndex: params.length });
 }
 
-// Query-string → filter object. Unknown keys are ignored.
+// Query-string → filter object. Unknown keys and unparseable values are
+// ignored (never a 4xx — see the fail2ban rule in CLAUDE.md).
+//
+// One vocabulary for Browse and Search: the search spec's shorter names
+// (`no_date`, `untagged_faces`, `completeness_below=<n>`) are accepted as
+// aliases of the Browse names, and `completeness_below` wins over the
+// blunt `low_completeness` flag.
 function parseFilters(q = {}) {
   const text = String(q.q || '').trim().slice(0, 200);
+  const below = toInt(q.completeness_below);
   return {
     year: toInt(q.year),
     decade: toInt(q.decade),
@@ -43,9 +50,10 @@ function parseFilters(q = {}) {
     person_id: toInt(q.person_id),
     place_id: toInt(q.place_id),
     album_id: toInt(q.album_id),
-    has_no_date: truthy(q.has_no_date),
-    has_untagged_faces: truthy(q.has_untagged_faces),
-    has_unknown_faces: truthy(q.has_unknown_faces),
+    has_no_date: truthy(q.has_no_date) || truthy(q.no_date),
+    has_untagged_faces: truthy(q.has_untagged_faces) || truthy(q.untagged_faces),
+    has_unknown_faces: truthy(q.has_unknown_faces) || truthy(q.unknown_faces),
+    completeness_below: below != null && below >= 0 && below <= 100 ? below : null,
     low_completeness: truthy(q.low_completeness),
     q: text || null,
   };
@@ -83,19 +91,20 @@ function filtersSql(f, params, a = 'p') {
     c.push(`exists (select 1 from faces f where f.photo_id = ${a}.id and f.person_id is null
                       and f.is_deleted = false and f.review_status = 'unknown')`);
   }
-  if (f.low_completeness) c.push(`${a}.completeness_score < 60`);
+  if (f.completeness_below != null) {
+    params.push(f.completeness_below);
+    c.push(`${a}.completeness_score < $${params.length}`);
+  } else if (f.low_completeness) {
+    c.push(`${a}.completeness_score < 60`);
+  }
+  // Free text as a *filter* (Browse, and the person/place/album grids).
+  // The ranked, multi-layer version is services/search.js; this is the
+  // same vector, used as a yes/no.
   if (f.q) {
     params.push(f.q);
-    const qi = params.length;
-    params.push(`%${f.q.replace(/[%_\\]/g, (m) => `\\${m}`)}%`);
-    const li = params.length;
-    c.push(`(${a}.search_tsv @@ websearch_to_tsquery('english', $${qi})
-             or ${a}.scan_batch ilike $${li} or ${a}.source_folder ilike $${li}
-             or exists (select 1 from faces f join people pe on pe.id = f.person_id
-                         where f.photo_id = ${a}.id and f.is_deleted = false and f.is_disputed = false
-                           and (pe.display_name ilike $${li}
-                                or exists (select 1 from person_name_variants v
-                                            where v.person_id = pe.id and v.variant ilike $${li}))))`);
+    c.push(`exists (select 1 from photo_search ps
+                     where ps.photo_id = ${a}.id
+                       and ps.tsv @@ plainto_tsquery('english', search_text($${params.length})))`);
   }
   return c;
 }
@@ -432,6 +441,6 @@ async function attentionCounts(pool, user, scope) {
 }
 
 module.exports = {
-  SORTS, BROWSE_SORTS, parseFilters, filtersSql, visibleSql, listPhotos,
+  SORTS, BROWSE_SORTS, parseFilters, filtersSql, visibleSql, listPhotos, rowToItem,
   parseListKey, listKeyForBrowse, photoNeighbours, getPhotoDetail, attentionCounts,
 };

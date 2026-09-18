@@ -165,11 +165,12 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Mobile-first layout throughout; desktop widens the same pages.
 - Plain JS only: grid loader, drag-to-tag box, name autocomplete, date parser.
 - Accept when: George tags a face and suggests a date from a phone in under 10 seconds each; admin accepts both and the photo's completeness rises.
-- **Built 2026-09-17** (phone verification by George pending). Browse + needs-attention strip, photo detail with tagger / date field / like / comments / back, people, albums (read-only), small search, Who is this?, upload + My uploads, full admin area with moderator subset; header group switcher. Shared query layer in `web/services/`; composite keyset cursors; `/media/display` and on-demand face crops; back images now pushed. Web tests 127, desktop 201 + 1 skipped. Lighthouse (mobile, local): accessibility 100, CLS 0 on `/` and a photo page.
+- **Done 2026-09-17** — George's phone and desktop pass accepted. During the pass fail2ban banned George's IP (admin Browse requested thumbnails for metadata-only photos → 20 × 404); fixed with 200 placeholder images and `has_file` in lists (rule now in CLAUDE.md). Browse + needs-attention strip, photo detail with tagger / date field / like / comments / back, people, albums (read-only), small search, Who is this?, upload + My uploads, full admin area with moderator subset; header group switcher. Shared query layer in `web/services/`; composite keyset cursors; `/media/display` and on-demand face crops; back images now pushed. Web tests 127, desktop 201 + 1 skipped. Lighthouse (mobile, local): accessibility 100, CLS 0 on `/` and a photo page.
 
 ### Phase 11 — Search (Claude Code, Windows) — spec §9
 - Names incl. maiden and suffix (Jr./II/III — `people.suffix`), nickname table, Metaphone, full text over comments/descriptions/transcriptions, tolerant date ranges, places, attention filters.
 - Accept when: "Peggy" finds Margaret; "Schmitt" finds Schmidt; a decade-only photo appears in its decade search.
+- **Built 2026-09-17** (George's five searches pending). Two trigger-maintained tables (`photo_search`, `person_search`) plus `place_aliases`, all SQL so desktop and VM stay correct with no app code; Phase 1's `search_tsv` / `search_key` dropped. One parser (`services/search-parse.js`), one service (`services/search.js`): terms AND-ed, layers OR-ed, `why` per hit, relevance + Browse sorts on composite cursors, header autocomplete. Phonetic hits guarded by trigram ≥ 0.3 or a shared 4-letter prefix. Deferred-sweep escape hatch for bulk writers (off by default; trigger cost measured at 4.8 s / 10 000 rows). Web tests 148.
 
 ### Phase 12 — Download and export (Claude Code, Windows) — spec §11
 - Background zip job with emailed link; Year/Month tree rendered from the DB; Unsorted; optional People tree; backs and private excluded.
@@ -199,8 +200,8 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 8. UptimeRobot monitor on `https://cyberdinosaurs.com/healthz` — no hurry.
 9. Off-site backup of the VM's nightly pg_dump (S3) — no hurry.
 10. Refresh the fail2ban whitelist IP in GC.md if the ISP changes it.
-11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only). Fold into Phase 11 or 12.
-12. Phase 10 phone checklist (12 steps, in Code's 2026-09-17 report) — George, off Wi-Fi.
+11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only) — Phase 12. `place_aliases` (Phase 11) needs the same treatment: no sync route yet.
+12. ~~Phase 10 phone checklist~~ — done 2026-09-17.
 13. Check `photos.orientation` on the desktop: Code found no photo with orientation set in the 408-photo local copy. Either the sync omits the column or the fix-up 6 backfill missed. `select orientation, count(*) from photos group by 1` on `photoorg`; phone photos should show 6/8 as well as 1.
 
 ## 6. Risks

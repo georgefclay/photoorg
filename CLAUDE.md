@@ -587,6 +587,48 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   uses `search_path=<name>,public`. `test/page-helpers.js` `seedWorld()`
   is the shared fixture. Tests always use a temp `PHOTO_DIR`.
 
+## Search (Phase 11 onwards)
+- **The index is pure SQL.** `photo_search` and `person_search` are
+  maintained by statement-level triggers with transition tables
+  (`shared/migrations/*phase-11-search*`), so the desktop and the VM stay
+  correct without any Python or Node knowing they exist. Never write to
+  them from app code; call `refresh_photo_search(id)` /
+  `refresh_person_search(id)`, or `rebuild_search()` for everything.
+  Phase 1's `photos.search_tsv` / `people.search_key` are **gone**.
+- **An update trigger may not carry a column list when it uses transition
+  tables** (Postgres refuses). Each update function therefore joins `ot`
+  and `nt` and refreshes only the rows whose searchable text actually
+  changed — that is what keeps a sync push (file_version) or a jobs run
+  (embeddings) from rewriting thousands of rows.
+- **Bulk writers may defer**: `set local photoarchive.search_defer = on`
+  queues ids in `photo_search_dirty` / `person_search_dirty`; `select
+  sweep_search()` drains them. Off by default (measured: ~4.8 s of trigger
+  work per 10 000 rows). If you turn it on, sweeping is not optional.
+- **One query parser** (`web/services/search-parse.js`, pure) and one
+  search service (`web/services/search.js`). Terms are AND-ed; the layers
+  inside a term (person, place, date, free text) are OR-ed; the score is
+  the sum of the best layer per term, and every hit carries `why` — the
+  sentence the card shows. Dates reuse `services/date-parse.js`.
+- **A phonetic hit must look alike as well as sound alike**: same
+  `dmetaphone`, plus `similarity >= 0.3` **or** a shared first four letters
+  on names of 5+ letters (Katherine/Kathryn score 0.29 on trigrams).
+  Schmitt finds Schmidt; Smith never does. Phonetic hits rank below exact,
+  variant and nickname hits, always.
+- **A pending suggestion is searchable but never outranks a fact.** The
+  newest pending `description` is in the vector at weight C (George will
+  never hand-accept 12k descriptions) and a pending `date` suggestion is
+  labelled "estimated"; a suggested person or place scores 30 below the
+  tagged fact.
+- **Search obeys the same visibility and scope SQL as every other list.**
+  A non-member never sees a hit, a count, or an autocomplete suggestion
+  for a photo they can't open — including the header box, which only
+  offers people and places with at least one photo the user can open.
+- **Empty search, no hits, unknown filter value: all 200.** Unparseable
+  filter values are ignored, never a 4xx (the fail2ban rule above). Slow
+  queries (> 300 ms) log `[search] slow …` with the parsed form.
+- **`place_aliases` has no sync route yet** — like album edits, pulling it
+  back to the desktop is an open item for Phase 12.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site

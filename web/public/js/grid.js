@@ -36,7 +36,16 @@
     return `<li><a class="tile" href="${href}"><img src="${esc(p.thumb_url)}" alt="${esc(alt)}" width="320" height="320" loading="lazy" decoding="async">${badge}</a></li>`;
   }
 
+  // Must match views/partials/result-grid.ejs (search hits carry a
+  // plain-words reason under the thumbnail).
+  function resultHtml(p, from) {
+    const inner = tileHtml(p, from).replace(/^<li>/, '').replace(/<\/li>$/, '');
+    const why = (p.why || []).map((w) => `<li class="why-${esc(w.kind)}">${esc(w.text)}</li>`).join('');
+    return `<li class="result">${inner}${why ? `<ul class="why">${why}</ul>` : ''}</li>`;
+  }
+
   function setup(grid) {
+    const withWhy = grid.dataset.why === '1';
     const more = grid.parentElement.querySelector('[data-grid-more]');
     if (!more) return;
     const api = grid.dataset.api;
@@ -61,7 +70,8 @@
         const url = `${api}${api.includes('?') ? '&' : '?'}cursor=${encodeURIComponent(next)}`;
         const data = await window.CD.api(url);
         skeletons.forEach((li) => li.remove());
-        grid.insertAdjacentHTML('beforeend', (data.items || data.photos || []).map((p) => tileHtml(p, from)).join(''));
+        const render = withWhy ? resultHtml : tileHtml;
+        grid.insertAdjacentHTML('beforeend', (data.items || data.photos || []).map((p) => render(p, from)).join(''));
         next = data.next;
         if (!next) {
           more.parentElement.remove();
@@ -91,4 +101,5 @@
   document.querySelectorAll('[data-grid]').forEach(setup);
   window.CD = window.CD || {};
   window.CD.tileHtml = tileHtml;
+  window.CD.resultHtml = resultHtml;
 })();

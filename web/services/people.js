@@ -2,6 +2,7 @@
 // them is visibility- and scope-filtered.
 
 const { visibleSql } = require('./photos');
+const { resolvePeopleIds } = require('./search');
 const { scopeSql } = require('./scope');
 const { encodeCursor, decodeCursor, keysetWhere, orderBy } = require('./cursor');
 
@@ -16,11 +17,18 @@ async function listPeople(pool, user, { q = '', cursor = null, limit = 100, scop
   const inner = ['pe.is_deleted = false'];
   const text = String(q || '').trim().slice(0, 100);
   if (text) {
+    // The typed text as a substring, OR anything the Phase 11 name
+    // resolver says this is: a nickname, a curated variant, a
+    // misspelling. "Peggy" finds Margaret on this page too.
+    const ids = await resolvePeopleIds(pool, text);
     params.push(`%${text.toLowerCase().replace(/[%_\\]/g, (m) => `\\${m}`)}%`);
     const i = params.length;
+    params.push(ids);
+    const idsP = params.length;
     inner.push(`(lower(pe.display_name) like $${i}
                  or lower(coalesce(pe.maiden_name, '')) like $${i}
                  or lower(coalesce(pe.nickname, '')) like $${i}
+                 or pe.id = any($${idsP}::bigint[])
                  or exists (select 1 from person_name_variants v
                              where v.person_id = pe.id and lower(v.variant) like $${i}))`);
   }
@@ -74,13 +82,34 @@ async function listPeople(pool, user, { q = '', cursor = null, limit = 100, scop
   return { items, next: rows.length === lim ? encodeCursor(last.sort_name, last.id) : null };
 }
 
-// Prefix on any name field first, then trigram on display_name (≤ 10).
+// Prefix on any name field first, then the Phase 11 name index
+// (nicknames both ways, curated variants, guarded phonetics), then
+// trigram on display_name (≤ 10). "Peggy" offers Margaret here too.
 async function autocompletePeople(pool, q) {
   const text = String(q || '').trim().slice(0, 100);
   if (!text) return [];
   const prefix = `${text.toLowerCase().replace(/[%_\\]/g, '')}%`;
   const { rows } = await pool.query(
-    `with prefix_hits as (
+    `with tok as (
+       select search_token($2) as tok,
+              case when search_token($2) !~ ' ' then dmetaphone(search_token($2)) end as ph
+     ),
+     token_hits as (
+       select p.id, p.display_name, p.birth_year, p.death_year,
+              min(case ps.kind when 'exact' then 0.1 when 'variant' then 0.2
+                               when 'nickname' then 0.3 else 0.6 end)::float as rank
+         from person_search ps
+         join people p on p.id = ps.person_id and p.is_deleted = false
+        cross join tok
+        where ps.token = tok.tok
+           or (tok.ph is not null and ps.phonetic = tok.ph
+               and (similarity(ps.token, tok.tok) >= 0.3
+                    or (length(ps.token) >= 5 and length(tok.tok) >= 5
+                        and left(ps.token, 4) = left(tok.tok, 4))))
+        group by p.id, p.display_name, p.birth_year, p.death_year
+        limit 10
+     ),
+     prefix_hits as (
        select p.id, p.display_name, p.birth_year, p.death_year, 0::float as rank
          from people p
         where p.is_deleted = false
@@ -102,7 +131,9 @@ async function autocompletePeople(pool, q) {
         limit 10
      )
      select id, display_name, birth_year, death_year, min(rank) as rank
-       from (select * from prefix_hits union all select * from trigram_hits) u
+       from (select * from prefix_hits
+             union all select * from token_hits
+             union all select * from trigram_hits) u
       group by id, display_name, birth_year, death_year
       order by min(rank) asc, display_name asc
       limit 10`,

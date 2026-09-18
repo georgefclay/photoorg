@@ -1,0 +1,26 @@
+<%
+// Search results: the same tiles as Browse, each with the plain-words
+// reason it matched. Keep in sync with resultHtml() in public/js/grid.js.
+//
+// Params: items, from, apiUrl, next, moreUrl, label
+%>
+<ul class="result-grid" data-grid data-why="1" data-api="<%= apiUrl %>" data-next="<%= next || '' %>" data-from="<%= from %>" aria-label="<%= locals.label || 'Search results' %>">
+<% items.forEach(function (p) {
+     const d = fmt.captureDate(p);
+     const alt = d.text ? `Photo, ${d.guess ? 'about ' : ''}${d.text}` : 'Undated photo';
+     const hasFile = p.has_file !== false;
+%><li class="result">
+  <a class="tile<%= hasFile ? '' : ' missing' %>" href="/photos/<%= p.id %>?from=<%= encodeURIComponent(from) %>"<% if (!hasFile) { %> aria-label="<%= alt %> (no image yet)"<% } %>><% if (hasFile) { %><img src="<%= p.thumb_url %>" alt="<%= alt %>" width="320" height="320" loading="lazy" decoding="async"><% } %><% if (p.like_count) { %><span class="tile-badge"><%- include('icon', { name: 'heart' }) %><%= p.like_count %></span><% } %></a>
+  <% if ((p.why || []).length) { %>
+  <ul class="why">
+    <% p.why.forEach(function (w) { %><li class="why-<%= w.kind %>"><%= w.text %></li><% }) %>
+  </ul>
+  <% } %>
+</li>
+<% }) %>
+</ul>
+<% if (next) { %>
+<div class="grid-more">
+  <a class="btn secondary" data-grid-more href="<%= moreUrl %>">More photos</a>
+</div>
+<% } %>

@@ -89,3 +89,20 @@
 .search-people { margin-bottom: var(--s4); }
 .search-people .chips { list-style: none; margin: 0; padding: 0; }
 .search-suggest { list-style: none; margin: 0 0 var(--s4); padding: 0; }
+
+/* ---- search results --------------------------------------------------- */
+.list-head { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); align-items: baseline; justify-content: space-between; }
+.sort-bar { display: flex; flex-wrap: wrap; gap: var(--s2); list-style: none; margin: 0; padding: 0; }
+.sort-bar .chip.current { background: var(--accent-soft); color: var(--accent-strong); border-color: transparent; font-weight: 600; }
+.result-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: var(--s3); grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (min-width: 560px) { .result-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 900px) { .result-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); } }
+.result-grid .result { position: relative; display: flex; flex-direction: column; gap: var(--s2); }
+.result .why { list-style: none; margin: 0; padding: 0; font-size: 0.8125rem; line-height: 1.35; color: var(--fg-mute); }
+.result .why li { overflow-wrap: anywhere; }
+.result .why li + li { margin-top: 2px; }
+.result .why-person { color: var(--accent-strong); }
+.result .why-date { color: var(--fg); }

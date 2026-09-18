@@ -14,10 +14,11 @@ const helpers = require('./helpers');
 const { pool, insertUser } = helpers;
 
 const ALL_TABLES = `
+  photo_search, person_search, photo_search_dirty, person_search_dirty, place_aliases,
   photo_groups, group_members, groups,
   audit_log, magic_links, access_requests, "session",
   contribution_files, contributions,
-  suggestions, likes, comments, faces, photo_backs,
+  nickname_dictionary, suggestions, likes, comments, faces, photo_backs,
   album_photos, albums, photo_places, places, relationships,
   person_name_variants, people, photo_masters, photos, users`;
 
@@ -117,6 +118,15 @@ async function seedWorld() {
   await addToGroup(boots1, boots);
   await addToGroup(priv, clay);
 
+  // A slice of the real nickname seed, inserted BEFORE the people so the
+  // Phase 11 trigger builds their nickname tokens.
+  await pool.query(
+    `insert into nickname_dictionary (canonical, variant) values
+       ('Margaret', 'Peggy'), ('Margaret', 'Peg'), ('Margaret', 'Meg'),
+       ('Charles', 'Chuck'), ('Charles', 'Charlie'),
+       ('Katherine', 'Kate'), ('Katherine', 'Cathy'), ('Katherine', 'Kathy')
+     on conflict do nothing`,
+  );
   const peggy = await insertPerson({ given_name: 'Margaret', surname: 'Clay', nickname: 'Peggy', birth_year: 1931 });
   const chuck = await insertPerson({ given_name: 'Charles', surname: 'Clay', nickname: 'Chuck' });
   const faces = {
@@ -141,7 +151,8 @@ async function seedWorld() {
      values ($1, $2, 'date', '{"date":"1962-04-01","precision":"month","evidence":"April 1962"}', 'human', 'pending')
      returning id`, [clay1, alice.id],
   )).rows[0].id);
-  await pool.query(`update photos set search_tsv = to_tsvector('english', 'Easter picnic at the lake') where id = $1`, [clay1]).catch(() => {});
+  // Real text, so the Phase 11 triggers build a real search row for it.
+  await pool.query(`update photos set description_ai = 'Easter picnic at the lake' where id = $1`, [clay1]);
   await pool.query(`select refresh_completeness(id) from photos`);
 
   return {

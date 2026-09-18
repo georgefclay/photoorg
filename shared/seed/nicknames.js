@@ -52,6 +52,18 @@ async function main() {
     const { rows: [{ count }] } =
       await client.query('select count(*)::int as count from nickname_dictionary');
     console.log(`Inserted ${inserted} new rows. Table now holds ${count}.`);
+
+    // person_search (Phase 11) is built from this dictionary, and nothing
+    // triggers off nickname_dictionary itself — rebuilding here is what
+    // makes a re-seed visible to search.
+    const { rows: [fn] } = await client.query(
+      `select to_regproc('rebuild_person_search') is not null as have`,
+    );
+    if (fn.have) {
+      const { rows: [{ rebuild_person_search: tokens }] } =
+        await client.query('select rebuild_person_search()');
+      console.log(`Rebuilt person_search: ${tokens} name tokens.`);
+    }
   } catch (err) {
     await client.query('rollback');
     throw err;
