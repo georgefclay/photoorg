@@ -219,6 +219,29 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
   `cast_gains` shares the selection; `grey_world_magnitude` is recorded on every
   proposal for comparison. "Answer 13 described a measurement, not a mandate —
   over-correction is exactly what the review was for."
+- **Fix-up 1 (2026-09-27)** — George's verdict on the re-analysed sheet: #27
+  better, #166 much better, **#8 worse**, **#19 a white shirt turned blue**. The
+  neutral-mid-tone estimator was still fooled by prints whose *subject* is one
+  colour. A cast now has to show on the **paper** as well: the highlights (top
+  3 % of luminance, blown pixels excluded) must point the same way as the
+  mid-tones and be at least half their magnitude, the correction uses the
+  smaller of the two readings, gains are blended toward 1.0 by
+  `CLEANUP_CAST_STRENGTH=0.7`, and a white-point guard scales anything back
+  that would push the paper further from neutral. Colour proposals on batches
+  1-5: 270 -> 168 -> **50** (49 rejected as "highlights cast the other way",
+  25 as "paper white is clean").
+  Diagnosis that drove it - **#8**: mid-tone cast 10.3 but paper white
+  242.8/239.0/238.0, magnitude 1.5, ratio 0.14 -> the room was warm, the print
+  was not. **#19**: mid-tone 1.7, highlights 3.1 pointing the *other* way
+  (already slightly blue at 233/233/239) -> correcting it is what turned the
+  shirt blue. Worth recording: **#19 already had no colour op** under the
+  neutral estimator (1.7 is below the 6.0 threshold; its only op was
+  `crop 23%`) - the blue shirt was on the *first*, grey-world sheet, which read
+  15.3 and proposed R-18 G+4 B+19. Two mechanisms now agree on it rather than
+  one having been needed; **#8** is the case fix-up 1 was genuinely required
+  for. The highlight rule also overturned my own reading of **#106**, which I
+  had called a genuine cast on both earlier estimators (43.3 -> 33.5): its
+  paper white measures 3.0, so it was scene colour too.
 
 ### Phase 8 — Web: auth (Claude Code, Windows) — spec §7
 - Express + EJS. Request-access form → admin email with Approve/Deny (POST-confirm pages, 72 h tokens) → magic links → long-lived HTTP-only session in Postgres.

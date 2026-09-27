@@ -164,6 +164,155 @@ def measure_cast(
             "neutral_pct": neutral_pct}
 
 
+# Fix-up 1: the print's near-white highlights. An age cast stains the paper,
+# so it is visible here; a scene colour is not.
+DEFAULT_HIGHLIGHT_PCT = 97.0
+# A blown pixel carries no colour information — it is clipped, not white.
+HIGHLIGHT_BLOWN = 250
+MIN_HIGHLIGHT_SAMPLE = 50
+
+
+def highlight_pixels(
+    arr: np.ndarray,
+    mask: np.ndarray | None = None,
+    *,
+    pct: float = DEFAULT_HIGHLIGHT_PCT,
+) -> np.ndarray:
+    """Boolean mask of the print's near-white pixels: the top (100 - pct) per
+    cent of luminance inside `mask`, with blown pixels dropped.
+
+    Blown pixels are excluded because a clipped channel has lost its colour —
+    including them would drag every measurement toward neutral and hide the
+    very cast we are looking for.
+    """
+    u8 = as_uint8(arr)
+    grey = u8 if u8.ndim == 2 else cv2.cvtColor(u8, cv2.COLOR_RGB2GRAY)
+    sel = np.ones(grey.shape, dtype=bool) if mask is None else mask.copy()
+    if u8.ndim == 3:
+        sel &= (u8.max(axis=2) < HIGHLIGHT_BLOWN)
+    else:
+        sel &= (u8 < HIGHLIGHT_BLOWN)
+    if int(sel.sum()) < MIN_HIGHLIGHT_SAMPLE:
+        return sel
+    cut = float(np.percentile(grey[sel], pct))
+    bright = sel & (grey >= cut)
+    return bright if int(bright.sum()) >= MIN_HIGHLIGHT_SAMPLE else sel
+
+
+def measure_highlight_cast(
+    arr: np.ndarray,
+    mask: np.ndarray | None = None,
+    *,
+    pct: float = DEFAULT_HIGHLIGHT_PCT,
+) -> dict:
+    """The cast on the print's paper white, as a Lab a/b offset.
+
+    Same shape as `measure_cast`, plus the mean RGB of the sample, which the
+    white-point guard needs to test a candidate correction.
+    """
+    u8 = as_uint8(arr)
+    if u8.ndim == 2:
+        return {"a": 0.0, "b": 0.0, "magnitude": 0.0, "n": 0, "rgb": None}
+    sel = highlight_pixels(arr, mask, pct=pct)
+    n = int(sel.sum())
+    if n < MIN_HIGHLIGHT_SAMPLE:
+        return {"a": 0.0, "b": 0.0, "magnitude": 0.0, "n": n, "rgb": None}
+    lab = cv2.cvtColor(u8, cv2.COLOR_RGB2LAB)
+    a = float(lab[..., 1][sel].mean()) - 128.0
+    b = float(lab[..., 2][sel].mean()) - 128.0
+    rgb = [float(u8[..., i][sel].mean()) for i in range(3)]
+    return {"a": round(a, 3), "b": round(b, 3),
+            "magnitude": round(float(np.hypot(a, b)), 3), "n": n,
+            "rgb": [round(v, 2) for v in rgb]}
+
+
+def casts_agree(
+    mid: dict, highlight: dict, *, min_ratio: float,
+) -> tuple[bool, str, float]:
+    """Do the mid-tones and the paper white tell the same story?
+
+    An age cast shifts both, in the same direction. A scene colour shifts the
+    mid-tones and leaves the paper alone. Returns (agree, why, ratio).
+
+    "Same direction" is the two Lab a/b vectors being less than 90 degrees
+    apart — opposing vectors mean the highlights are cast the *other* way,
+    which no amount of magnitude should excuse.
+    """
+    m = float(mid.get("magnitude") or 0.0)
+    h = float(highlight.get("magnitude") or 0.0)
+    if m <= 0.0:
+        return False, "no mid-tone cast", 0.0
+    ratio = h / m
+    if int(highlight.get("n") or 0) < MIN_HIGHLIGHT_SAMPLE:
+        return False, "no usable highlight sample", ratio
+    dot = (float(mid["a"]) * float(highlight["a"])
+           + float(mid["b"]) * float(highlight["b"]))
+    if dot <= 0:
+        return False, "highlights cast the other way", ratio
+    if ratio < min_ratio:
+        return False, "paper white is clean", ratio
+    return True, "mid-tones and paper white agree", ratio
+
+
+def blend_gains(gains: dict, strength: float) -> dict:
+    """Pull gains toward 1.0 by `strength` (1.0 = full correction).
+
+    Under-correcting is the restorer's default: a print that keeps some of its
+    warmth still reads as an old photo, while one pushed past neutral reads as
+    wrong at a glance.
+    """
+    out = {}
+    for key in ("r", "g", "b"):
+        g = float(gains.get(key, 1.0))
+        out[key] = round(1.0 + (g - 1.0) * float(strength), 4)
+    return out
+
+
+def _cast_of_rgb(rgb: list[float] | tuple[float, ...]) -> float:
+    """Lab a/b distance from neutral of a single RGB triple."""
+    px = np.clip(np.array(rgb, dtype=np.float32), 0, 255).astype(np.uint8)
+    lab = cv2.cvtColor(px.reshape(1, 1, 3), cv2.COLOR_RGB2LAB)[0, 0]
+    return float(np.hypot(float(lab[1]) - 128.0, float(lab[2]) - 128.0))
+
+
+def guard_white_point(
+    gains: dict, highlight_rgb: list[float] | None, *, steps: int = 20,
+) -> tuple[dict, dict]:
+    """Never push the paper white further from neutral than it started.
+
+    Applies the candidate gains to the highlight sample and, if the corrected
+    white is worse than the original, scales them back toward 1.0 until it is
+    not. This is what stops a warm-mid-tone/neutral-white print — a white
+    shirt under a warm lamp — coming out blue.
+
+    Returns (gains, details).
+    """
+    if not highlight_rgb:
+        return gains, {"applied": False, "reason": "no highlight sample"}
+    before = _cast_of_rgb(highlight_rgb)
+    full = [highlight_rgb[i] * float(gains.get(k, 1.0))
+            for i, k in enumerate(("r", "g", "b"))]
+    after = _cast_of_rgb(full)
+    if after <= before + 1e-6:
+        return gains, {"applied": False, "white_before": round(before, 3),
+                       "white_after": round(after, 3)}
+    for step in range(steps, -1, -1):
+        scale = step / float(steps)
+        trial = blend_gains(gains, scale)
+        moved = [highlight_rgb[i] * float(trial.get(k, 1.0))
+                 for i, k in enumerate(("r", "g", "b"))]
+        if _cast_of_rgb(moved) <= before + 1e-6:
+            return trial, {"applied": True, "scale": round(scale, 3),
+                           "white_before": round(before, 3),
+                           "white_after": round(_cast_of_rgb(moved), 3),
+                           "white_unguarded": round(after, 3)}
+    neutral = {"r": 1.0, "g": 1.0, "b": 1.0}
+    return neutral, {"applied": True, "scale": 0.0,
+                     "white_before": round(before, 3),
+                     "white_after": round(before, 3),
+                     "white_unguarded": round(after, 3)}
+
+
 def measure_chroma(arr: np.ndarray, mask: np.ndarray | None = None) -> dict:
     """p95 Lab chroma and the circular variance of hue — how we tell a B&W
     or sepia print (a deliberate look) from an age cast (a defect)."""

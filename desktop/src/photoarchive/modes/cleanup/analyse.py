@@ -237,9 +237,13 @@ def measure_tone(
     # really the scene's own colour.
     cast["grey_world_magnitude"] = ops.measure_cast(
         rgb, mask, neutral_pct=100.0)["magnitude"]
+    # Fix-up 1: the paper white. An age cast stains it; a scene colour does
+    # not, so this is the second opinion the correction has to satisfy.
+    highlight = ops.measure_highlight_cast(
+        rgb, mask, pct=settings.CLEANUP_CAST_HIGHLIGHT_PCT)
     levels = ops.measure_levels(rgb, mask)
-    return {"chroma": chroma, "cast": cast, "levels": levels,
-            "mask_px": int(mask.sum())}
+    return {"chroma": chroma, "cast": cast, "highlight": highlight,
+            "levels": levels, "mask_px": int(mask.sum())}
 
 
 # --------------------------------------------------------------------------
@@ -418,18 +422,69 @@ def analyse_photo(
         measured["colour_skipped"] = "sepia"
     elif cast["magnitude"] >= settings.CLEANUP_CAST_MIN:
         interior = _interior_mask(top.rect, rgb.shape[:2])
-        gains = ops.cast_gains(cast, rgb, interior,
-                               neutral_pct=settings.CLEANUP_CAST_NEUTRAL_PCT)
-        if any(abs(gains[k] - 1.0) > 0.005 for k in ("r", "g", "b")):
-            measured["ops"]["colour"] = {
-                "cast_a": cast["a"], "cast_b": cast["b"],
-                "magnitude": cast["magnitude"],
-                "grey_world_magnitude": cast.get("grey_world_magnitude"),
-                "neutral_pct": settings.CLEANUP_CAST_NEUTRAL_PCT,
-                "sample_px": cast.get("n"),
-                "gains": gains,
-                "rgb_shift": ops.rgb_shift_from_gains(gains),
-            }
+        highlight = tone["highlight"]
+
+        # Rule 1: the paper white has to tell the same story as the mid-tones.
+        # An age cast stains the whole print; a lawn, a warm lamp or a beige
+        # wall shifts the mid-tones and leaves the paper alone.
+        agree, why, ratio = ops.casts_agree(
+            cast, highlight,
+            min_ratio=settings.CLEANUP_CAST_HIGHLIGHT_AGREE,
+        )
+        measured["cast_agreement"] = {
+            "agree": bool(agree), "why": why, "ratio": round(ratio, 4),
+            "mid": {"a": cast["a"], "b": cast["b"],
+                    "magnitude": cast["magnitude"]},
+            "highlight": {"a": highlight["a"], "b": highlight["b"],
+                          "magnitude": highlight["magnitude"],
+                          "n": highlight["n"], "rgb": highlight["rgb"]},
+        }
+        if not agree:
+            measured["colour_skipped"] = "scene_colour"
+            measured["colour_skipped_why"] = why
+        else:
+            # Rule 1, second half: correct by the *smaller* of the two
+            # readings, so the more cautious measurement wins.
+            use_highlight = highlight["magnitude"] < cast["magnitude"]
+            if use_highlight:
+                gains = ops.cast_gains(
+                    highlight, rgb,
+                    ops.highlight_pixels(
+                        rgb, interior,
+                        pct=settings.CLEANUP_CAST_HIGHLIGHT_PCT),
+                    neutral_pct=100.0)
+            else:
+                gains = ops.cast_gains(
+                    cast, rgb, interior,
+                    neutral_pct=settings.CLEANUP_CAST_NEUTRAL_PCT)
+            raw_gains = dict(gains)
+
+            # Rule 2: under-correct on purpose.
+            gains = ops.blend_gains(gains, settings.CLEANUP_CAST_STRENGTH)
+            blended_gains = dict(gains)
+
+            # Rule 3: never push the paper white further from neutral.
+            gains, guard = ops.guard_white_point(gains, highlight["rgb"])
+
+            if any(abs(gains[k] - 1.0) > 0.005 for k in ("r", "g", "b")):
+                measured["ops"]["colour"] = {
+                    "cast_a": cast["a"], "cast_b": cast["b"],
+                    "magnitude": cast["magnitude"],
+                    "grey_world_magnitude": cast.get("grey_world_magnitude"),
+                    "highlight_magnitude": highlight["magnitude"],
+                    "highlight_ratio": round(ratio, 4),
+                    "measured_on": "highlight" if use_highlight else "mid-tone",
+                    "neutral_pct": settings.CLEANUP_CAST_NEUTRAL_PCT,
+                    "sample_px": cast.get("n"),
+                    "gains_raw": raw_gains,
+                    "strength": settings.CLEANUP_CAST_STRENGTH,
+                    "gains_blended": blended_gains,
+                    "white_point_guard": guard,
+                    "gains": gains,
+                    "rgb_shift": ops.rgb_shift_from_gains(gains),
+                }
+            else:
+                measured["colour_skipped"] = "correction_too_small"
     else:
         measured["colour_skipped"] = "below_threshold"
 
@@ -492,4 +547,8 @@ def caption_for(operations: dict[str, Any]) -> str:
     skipped = (operations or {}).get("colour_skipped")
     if skipped in ("mono", "sepia"):
         bits.append(f"colour skipped ({skipped})")
+    elif skipped == "scene_colour":
+        why = (operations or {}).get("colour_skipped_why")
+        bits.append("scene colour, not a cast"
+                    + (f" ({why})" if why else ""))
     return ", ".join(bits) if bits else "nothing to change"

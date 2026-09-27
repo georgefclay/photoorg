@@ -72,3 +72,15 @@ GO.
 2. **Commit now**, before the full run: `Phase 7: scan cleanup`. The full-scope run is data, not code; it doesn't need to gate the commit. Push.
 3. **Full-scope run waits for George's OK** on the re-analysed contact sheet. When he gives it: close Firefox, run `run_cleanup --report` for the remaining scope, and report counts/timing as per step 3. Nothing is accepted by that run — it only proposes.
 4. Leave photos 169 and 120 accepted; they're the step-4 evidence and reversible.
+
+## Phase 7 fix-up 1 — colour cast still over-corrects on some prints
+
+George's verdict on the re-analysed batch 1–5 sheet: #27 slightly better, #166 a big improvement, #1/#2 barely different, **#8 worse**, **#19 a white shirt turned blue** (the correction removed a warm cast that wasn't there, or removed more than there was). The estimator is better but still not safe enough to trust unseen. Two changes, both principled rather than threshold-fiddling:
+
+1. **Highlights must agree with mid-tones.** An age cast shifts the whole print — paper white included. A scene colour (lawn, warm lamp, a beige wall) shifts mid-tones only. So measure the cast twice: on the neutral mid-tones (as now) and on the print's near-white highlights (top ~3% luminance inside the inset rect, excluding blown pixels). Correct only when both agree in direction and the highlight cast is at least `CLEANUP_CAST_HIGHLIGHT_AGREE` (default 0.5) of the mid-tone cast; the applied correction is the **smaller** of the two. If they disagree, no colour op, caption "scene colour, not a cast". Record both measurements on the proposal.
+2. **Partial correction by default.** `CLEANUP_CAST_STRENGTH` (default 0.7): gains are blended toward 1.0 by that factor. Restorers under-correct on purpose; a print that keeps 30% of its warmth looks like an old photo, one that's pushed past neutral looks wrong instantly. 1.0 restores today's behaviour.
+3. **White-point guard.** After computing gains, check the highlight sample: if the corrected highlights land further from neutral than they started, scale the gains back until they don't (this is what would have saved #19's shirt).
+
+Diagnose **#8 and #19** first and paste: mid-tone cast vector, highlight cast vector, gains before/after each rule. Then re-analyse batches 1–5, regenerate the sheet, and report how many colour proposals survive (was ~168). Tests: warm-lamp scene on neutral paper → no op; uniformly yellowed print → op with highlights and mid-tones agreeing; #19-shaped case (warm mid-tones, neutral whites) → no op; strength 0.7 blends gains as specified.
+
+Commit: `Phase 7 fix-up 1: colour cast needs highlight agreement, partial strength, white-point guard`.

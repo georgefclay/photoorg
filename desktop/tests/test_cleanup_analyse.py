@@ -399,6 +399,155 @@ def test_the_gains_are_measured_on_the_same_pixels_as_the_cast(tmp_path):
     assert g40 != g100, "the gains must follow the selection, not ignore it"
 
 
+# --- Fix-up 1: highlight agreement, partial strength, white-point guard ----
+
+def _scene_with_paper(
+    scene_tint, paper_rgb, w=900, h=700, seed=21, tint_paper=False,
+) -> np.ndarray:
+    """A print with real hue variety, a tint over the *scene*, and a paper
+    white of its own.
+
+    Those are the two knobs fix-up 1 turns on: a scene colour tints the
+    mid-tones and leaves the paper alone; an age cast (`tint_paper=True`)
+    stains both. The base carries sky, foliage and a red coat, so the print is
+    not mistaken for sepia — a single-hue image is a deliberate look, and the
+    colour op skips it for that reason instead of this one.
+    """
+    rng = np.random.default_rng(seed)
+    arr = _print_content(w, h, seed=seed).astype(np.float32)
+    scene = slice(int(h * 0.16), int(h * 0.80))
+    arr[scene] *= np.array(scene_tint, np.float32)
+    # Paper-white areas: a top band and a corner patch, so the top-3 %
+    # highlight sample lands on paper rather than on a bright subject.
+    paper = np.array(paper_rgb, np.float32)
+    arr[0:int(h * 0.16), :] = paper
+    arr[int(h * 0.80):, int(w * 0.60):] = paper
+    if tint_paper:
+        tint = np.array(scene_tint, np.float32)
+        arr[0:int(h * 0.16), :] *= tint
+        arr[int(h * 0.80):, int(w * 0.60):] *= tint
+    arr += rng.normal(0.0, 3.0, size=arr.shape).astype(np.float32)
+    return np.clip(arr, 0, 255).astype(np.uint8)
+
+
+def test_a_warm_lamp_scene_on_neutral_paper_gets_no_colour_op(tmp_path):
+    """#8's shape: warm mid-tones, clean paper white. The scene is warm, the
+    print is not cast, so nothing should be corrected."""
+    content = _scene_with_paper(scene_tint=(1.18, 1.0, 0.72),   # warm lamplight
+                                paper_rgb=(243, 242, 241))      # neutral paper
+    path, _ = make_scan(tmp_path / "warm_lamp.jpg", content=content, angle=0.0)
+    result = _analyse(tmp_path, path)
+
+    assert "colour" not in result.operations["ops"], result.operations["ops"]
+    assert result.operations["colour_skipped"] == "scene_colour"
+    agreement = result.operations["cast_agreement"]
+    assert agreement["agree"] is False
+    assert agreement["highlight"]["magnitude"] < agreement["mid"]["magnitude"]
+    assert "scene colour, not a cast" in analyse_mod.caption_for(result.operations)
+
+
+def test_a_uniformly_yellowed_print_is_corrected(tmp_path):
+    """A real age cast stains the paper too, so both readings agree and the op
+    survives."""
+    # Yellow the whole print, paper included — that is what age does.
+    yellowed = _scene_with_paper(scene_tint=(1.16, 1.0, 0.66),
+                                 paper_rgb=(245, 244, 242),
+                                 tint_paper=True)
+    path, _ = make_scan(tmp_path / "yellowed.jpg", content=yellowed, angle=0.0)
+    result = _analyse(tmp_path, path)
+
+    agreement = result.operations.get("cast_agreement")
+    assert agreement is not None, result.operations
+    assert agreement["agree"] is True, agreement
+    colour = result.operations["ops"].get("colour")
+    assert colour is not None, result.operations
+    # Corrected the other way: less blue removed, i.e. blue gain above 1.
+    assert colour["gains"]["b"] > 1.0
+    assert colour["gains"]["r"] < 1.0
+
+
+def test_a_white_shirt_under_warm_light_keeps_its_whites(tmp_path):
+    """#19's shape: warm mid-tones, neutral-to-cool whites. Correcting the
+    mid-tones would push the shirt blue, so no op fires."""
+    content = _scene_with_paper(scene_tint=(1.16, 1.0, 0.76),   # warm mid-tones
+                                paper_rgb=(236, 238, 243))      # slightly cool
+    path, _ = make_scan(tmp_path / "white_shirt.jpg", content=content, angle=0.0)
+    result = _analyse(tmp_path, path)
+
+    assert "colour" not in result.operations["ops"], result.operations["ops"]
+    assert result.operations["colour_skipped"] == "scene_colour"
+
+
+def test_strength_blends_the_gains_toward_one():
+    from photoarchive.modes.cleanup import ops as ops_mod
+    gains = {"r": 0.80, "g": 1.00, "b": 1.30}
+    blended = ops_mod.blend_gains(gains, 0.7)
+    assert blended["r"] == pytest.approx(1.0 + (0.80 - 1.0) * 0.7)   # 0.86
+    assert blended["g"] == pytest.approx(1.0)
+    assert blended["b"] == pytest.approx(1.0 + (1.30 - 1.0) * 0.7)   # 1.21
+    assert ops_mod.blend_gains(gains, 1.0) == pytest.approx(gains)
+    assert ops_mod.blend_gains(gains, 0.0001)["r"] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_the_white_point_guard_scales_a_correction_that_would_worsen_whites():
+    """The rule that would have saved #19's shirt: if the corrected paper white
+    lands further from neutral than it started, scale back until it doesn't."""
+    from photoarchive.modes.cleanup import ops as ops_mod
+    cool_white = [232.0, 236.0, 244.0]          # already slightly blue
+    warming = {"r": 0.85, "g": 1.0, "b": 1.25}  # would push it further blue
+    before = ops_mod._cast_of_rgb(cool_white)
+    unguarded = ops_mod._cast_of_rgb(
+        [cool_white[i] * warming[k] for i, k in enumerate(("r", "g", "b"))])
+    assert unguarded > before, "fixture must actually make the white worse"
+
+    guarded, detail = ops_mod.guard_white_point(warming, cool_white)
+    assert detail["applied"] is True
+    after = ops_mod._cast_of_rgb(
+        [cool_white[i] * guarded[k] for i, k in enumerate(("r", "g", "b"))])
+    assert after <= before + 1e-6
+    for k in ("r", "g", "b"):
+        assert abs(guarded[k] - 1.0) <= abs(warming[k] - 1.0)
+
+
+def test_the_white_point_guard_leaves_a_good_correction_alone():
+    from photoarchive.modes.cleanup import ops as ops_mod
+    yellow_white = [246.0, 240.0, 214.0]        # genuinely yellowed paper
+    fixing = {"r": 0.97, "g": 1.0, "b": 1.12}
+    guarded, detail = ops_mod.guard_white_point(fixing, yellow_white)
+    assert detail["applied"] is False
+    assert guarded == fixing
+
+
+def test_casts_agree_requires_direction_and_magnitude():
+    from photoarchive.modes.cleanup import ops as ops_mod
+    mid = {"a": 10.0, "b": 6.0, "magnitude": 11.66, "n": 10_000}
+    same = {"a": 6.0, "b": 4.0, "magnitude": 7.21, "n": 10_000}
+    tiny = {"a": 1.0, "b": 0.6, "magnitude": 1.17, "n": 10_000}
+    opposed = {"a": -8.0, "b": -5.0, "magnitude": 9.43, "n": 10_000}
+    starved = {"a": 6.0, "b": 4.0, "magnitude": 7.21, "n": 3}
+
+    ok, why, ratio = ops_mod.casts_agree(mid, same, min_ratio=0.5)
+    assert ok and ratio > 0.5
+    ok, why, _ = ops_mod.casts_agree(mid, tiny, min_ratio=0.5)
+    assert not ok and "paper white is clean" in why
+    ok, why, _ = ops_mod.casts_agree(mid, opposed, min_ratio=0.5)
+    assert not ok and "other way" in why
+    ok, why, _ = ops_mod.casts_agree(mid, starved, min_ratio=0.5)
+    assert not ok and "highlight sample" in why
+
+
+def test_highlight_pixels_exclude_blown_whites():
+    from photoarchive.modes.cleanup import ops as ops_mod
+    arr = np.full((100, 100, 3), 120, np.uint8)
+    arr[0:20, :] = 255          # blown — no colour information left
+    arr[20:40, :] = [244, 238, 222]   # real paper white, slightly yellow
+    sel = ops_mod.highlight_pixels(arr)
+    assert not sel[0:20, :].any(), "blown pixels must not be sampled"
+    assert sel[20:40, :].any()
+    cast = ops_mod.measure_highlight_cast(arr)
+    assert cast["magnitude"] > 2.0, "the yellow paper should register"
+
+
 def test_a_black_and_white_print_gets_no_colour_op(tmp_path):
     grey = _print_content(900, 700)
     grey = np.repeat(grey.mean(axis=2, keepdims=True), 3, axis=2).astype(np.uint8)

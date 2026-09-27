@@ -111,6 +111,21 @@ class Settings(BaseSettings):
     # 100 restores plain grey-world.
     CLEANUP_CAST_NEUTRAL_PCT: float = Field(default=40.0, gt=0.0, le=100.0)
     CLEANUP_CAST_MIN: float = Field(default=6.0, ge=0.0)
+    # Fix-up 1. An age cast shifts the whole print, paper white included; a
+    # scene colour (a lawn, a warm lamp, a beige wall) shifts the mid-tones
+    # only. So the cast is measured twice — on the neutral mid-tones and on
+    # the print's near-white highlights — and corrected only when the two
+    # agree. Highlights are the top (100 - CLEANUP_CAST_HIGHLIGHT_PCT) per
+    # cent of luminance inside the inset rect, blown pixels excluded.
+    CLEANUP_CAST_HIGHLIGHT_PCT: float = Field(default=97.0, gt=0.0, lt=100.0)
+    # The highlight cast must be at least this fraction of the mid-tone one,
+    # and point the same way, or the colour op is skipped as scene colour.
+    CLEANUP_CAST_HIGHLIGHT_AGREE: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Restorers under-correct on purpose: a print that keeps 30 % of its
+    # warmth still looks like an old photo, while one pushed past neutral
+    # looks wrong instantly. Gains are blended toward 1.0 by this factor.
+    # 1.0 restores full correction.
+    CLEANUP_CAST_STRENGTH: float = Field(default=0.7, gt=0.0, le=1.0)
     # 95th-percentile Lab chroma below this is a B&W print, not a cast.
     CLEANUP_MONO_CHROMA_MAX: float = Field(default=12.0, ge=0.0)
     # Sepia: high chroma but almost no hue spread (circular variance).

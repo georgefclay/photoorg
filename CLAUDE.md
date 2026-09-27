@@ -263,6 +263,34 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   sepia. Both skip the op and say so in the caption. Gains are clamped to
   [0.74, 1.35] so a heavy cast cannot blow a channel — a strong cast is
   improved, not erased.
+- **A cast must show on the paper, not just in the scene** (fix-up 1). The
+  neutral-mid-tone estimator above was still fooled by prints whose *subject*
+  is one colour — a church interior of warm wood, a lawn. So the cast is
+  measured twice and three rules gate the correction:
+  1. **Highlight agreement.** `ops.measure_highlight_cast` reads the print's
+     near-white pixels (top `100 - CLEANUP_CAST_HIGHLIGHT_PCT` per cent of
+     luminance inside the inset rect, **blown pixels excluded** — a clipped
+     channel has lost its colour and would drag the reading toward neutral).
+     An age cast stains the paper; a scene colour leaves it alone. The two
+     readings must point the same way (Lab a/b vectors less than 90° apart)
+     and the highlight magnitude must be at least
+     `CLEANUP_CAST_HIGHLIGHT_AGREE` (0.5) of the mid-tone one, or the op is
+     skipped as `scene_colour` with the reason in the caption. When they do
+     agree, the correction uses the **smaller** of the two readings.
+  2. **Partial strength.** Gains are blended toward 1.0 by
+     `CLEANUP_CAST_STRENGTH` (0.7). Restorers under-correct on purpose: a
+     print that keeps 30 % of its warmth still looks like an old photo, one
+     pushed past neutral looks wrong instantly. 1.0 restores full correction.
+  3. **White-point guard.** `ops.guard_white_point` applies the candidate
+     gains to the highlight sample and, if the corrected paper white lands
+     further from neutral than it started, scales them back until it does
+     not. This is what stops a white shirt under a warm lamp coming out blue.
+  Every proposal records both vectors, the ratio, `gains_raw`,
+  `gains_blended`, the guard's verdict and `grey_world_magnitude`, so a
+  decision can always be re-read rather than re-derived. Measured on batches
+  1–5: the colour op went 270 (grey-world) → 168 (neutral mid-tones) → **50**,
+  with 49 rejections for "highlights cast the other way" and 25 for "paper
+  white is clean".
 - **Per-op checkboxes really change the geometry.** `render.plan_from` is the
   single place ticks become pixels: unticking *deskew* crops to the print's
   axis-aligned bounds instead; unticking *crop* keeps the whole rotated
