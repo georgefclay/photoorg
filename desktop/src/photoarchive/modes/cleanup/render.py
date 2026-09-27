@@ -86,7 +86,7 @@ def plan_from(
     keeps the whole rotated canvas, bed-filled at the corners. Both are
     honest, so a checkbox always does something visible.
     """
-    want = {t for t in ticked if t in ALL_OPS}
+    want = {t for t in ticked if t in ALL_OPS and op_enabled(t, settings)}
     o = (operations or {}).get("ops") or {}
     analysis = (operations or {}).get("analysis") or {}
     width = int(src_w or analysis.get("src_w") or 0)
@@ -126,10 +126,34 @@ def plan_from(
                 ticked=tuple(sorted(want)))
 
 
-def default_ticked(operations: dict[str, Any]) -> tuple[str, ...]:
-    """Every op the analyser proposed starts ticked."""
+# Fix-up 2: which ops a setting can switch off wholesale.
+OP_ENABLED_SETTING = {
+    "colour": "CLEANUP_COLOUR_ENABLED",
+    "levels": "CLEANUP_LEVELS_ENABLED",
+}
+
+
+def op_enabled(name: str, settings: Settings | None) -> bool:
+    """Is this op switched on? Geometry always is."""
+    setting = OP_ENABLED_SETTING.get(name)
+    if setting is None or settings is None:
+        return True
+    return bool(getattr(settings, setting, True))
+
+
+def default_ticked(
+    operations: dict[str, Any], settings: Settings | None = None,
+) -> tuple[str, ...]:
+    """Every op the analyser proposed starts ticked — unless a setting has
+    since switched it off.
+
+    Passing `settings` is how a proposal analysed before fix-up 2 opens with
+    its tonal ops unticked instead of needing the row rewritten: the
+    measurements stay on the proposal, they simply are not applied.
+    """
     o = (operations or {}).get("ops") or {}
-    return tuple(name for name in ALL_OPS if name in o)
+    return tuple(name for name in ALL_OPS
+                 if name in o and op_enabled(name, settings))
 
 
 # --------------------------------------------------------------------------

@@ -79,12 +79,18 @@ def _operations(w: int, h: int, *, angle=0.0, with_tone=True) -> dict:
 
 def test_default_ticked_is_everything_the_analyser_proposed(tmp_path):
     ops = _operations(1200, 900, angle=3.0)
+    # Without settings, every proposed op is ticked; fix-up 2's switches
+    # are applied only when settings are passed (see
+    # test_an_old_proposal_opens_with_its_tonal_ops_unticked).
     assert render_mod.default_ticked(ops) == ("deskew", "crop", "colour", "levels")
     assert render_mod.default_ticked({"ops": {}}) == ()
 
 
 def test_the_plan_drops_what_is_unticked(tmp_path):
-    settings = _settings(tmp_path)
+    # The tonal ops are opt-in since fix-up 2; this test is about the ticks,
+    # so switch them on to exercise that path.
+    settings = _settings(tmp_path, CLEANUP_COLOUR_ENABLED=True,
+                         CLEANUP_LEVELS_ENABLED=True)
     ops = _operations(1200, 900, angle=3.0)
 
     full = render_mod.plan_from(ops, ("deskew", "crop", "colour", "levels"),
@@ -105,7 +111,8 @@ def test_the_plan_drops_what_is_unticked(tmp_path):
 
 
 def test_an_op_the_analyser_did_not_propose_cannot_be_ticked_on(tmp_path):
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, CLEANUP_COLOUR_ENABLED=True,
+                         CLEANUP_LEVELS_ENABLED=True)
     ops = _operations(1200, 900, angle=0.0, with_tone=False)  # crop only
     plan = render_mod.plan_from(ops, ("deskew", "crop", "colour", "levels"),
                                 settings=settings)
@@ -118,7 +125,8 @@ def test_an_op_the_analyser_did_not_propose_cannot_be_ticked_on(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_jpeg_in_jpeg_out(tmp_path):
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, CLEANUP_COLOUR_ENABLED=True,
+                         CLEANUP_LEVELS_ENABLED=True)
     src = _source(tmp_path)
     ops = _operations(1200, 900)
     plan = render_mod.plan_from(ops, ("crop",), settings=settings)
@@ -132,7 +140,7 @@ def test_jpeg_in_jpeg_out(tmp_path):
 
 
 def test_tiff_in_tiff_out(tmp_path):
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, CLEANUP_LEVELS_ENABLED=True)
     src = _source(tmp_path, fmt="TIFF")
     with Image.open(src) as im:
         w, h = im.size
@@ -148,7 +156,7 @@ def test_tiff_in_tiff_out(tmp_path):
 def test_a_sixteen_bit_greyscale_tiff_stays_sixteen_bit(tmp_path):
     """Invariant 3 keeps the bit depth as well as the format — for greyscale,
     which is the mode Pillow can actually carry at 16 bits."""
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, CLEANUP_LEVELS_ENABLED=True)
     h, w = 300, 400
     rng = np.random.default_rng(6)
     grid = rng.integers(500, 64000, size=(h // 20 + 1, w // 20 + 1)).astype(np.uint16)
@@ -195,7 +203,8 @@ def test_sixteen_bit_colour_is_reduced_on_load_not_crashed_on_save(tmp_path):
 def test_the_detail_window_matches_the_full_render(tmp_path, angle, ticked):
     """A 1:1 crop of the output must be the same pixels the full render puts
     there — otherwise zooming in shows something that will not be accepted."""
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, CLEANUP_COLOUR_ENABLED=True,
+                         CLEANUP_LEVELS_ENABLED=True)
     src = _source(tmp_path, fmt="TIFF")     # lossless, so this can be exact-ish
     with Image.open(src) as im:
         w, h = im.size
@@ -340,7 +349,8 @@ def test_the_preview_of_a_large_scan_does_not_load_it_whole(tmp_path):
     Tracemalloc only sees Python/numpy allocations, which is exactly the part
     that used to blow up."""
     import tracemalloc
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, CLEANUP_COLOUR_ENABLED=True,
+                         CLEANUP_LEVELS_ENABLED=True)
     w, h = 4000, 3000                     # 12 MP: 36 MB as uint8 RGB
     src = _source(tmp_path, w=w, h=h)
     ops = _operations(w, h, angle=2.0)

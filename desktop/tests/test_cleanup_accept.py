@@ -608,7 +608,11 @@ def test_junk_and_digital_photos_are_out_of_scope(tmp_path):
 
 
 def test_bulk_accept_only_takes_geometric_only_proposals(tmp_path):
-    settings = _test_settings(tmp_path, TEST_DATABASE_URL)
+    # The tonal ops are opt-in since fix-up 2, so switch levels on: this test
+    # is about bulk accept refusing anything that is not pure geometry, which
+    # needs a non-geometric proposal to exist at all.
+    settings = _test_settings(tmp_path, TEST_DATABASE_URL,
+                              CLEANUP_LEVELS_ENABLED=True)
     _init_pool(settings)
     _reset(TEST_DATABASE_URL)
     geo = _mk_scan_photo(settings, sha="a" * 64, angle=3.0,

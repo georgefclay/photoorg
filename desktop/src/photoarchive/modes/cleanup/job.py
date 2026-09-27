@@ -254,7 +254,8 @@ def _write_preview(
                     src, plan, out, edge=settings.CLEANUP_ANALYSE_EDGE,
                     operations=result.operations)
         plan = render_mod.plan_from(
-            result.operations, render_mod.default_ticked(result.operations),
+            result.operations,
+            render_mod.default_ticked(result.operations, settings),
             settings=settings, src_w=result.src_w, src_h=result.src_h,
         )
         out = cpaths.preview_path(settings, result.photo_id, proposal_id)

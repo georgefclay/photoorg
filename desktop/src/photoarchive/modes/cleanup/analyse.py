@@ -115,12 +115,142 @@ def _print_mask(rgb: np.ndarray, bed_kind: str, bed_grey: float) -> np.ndarray:
     return mask
 
 
+# Fix-up 2: how much of the print's outline has to agree on an orientation
+# before we believe it, and how close counts as agreeing.
+EDGE_TOL_DEG = 2.0
+EDGE_MIN_CONFIDENCE = 0.55
+# Contour simplification, as a fraction of the perimeter. Big enough to turn a
+# jagged threshold boundary into straight runs, small enough to keep a real
+# corner.
+EDGE_APPROX_FRAC = 0.004
+
+
+@dataclass
+class EdgeOrientation:
+    """How tilted the print's *edges* are, and how much of the outline says so."""
+    angle: float
+    confidence: float
+    total_length: float
+    agreeing_length: float
+
+    def to_json(self) -> dict[str, float]:
+        return {"angle": round(self.angle, 3),
+                "confidence": round(self.confidence, 4),
+                "total_length": round(self.total_length, 1),
+                "agreeing_length": round(self.agreeing_length, 1)}
+
+
+def _fold_angle(deg: float) -> float:
+    """Fold an edge direction into [-45, 45).
+
+    A rectangle's four edges point four different ways but share one
+    orientation, so 0, 90, 180 and 270 are the same tilt.
+    """
+    return ((deg + 45.0) % 90.0) - 45.0
+
+
+def edge_orientation(
+    mask: np.ndarray,
+    *,
+    tol_deg: float = EDGE_TOL_DEG,
+    approx_frac: float = EDGE_APPROX_FRAC,
+) -> EdgeOrientation | None:
+    """The tilt of the print, measured from its outline.
+
+    `minAreaRect` gives the *minimum enclosing* rectangle, whose angle is
+    pinned by whatever sticks out furthest — a torn corner, a spur of bed, the
+    print running off the edge of the scan. On a print that is not a clean
+    rectangle that angle has nothing to do with the print's edges, and
+    deskewing by it tilts a photograph that was straight (photo #306).
+
+    So measure the edges themselves: simplify the outline to straight runs,
+    fold each run's direction into [-45, 45), and take the length-weighted
+    consensus. Four long straight edges outvote a torn corner, and when
+    nothing wins, `confidence` says so and the caller leaves the photo alone.
+    """
+    cnts, _ = cv2.findContours((mask > 0).astype(np.uint8),
+                               cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    contour = max(cnts, key=cv2.contourArea)
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter <= 0:
+        return None
+    poly = cv2.approxPolyDP(contour, approx_frac * perimeter, True)
+    pts = poly.reshape(-1, 2).astype(np.float64)
+    if len(pts) < 2:
+        return None
+
+    segments: list[tuple[float, float]] = []   # (folded angle, length)
+    total = 0.0
+    for i in range(len(pts)):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % len(pts)]
+        length = float(np.hypot(x1 - x0, y1 - y0))
+        if length <= 0:
+            continue
+        segments.append((_fold_angle(float(np.degrees(np.arctan2(y1 - y0,
+                                                                x1 - x0)))),
+                         length))
+        total += length
+    if total <= 0 or not segments:
+        return None
+
+    # Length-weighted vote. Doubling the angle makes the fold continuous, so
+    # -44.9 and +44.9 (nearly the same tilt) average correctly instead of
+    # cancelling.
+    best_angle, best_weight = 0.0, -1.0
+    for centre, _ in segments:
+        weight = sum(l for a, l in segments
+                     if abs(_fold_angle(a - centre)) <= tol_deg)
+        if weight > best_weight:
+            best_angle, best_weight = centre, weight
+    agreeing = [(a, l) for a, l in segments
+                if abs(_fold_angle(a - best_angle)) <= tol_deg]
+    weight = sum(l for _, l in agreeing)
+    if weight <= 0:
+        return None
+    sin_sum = sum(l * np.sin(np.radians(2 * _fold_angle(a - best_angle)))
+                  for a, l in agreeing)
+    cos_sum = sum(l * np.cos(np.radians(2 * _fold_angle(a - best_angle)))
+                  for a, l in agreeing)
+    refined = best_angle + np.degrees(np.arctan2(sin_sum, cos_sum)) / 2.0
+    return EdgeOrientation(angle=_fold_angle(float(refined)),
+                           confidence=weight / total,
+                           total_length=total, agreeing_length=weight)
+
+
 @dataclass
 class Component:
     rect: Rect
     area_frac: float           # component pixels / image pixels
     rectangularity: float      # component pixels / minAreaRect area
+    edges: "EdgeOrientation | None" = None
     mask: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((1, 1), bool))
+
+
+def _extent_at_angle(comp: np.ndarray, angle: float) -> Rect:
+    """The component's extent measured in the frame `angle` straightens.
+
+    Rotating the component's points by -angle and taking their axis-aligned
+    bounds gives the print's real width and height, without the minimum
+    enclosing rectangle's sensitivity to whatever sticks out furthest.
+    """
+    pts = cv2.findNonZero(comp.astype(np.uint8)).reshape(-1, 2).astype(np.float64)
+    t = np.radians(-angle)
+    cos_t, sin_t = np.cos(t), np.sin(t)
+    xs = pts[:, 0] * cos_t - pts[:, 1] * sin_t
+    ys = pts[:, 0] * sin_t + pts[:, 1] * cos_t
+    x0, x1 = float(xs.min()), float(xs.max())
+    y0, y1 = float(ys.min()), float(ys.max())
+    # Centre back in the original frame.
+    ccx, ccy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    back = np.radians(angle)
+    cb, sb = np.cos(back), np.sin(back)
+    cx = ccx * cb - ccy * sb
+    cy = ccx * sb + ccy * cb
+    return Rect(cx=float(cx), cy=float(cy),
+                w=float(x1 - x0), h=float(y1 - y0), angle=float(angle))
 
 
 def _components(mask: np.ndarray, min_frac: float) -> list[Component]:
@@ -139,12 +269,22 @@ def _components(mask: np.ndarray, min_frac: float) -> list[Component]:
             continue
         (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
         angle, w, h = normalise_angle(angle, w, h)
-        rect = Rect(cx=float(cx), cy=float(cy), w=float(w), h=float(h),
-                    angle=float(angle))
+
+        # Fix-up 2: the tilt comes from the print's edges, not from the
+        # minimum enclosing rectangle — see `edge_orientation`. The enclosing
+        # rectangle still gives the extent, measured in the frame the edges
+        # say is straight.
+        edges = edge_orientation(comp)
+        if edges is not None and edges.confidence >= EDGE_MIN_CONFIDENCE:
+            rect = _extent_at_angle(comp, edges.angle)
+        else:
+            rect = Rect(cx=float(cx), cy=float(cy), w=float(w), h=float(h),
+                        angle=float(angle))
         rect_area = rect.area or 1.0
         out.append(Component(
             rect=rect, area_frac=area / img_area,
-            rectangularity=min(1.0, area / rect_area), mask=comp,
+            rectangularity=min(1.0, area / rect_area),
+            edges=edges, mask=comp,
         ))
     out.sort(key=lambda c: c.area_frac, reverse=True)
     return out
@@ -323,6 +463,7 @@ def analyse_photo(
     measured["print_rect"] = rect_full.to_json()
     measured["print_frac"] = round(top.area_frac, 4)
     measured["rectangularity"] = round(top.rectangularity, 4)
+    measured["edges"] = top.edges.to_json() if top.edges else None
 
     # --- multi-print split ----------------------------------------------
     # Found first, because it changes how the size gate below is read: on a
@@ -385,12 +526,28 @@ def analyse_photo(
             }
 
     # --- geometry ---------------------------------------------------------
+    # Fix-up 2: only deskew when the print's own edges agree on a tilt. An
+    # unconfident reading means the outline is not a rectangle — a torn
+    # corner, a print running off the scan — and its angle is noise, which is
+    # how photo #306 came out tilted when it had been straight.
+    edges_ok = (top.edges is not None
+                and top.edges.confidence >= EDGE_MIN_CONFIDENCE)
     deskew_wanted = (
         not result.needs_manual
+        and edges_ok
         and abs(rect_full.angle) >= settings.CLEANUP_DESKEW_MIN_DEG
     )
     if deskew_wanted:
-        measured["ops"]["deskew"] = {"angle_deg": round(rect_full.angle, 3)}
+        measured["ops"]["deskew"] = {
+            "angle_deg": round(rect_full.angle, 3),
+            "edge_confidence": round(top.edges.confidence, 4),
+            "edge_length_px": round(top.edges.agreeing_length, 1),
+        }
+    elif (not result.needs_manual and not edges_ok
+          and abs(rect_full.angle) >= settings.CLEANUP_DESKEW_MIN_DEG):
+        measured["deskew_skipped"] = "edges_disagree"
+        measured["deskew_skipped_detail"] = (
+            top.edges.to_json() if top.edges else None)
 
     crop_wanted = False
     if not result.needs_manual:
@@ -467,7 +624,10 @@ def analyse_photo(
             gains, guard = ops.guard_white_point(gains, highlight["rgb"])
 
             if any(abs(gains[k] - 1.0) > 0.005 for k in ("r", "g", "b")):
-                measured["ops"]["colour"] = {
+                # Fix-up 2: measured either way, proposed only when enabled.
+                target = (measured["ops"] if settings.CLEANUP_COLOUR_ENABLED
+                          else measured.setdefault("ops_disabled", {}))
+                target["colour"] = {
                     "cast_a": cast["a"], "cast_b": cast["b"],
                     "magnitude": cast["magnitude"],
                     "grey_world_magnitude": cast.get("grey_world_magnitude"),
@@ -494,7 +654,10 @@ def analyse_photo(
             rgb, lo=levels["lo"], hi=levels["hi"],
             s_curve=settings.CLEANUP_SCURVE, mask=interior,
         )
-        measured["ops"]["levels"] = {
+        # Fix-up 2: measured either way, proposed only when enabled.
+        target = (measured["ops"] if settings.CLEANUP_LEVELS_ENABLED
+                  else measured.setdefault("ops_disabled", {}))
+        target["levels"] = {
             "lo": levels["lo"], "hi": levels["hi"],
             "s_curve": settings.CLEANUP_SCURVE,
             "contrast_before": levels["contrast"],
@@ -544,6 +707,8 @@ def caption_for(operations: dict[str, Any]) -> str:
         )
     if "remote_enhance" in o:
         bits.append("remote enhance")
+    if (operations or {}).get("deskew_skipped") == "edges_disagree":
+        bits.append("deskew skipped (print edges disagree)")
     skipped = (operations or {}).get("colour_skipped")
     if skipped in ("mono", "sepia"):
         bits.append(f"colour skipped ({skipped})")

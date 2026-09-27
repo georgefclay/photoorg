@@ -186,7 +186,10 @@ def test_three_degree_skew_is_measured_within_a_third_of_a_degree(tmp_path, bed)
     assert not result.needs_manual, result.manual_reason
     assert result.operations["bed"]["kind"] == bed
     deskew = result.operations["ops"]["deskew"]
-    assert abs(abs(deskew["angle_deg"]) - 3.0) <= 0.3, deskew
+    # Direction matters, not just magnitude: the old form of this assertion
+    # took abs() twice and so could not tell +3 from -3, which is exactly how
+    # photo #306 came out tilted (fix-up 2).
+    assert deskew["angle_deg"] == pytest.approx(rects[0].angle, abs=0.3), deskew
 
 
 @pytest.mark.parametrize("bed", ["white", "black"])
@@ -316,7 +319,7 @@ def test_an_orange_cast_is_measured_and_corrected_towards_neutral(tmp_path):
     cast = np.clip(cast, 0, 255).astype(np.uint8)
     path, _ = make_scan(tmp_path / "cast.jpg", content=cast, angle=0.0,
                         print_frac=0.55)
-    result = _analyse(tmp_path, path)
+    result = _analyse(tmp_path, path, CLEANUP_COLOUR_ENABLED=True)
 
     colour = result.operations["ops"].get("colour")
     assert colour is not None, result.operations
@@ -373,7 +376,7 @@ def test_the_grey_world_figure_is_kept_for_comparison(tmp_path):
     cast = np.clip(base.astype(np.float32) * np.array([1.30, 1.0, 0.68], np.float32),
                    0, 255).astype(np.uint8)
     path, _ = make_scan(tmp_path / "cast_cmp.jpg", content=cast, angle=0.0)
-    result = _analyse(tmp_path, path)
+    result = _analyse(tmp_path, path, CLEANUP_COLOUR_ENABLED=True)
     tone = result.operations["tone"]["cast"]
     assert "grey_world_magnitude" in tone
     assert tone["neutral_pct"] == 40.0
@@ -454,7 +457,7 @@ def test_a_uniformly_yellowed_print_is_corrected(tmp_path):
                                  paper_rgb=(245, 244, 242),
                                  tint_paper=True)
     path, _ = make_scan(tmp_path / "yellowed.jpg", content=yellowed, angle=0.0)
-    result = _analyse(tmp_path, path)
+    result = _analyse(tmp_path, path, CLEANUP_COLOUR_ENABLED=True)
 
     agreement = result.operations.get("cast_agreement")
     assert agreement is not None, result.operations
@@ -548,6 +551,66 @@ def test_highlight_pixels_exclude_blown_whites():
     assert cast["magnitude"] > 2.0, "the yellow paper should register"
 
 
+def test_tonal_ops_are_off_by_default_but_still_measured(tmp_path):
+    """Fix-up 2: the queue is geometry only. The measurements are cheap and
+    useful, so they are still taken — recorded under `ops_disabled`, where
+    nothing will apply them."""
+    faded = np.clip(_print_content(900, 700).astype(np.float32) * 0.35 + 110.0,
+                    0, 255).astype(np.uint8)
+    path, _ = make_scan(tmp_path / "tonal_off.jpg", content=faded, angle=3.0)
+
+    off = _analyse(tmp_path, path)            # defaults: both disabled
+    assert "levels" not in off.operations["ops"]
+    assert "colour" not in off.operations["ops"]
+    assert "levels" in off.operations.get("ops_disabled", {}), off.operations
+    assert off.is_geometric_only, off.op_names
+
+    on = _analyse(tmp_path, path, CLEANUP_LEVELS_ENABLED=True)
+    assert "levels" in on.operations["ops"]
+    assert on.operations["ops"]["levels"]["contrast_before"] == pytest.approx(
+        off.operations["ops_disabled"]["levels"]["contrast_before"])
+
+
+def test_an_old_proposal_opens_with_its_tonal_ops_unticked(tmp_path):
+    """Fix-up 2 asks for existing proposals to be marked unticked rather than
+    re-analysed: the settings decide what is ticked, so a row written before
+    the switch keeps its measurements and simply does not apply them."""
+    from photoarchive.modes.cleanup import render as render_mod
+    settings = _settings(tmp_path)
+    old_proposal = {"ops": {"deskew": {"angle_deg": 2.0},
+                            "crop": {"removed_frac": 0.1},
+                            "colour": {"gains": {"r": 0.9, "g": 1.0, "b": 1.1}},
+                            "levels": {"lo": 10.0, "hi": 240.0}}}
+    assert render_mod.default_ticked(old_proposal) == (
+        "deskew", "crop", "colour", "levels")
+    assert render_mod.default_ticked(old_proposal, settings) == ("deskew", "crop")
+
+    enabled = _settings(tmp_path, CLEANUP_COLOUR_ENABLED=True,
+                        CLEANUP_LEVELS_ENABLED=True)
+    assert render_mod.default_ticked(old_proposal, enabled) == (
+        "deskew", "crop", "colour", "levels")
+
+
+def test_a_disabled_op_cannot_be_ticked_on_by_a_caller(tmp_path):
+    """The switch is not advisory: even when something asks for the op, the
+    plan refuses it."""
+    from photoarchive.modes.cleanup import render as render_mod
+    settings = _settings(tmp_path)
+    operations = {
+        "analysis": {"src_w": 1200, "src_h": 900, "dpi": 300, "inset_px": 4.0},
+        "print_rect": {"cx": 600.0, "cy": 450.0, "w": 900.0, "h": 700.0,
+                       "angle": 0.0},
+        "ops": {"crop": {"removed_frac": 0.3},
+                "colour": {"gains": {"r": 0.9, "g": 1.0, "b": 1.1}},
+                "levels": {"lo": 10.0, "hi": 240.0, "s_curve": 0.12}},
+    }
+    plan = render_mod.plan_from(operations, ("crop", "colour", "levels"),
+                                settings=settings)
+    assert plan.colour_gains is None
+    assert plan.levels is None
+    assert not plan.transform.is_identity        # the crop still applies
+
+
 def test_a_black_and_white_print_gets_no_colour_op(tmp_path):
     grey = _print_content(900, 700)
     grey = np.repeat(grey.mean(axis=2, keepdims=True), 3, axis=2).astype(np.uint8)
@@ -573,7 +636,7 @@ def test_a_low_contrast_print_gets_a_levels_op_and_a_normal_one_does_not(tmp_pat
     faded = (_print_content(900, 700).astype(np.float32) * 0.35 + 110.0)
     faded = np.clip(faded, 0, 255).astype(np.uint8)
     path, _ = make_scan(tmp_path / "faded.jpg", content=faded, angle=0.0)
-    result = _analyse(tmp_path, path)
+    result = _analyse(tmp_path, path, CLEANUP_LEVELS_ENABLED=True)
     levels = result.operations["ops"].get("levels")
     assert levels is not None, result.operations
     assert levels["contrast_before"] < 0.72
@@ -581,7 +644,7 @@ def test_a_low_contrast_print_gets_a_levels_op_and_a_normal_one_does_not(tmp_pat
 
     normal = _with_full_range(_print_content(900, 700))
     path2, _ = make_scan(tmp_path / "normal.jpg", content=normal, angle=0.0)
-    result2 = _analyse(tmp_path, path2)
+    result2 = _analyse(tmp_path, path2, CLEANUP_LEVELS_ENABLED=True)
     assert "levels" not in result2.operations["ops"], result2.operations["ops"]
 
 

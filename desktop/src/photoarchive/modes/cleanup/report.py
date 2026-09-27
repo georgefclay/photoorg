@@ -153,7 +153,8 @@ def _render_pairs(
                     transform=Transform.from_json(region["transform"]))
             else:
                 plan = render_mod.plan_from(
-                    p.operations, render_mod.default_ticked(p.operations),
+                    p.operations,
+                    render_mod.default_ticked(p.operations, settings),
                     settings=settings,
                 )
             render_mod.render_preview(src, plan, after, edge=PAIR_EDGE,

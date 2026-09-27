@@ -243,6 +243,34 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
   had called a genuine cast on both earlier estimators (43.3 -> 33.5): its
   paper white measures 3.0, so it was scene colour too.
 
+- **Fix-up 2 (2026-09-27)** — George's verdict on the fix-up 1 sheet: #8 fine,
+  #25 added red to a print that already had an orange tint, #306's deskew
+  **tilted the image**. Two changes.
+  **(a) Tonal ops opt-in.** `CLEANUP_COLOUR_ENABLED` / `CLEANUP_LEVELS_ENABLED`
+  default false; the analyser still measures both and records them under
+  `ops_disabled`. The queue is geometry only. All of fix-up 1's code and tests
+  stay — this is a switch, not a revert. The 122 existing pending proposals had
+  their tonal ops moved to `ops_disabled` rather than being re-analysed.
+  **(b) Deskew direction.** Diagnosed first: on #306 `minAreaRect` returned
+  centre (359, 513), size 1055x709, angle -87.728 -> +2.272 after
+  normalisation, with three of its four corners *outside* the 732x1028 image.
+  The mask is not a rectangle — a torn bottom-right corner and edges running
+  off the scan — so the minimum *enclosing* rectangle is pinned by the
+  outliers, not the print. Not a sign-convention bug: the wrong **source**.
+  The angle now comes from the outline's length-weighted edge consensus
+  (`edge_orientation`), which reads +0.038° on #306, and a confidence floor
+  blocks the deskew when nothing wins the vote. Wrong-direction deskews across
+  batches 1-5: **10 of 41 -> 0 of 45**; 7 are now skipped as "print edges
+  disagree". Worst offender was #304 (proposed -3.761° on a print tilted
+  +0.389°, edge confidence 0.17).
+  A second hole closed: the deskew test asserted `abs(abs(angle) - 3.0) <= 0.3`
+  — `abs` twice — so a sign error passed. Tests now check direction and
+  re-measure the residual tilt after applying the rotation, and there is a
+  real-scan fixture (`tests/fixtures/scan_306_straight.jpg`, 299x420) that
+  still reproduces the misleading enclosing rectangle.
+  Batches 1-5 after both changes: 389 pending, 66 clean, 8 needs_manual,
+  2 splits; ops crop 372, deskew 45, split 2.
+
 ### Phase 8 — Web: auth (Claude Code, Windows) — spec §7
 - Express + EJS. Request-access form → admin email with Approve/Deny (POST-confirm pages, 72 h tokens) → magic links → long-lived HTTP-only session in Postgres.
 - Roles admin/contributor; suspension kills sessions, keeps contributions. Service-account token for the desktop app.

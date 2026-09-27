@@ -212,6 +212,33 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   review pane zooms to 1:1, and again at Accept with exactly the ops still
   ticked. Only a ~2000 px preview is written at analysis time. Pre-rendering
   4 000 derivatives would cost 8–10 GB most of which gets re-rendered.
+- **Tonal ops are opt-in** (fix-up 2). `CLEANUP_COLOUR_ENABLED` and
+  `CLEANUP_LEVELS_ENABLED` are **false** by default, so the review queue is
+  geometry only: deskew, crop, split. The analyser still measures colour cast
+  and levels on every scan — the numbers are cheap and useful — and records
+  them under `operations.ops_disabled`, where nothing will apply them. The
+  colour op's wins did not pay for its losses on the batch 1–5 review even
+  after fix-up 1; levels followed it off rather than being the one unreviewed
+  tonal change. All of fix-up 1's safeguards stay in the code, so switching
+  either back on is a setting, not a revert. `render.default_ticked(ops,
+  settings)` applies the switches, which is how a proposal analysed before the
+  change opens with its tonal ops **unticked** instead of needing its row
+  rewritten; `plan_from` refuses a disabled op even if a caller ticks it.
+- **The deskew angle comes from the print's edges, never from its enclosing
+  box** (fix-up 2). `cv2.minAreaRect` returns the minimum *enclosing*
+  rectangle, whose orientation is pinned by whatever sticks out furthest — a
+  torn corner, a spur of bed, the print running off the edge of the scan. On
+  photo #306 it read +2.27° on a print that was straight, and deskewing by it
+  tilted the photograph. `analyse.edge_orientation` instead simplifies the
+  outline to straight runs, folds each run's direction into [−45, 45) and
+  takes the **length-weighted consensus**: four long edges outvote a torn
+  corner. Below `EDGE_MIN_CONFIDENCE` (0.55) no deskew is proposed and the
+  caption says "deskew skipped (print edges disagree)"; the crop extent is
+  measured in that same straightened frame (`_extent_at_angle`). Across
+  batches 1–5 this took wrong-direction deskews from **10 of 41 to 0 of 45**.
+  A deskew test must check **direction and residual tilt** — the original
+  assertion took `abs()` twice and could not tell +3° from −3°, which is how
+  #306 shipped.
 - **Analyse at ≤ `CLEANUP_ANALYSE_EDGE` (2000 px), apply at full resolution**,
   one image in memory at a time. *Memory is a real constraint, not a slogan*:
   the biggest scan is 93.7 MP = 281 MB as uint8 RGB, and one float32 copy of

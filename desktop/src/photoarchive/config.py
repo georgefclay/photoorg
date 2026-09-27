@@ -76,6 +76,17 @@ class Settings(BaseSettings):
     FACE_MAX_CLUSTER: int = Field(default=300, ge=1)
 
     # --- Cleanup (Phase 7) ------------------------------------------------
+    # Fix-up 2: the tonal ops are opt-in. The analyser still measures colour
+    # cast and levels on every scan — the numbers are cheap and useful, and
+    # they are recorded under `operations.ops_disabled` — but proposes
+    # neither unless switched on here, so the review queue is geometry only:
+    # deskew, crop, split. The colour op's wins did not pay for its losses on
+    # the batch 1-5 review; levels follows it off rather than being the one
+    # unreviewed tonal change. Turn either on to get it back, with all of
+    # fix-up 1's safeguards intact.
+    CLEANUP_COLOUR_ENABLED: bool = Field(default=False)
+    CLEANUP_LEVELS_ENABLED: bool = Field(default=False)
+
     # Analysis runs on a downscale of this long edge; everything is applied
     # at full resolution.
     CLEANUP_ANALYSE_EDGE: int = Field(default=2000, ge=400)

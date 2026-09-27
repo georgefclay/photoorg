@@ -357,7 +357,8 @@ class CleanupPanel(QWidget):
             self._load_current()
             return
         self._proposal = proposal
-        self._ticked = set(render_mod.default_ticked(proposal.operations))
+        self._ticked = set(render_mod.default_ticked(
+            proposal.operations, self._settings))
         if proposal.needs_manual:
             # Answer 7: geometric ops are not offered on a scan the analyser
             # could not read; the tonal ones still are.
