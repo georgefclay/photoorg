@@ -221,3 +221,99 @@ test('GET /sync/status reports the database identity (fix-up 11 push guard)', as
   assert.equal(res.body.db.name, rows[0].name);
   assert.equal(res.body.db.system_identifier, rows[0].id);
 });
+
+// --- Phase 7 ---------------------------------------------------------------
+
+test('a tombstone hides the photo and is never asked for as a file', async () => {
+  const agent = request(app);
+  const base = {
+    id: 1, sha256: 'tomb1', mime: 'image/jpeg', file_version: 1,
+    source_root: 'scans', source_folder: 'Batch 00001', source_filename: 'a.jpg',
+    triage_status: 'keep',
+  };
+  // Live: the web wants the bytes.
+  const live = await agent.post('/sync/photos')
+    .set('Authorization', bearer()).send({ photos: [base] });
+  assert.equal(live.status, 200);
+  assert.deepEqual(live.body.need_files, [1]);
+
+  // The desktop junks it and sends the tombstone once. `is_private` is always
+  // false on the wire — the route rejects true — and `is_deleted` carries it.
+  const tomb = await agent.post('/sync/photos')
+    .set('Authorization', bearer())
+    .send({ photos: [{ ...base, triage_status: 'junk', is_deleted: true,
+                       deleted_at: new Date().toISOString() }] });
+  assert.equal(tomb.status, 200);
+  assert.equal(tomb.body.upserted, 1);
+  assert.deepEqual(tomb.body.need_files, [],
+    'a tombstone must never be requested as a file');
+
+  const row = (await pool.query(
+    'select is_deleted, triage_status from photos where id = 1')).rows[0];
+  assert.equal(row.is_deleted, true);
+  assert.equal(row.triage_status, 'junk');
+  // The row survives — no real deletes, ever — and visibility excludes it.
+  const visible = (await pool.query(
+    'select count(*)::int as n from photos where id = 1 and not is_deleted')).rows[0];
+  assert.equal(visible.n, 0);
+});
+
+test('a private photo turned tombstone still cannot arrive as is_private', async () => {
+  const res = await request(app).post('/sync/photos')
+    .set('Authorization', bearer())
+    .send({ photos: [{
+      id: 2, sha256: 'tomb2', mime: 'image/jpeg', file_version: 1,
+      source_root: 's', source_folder: 'f', source_filename: 'b.jpg',
+      triage_status: 'private', is_private: true, is_deleted: true,
+    }] });
+  assert.equal(res.status, 400, 'is_private=true is refused even as a tombstone');
+});
+
+test('split children share one master file, told apart by region_key', async () => {
+  const agent = request(app);
+  await agent.post('/sync/photos').set('Authorization', bearer()).send({
+    photos: [
+      { id: 10, sha256: 'child-a', mime: 'image/jpeg', file_version: 1,
+        source_root: 'scans', source_folder: 'B1', source_filename: 'S.jpg#p1' },
+      { id: 11, sha256: 'child-b', mime: 'image/jpeg', file_version: 1,
+        source_root: 'scans', source_folder: 'B1', source_filename: 'S.jpg#p2' },
+    ],
+  });
+  const res = await agent.post('/sync/photo_masters')
+    .set('Authorization', bearer())
+    .send({ items: [
+      { id: 100, photo_id: 10, master_path: 'D:/Scanned Photos/B1/S.jpg',
+        sha256: 'child-a', mime: 'image/jpeg', is_preferred: true,
+        width: 900, height: 700, dpi: 300,
+        region: { frame: 'display', key: '10,20,900,700', cx: 460, cy: 370,
+                  w: 900, h: 700, angle: 0 },
+        region_key: '10,20,900,700' },
+      { id: 101, photo_id: 11, master_path: 'D:/Scanned Photos/B1/S.jpg',
+        sha256: 'child-b', mime: 'image/jpeg', is_preferred: true,
+        width: 900, height: 700, dpi: 300,
+        region: { frame: 'display', key: '1000,20,900,700', cx: 1450, cy: 370,
+                  w: 900, h: 700, angle: 0 },
+        region_key: '1000,20,900,700' },
+    ] });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.upserted, 2,
+    'two masters rows may point at the same master file, one per region');
+
+  const rows = (await pool.query(
+    `select id, photo_id, master_path, region_key, region
+       from photo_masters order by id`)).rows;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].master_path, rows[1].master_path);
+  assert.notEqual(rows[0].region_key, rows[1].region_key);
+  assert.equal(rows[0].region.frame, 'display');
+
+  // A whole-file master keeps the default key and still collides with itself.
+  const again = await agent.post('/sync/photo_masters')
+    .set('Authorization', bearer())
+    .send({ items: [
+      { id: 100, photo_id: 10, master_path: 'D:/Scanned Photos/B1/S.jpg',
+        sha256: 'child-a', mime: 'image/jpeg', is_preferred: true,
+        region_key: '10,20,900,700' },
+    ] });
+  assert.equal(again.status, 200, 're-pushing the same masters row is idempotent');
+});

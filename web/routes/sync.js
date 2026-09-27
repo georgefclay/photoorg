@@ -175,9 +175,13 @@ module.exports = function syncRoutes({ pool }) {
         // Determine whether the file needs uploading. Missing on disk OR
         // synced_file_version is older than file_version.
         const check = (await client.query(
-          `select synced_file_version, file_version, working_path from photos where id = $1`, [id],
+          `select synced_file_version, file_version, working_path, is_deleted
+             from photos where id = $1`, [id],
         )).rows[0];
         if (!check) continue;
+        // A tombstone (Phase 7 answer 3) is a photo the desktop has junked,
+        // soft-deleted or made private. Never ask for its bytes.
+        if (check.is_deleted) continue;
         const base = check.working_path ? require('path').basename(check.working_path) : storage.workingBasename(id, r.sha256, r.mime);
         const abs = require('path').join(storage.root(), 'working', base);
         const versionOk = check.synced_file_version != null
@@ -340,10 +344,14 @@ module.exports = function syncRoutes({ pool }) {
     };
   }
 
+  // `region` / `region_key` carry a Phase 7 split child: several masters rows
+  // may point at one master file, one per print on the scan. The uniques are
+  // per (master_path, region_key), so the region has to come across.
   router.post('/photo_masters', batchUpsert('photo_masters',
     `insert into photo_masters
-       (id, photo_id, master_path, sha256, width, height, dpi, mime, file_size, is_preferred, ingested_at, updated_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,coalesce($11::timestamptz, now()), now())
+       (id, photo_id, master_path, sha256, width, height, dpi, mime, file_size, is_preferred,
+        region, region_key, ingested_at, updated_at)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,coalesce($13::timestamptz, now()), now())
      on conflict (id) do update set
        photo_id = excluded.photo_id,
        master_path = excluded.master_path,
@@ -354,11 +362,14 @@ module.exports = function syncRoutes({ pool }) {
        mime = excluded.mime,
        file_size = excluded.file_size,
        is_preferred = excluded.is_preferred,
+       region = excluded.region,
+       region_key = excluded.region_key,
        updated_at = now()`,
     (r) => {
       const id = Number(r.id);
       if (!id) return null;
-      return [id, r.photo_id, r.master_path, r.sha256, r.width, r.height, r.dpi, r.mime, r.file_size, !!r.is_preferred, r.ingested_at];
+      return [id, r.photo_id, r.master_path, r.sha256, r.width, r.height, r.dpi, r.mime, r.file_size, !!r.is_preferred,
+              r.region ? JSON.stringify(r.region) : null, r.region_key || '-', r.ingested_at];
     },
   ));
 

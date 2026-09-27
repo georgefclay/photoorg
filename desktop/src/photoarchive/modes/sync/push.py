@@ -13,7 +13,12 @@ walks that list. Resumable via `photos.synced_at` and
 run skips rows whose synced_file_version == file_version AND synced_at
 > photos.updated_at.
 
-Private and junk photos are excluded at the selector.
+Private and junk photos are excluded at the selector — except once, as
+tombstones: a photo the web already holds that has since been junked,
+soft-deleted or made private is sent one final time with `is_deleted = true`
+and then marked `tombstoned_at`, so the VM stops showing it. Without that a
+dedupe loser, a triage-to-junk or a Phase 7 split parent would stay visible on
+the web forever (Phase 7 answer 3).
 
 Pull first, always (Phase 9 fix-up 1): every push starts with
 pull_groups + pull_confirmed (which copies web-born rows down first), so
@@ -61,6 +66,7 @@ class PushStats:
     photos_upserted: int = 0
     files_uploaded: int = 0
     bytes_uploaded: int = 0
+    tombstones_pushed: int = 0
     tables: dict[str, int] = field(default_factory=dict)
 
 
@@ -115,6 +121,75 @@ def _serialise_photo(row: dict) -> dict:
         "working_path": working_basename,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
+
+
+def _serialise_tombstone(row: dict) -> dict:
+    """A tombstone is an ordinary photo row with `is_deleted` forced true, so
+    the web's visibility SQL hides it everywhere without any new route."""
+    out = _serialise_photo(row)
+    out["is_deleted"] = True
+    out["deleted_at"] = (row["deleted_at"].isoformat() if row.get("deleted_at")
+                         else None)
+    return out
+
+
+def _select_tombstones(conn, limit: int) -> list[dict]:
+    """Photos the web already holds that have since gone away.
+
+    The ordinary selector excludes junk and private, so a photo that was
+    pushed and then junked — a dedupe loser, a triage decision, a Phase 7
+    split parent — or made private would stay visible on the VM forever.
+    These rows go across once, with
+    `is_deleted = true`, and the web's visibility SQL (which always excludes
+    `is_deleted`) hides them everywhere while keeping the row. `tombstoned_at`
+    is the marker; `updated_at` cannot be, because `set_updated_at` fires on
+    the `synced_at` write too.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            select id, sha256, phash, dhash, width, height, mime, file_size,
+                   is_scan, has_no_people,
+                   capture_date, capture_date_precision, capture_date_confirmed,
+                   exif_taken_at, exif_camera, exif_gps_lat, exif_gps_lon,
+                   source_root, source_folder, source_filename,
+                   scan_batch, scan_sequence, physical_ref_note,
+                   rescan_wanted, triage_status, is_private, is_deleted, deleted_at,
+                   orientation, description_ai, completeness_score, file_version,
+                   working_path, synced_at, synced_file_version, updated_at
+              from photos
+             where synced_at is not null
+               and (triage_status = 'junk' or is_deleted or is_private)
+               and tombstoned_at is null
+             order by id asc
+             limit %s
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def _mark_tombstoned(conn, ids: list[int]) -> None:
+    if not ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "update photos set tombstoned_at = now() where id = any(%s::bigint[])",
+            (ids,),
+        )
+
+
+def _tombstones_total(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*) from photos
+             where synced_at is not null
+               and (triage_status = 'junk' or is_deleted or is_private)
+               and tombstoned_at is null
+            """
+        )
+        return int(cur.fetchone()[0])
 
 
 def _photos_total(conn) -> int:
@@ -298,6 +373,29 @@ def push(
                     detail=f"batch of {len(rows)}",
                 ))
             if len(rows) < PHOTO_BATCH:
+                break
+
+        # -------- tombstones -------------------------------------------
+        # Photos the web holds that have since been junked, soft-deleted or
+        # made private. One batch pass; `tombstoned_at` stops them coming
+        # back on the next push.
+        tomb_total = _tombstones_total(conn)
+        while True:
+            if should_stop and should_stop():
+                return stats
+            tombs = _select_tombstones(conn, PHOTO_BATCH)
+            if not tombs:
+                break
+            resp = client.push_photos([_serialise_tombstone(r) for r in tombs])
+            stats.tombstones_pushed += resp.get("upserted", 0) or len(tombs)
+            _mark_tombstoned(conn, [r["id"] for r in tombs])
+            if progress:
+                progress(PushProgress(
+                    stage="tombstones", done=stats.tombstones_pushed,
+                    total=tomb_total,
+                    detail=f"batch of {len(tombs)}",
+                ))
+            if len(tombs) < PHOTO_BATCH:
                 break
 
         # -------- metadata tables -------------------------------------
@@ -515,7 +613,8 @@ _META_STAGES = [
         "photo_masters",
         """
         select pm.id, pm.photo_id, pm.master_path, pm.sha256, pm.width, pm.height,
-               pm.dpi, pm.mime, pm.file_size, pm.is_preferred, pm.ingested_at
+               pm.dpi, pm.mime, pm.file_size, pm.is_preferred,
+               pm.region, pm.region_key, pm.ingested_at
           from photo_masters pm
           join photos p on p.id = pm.photo_id
          where p.is_private = false and p.triage_status <> 'junk'
@@ -525,6 +624,7 @@ _META_STAGES = [
             "sha256": r["sha256"], "width": r["width"], "height": r["height"],
             "dpi": r["dpi"], "mime": r["mime"], "file_size": r["file_size"],
             "is_preferred": r["is_preferred"],
+            "region": r["region"], "region_key": r["region_key"],
             "ingested_at": r["ingested_at"].isoformat() if r["ingested_at"] else None,
         },
     ),

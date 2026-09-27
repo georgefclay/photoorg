@@ -28,8 +28,22 @@ need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
 
 ### Photos and physical files
 
-- **`photos`** — one row per unique photograph. `sha256` (of the preferred master) is the identity. `working_path` is the derived copy the desktop app manipulates; masters are never touched. `source_root` / `source_folder` / `source_filename` / `scan_batch` / `scan_sequence` record where the file came from and, for scans, how to find the physical print (`Batch 00012 #017`). `capture_date` + `capture_date_precision` (`exact|month|year|decade|unknown`) + `capture_date_confirmed` separate a confirmed date from a hint. `triage_status` (`untriaged|keep|junk|private`), `is_private`, `is_deleted`, `rescan_wanted` are workflow flags. `file_version` bumps whenever the working copy changes so sync knows to re-push. `description_ai` is the accepted AI description (feeds FTS). `completeness_score` is 0–100, maintained by `refresh_completeness(photo_id)`. `width` / `height` are the **display** dimensions (post EXIF-transpose) since fix-up 6 — the coordinate frame face bboxes are stored in. `orientation` is the EXIF value (1..8, migration 23); `photo_masters.width/height` on each master row remain the raw file dims.
+- **`photos`** — one row per unique photograph. `sha256` (of the preferred master) is the identity. `working_path` is the derived copy the desktop app manipulates; masters are never touched. `source_root` / `source_folder` / `source_filename` / `scan_batch` / `scan_sequence` record where the file came from and, for scans, how to find the physical print (`Batch 00012 #017`). `capture_date` + `capture_date_precision` (`exact|month|year|decade|unknown`) + `capture_date_confirmed` separate a confirmed date from a hint. `triage_status` (`untriaged|keep|junk|private`), `is_private`, `is_deleted`, `rescan_wanted` are workflow flags. `file_version` bumps whenever the working copy changes so sync knows to re-push. `description_ai` is the accepted AI description (feeds FTS). `completeness_score` is 0–100, maintained by `refresh_completeness(photo_id)`. `width` / `height` are the **display** dimensions (post EXIF-transpose) since fix-up 6 — the coordinate frame face bboxes are stored in. `orientation` is the EXIF value (1..8, migration 23); `photo_masters.width/height` on each master row remain the raw file dims. `parent_photo_id` (Phase 7) is set on a split child and points at the scan it was cut from. `tombstoned_at` (Phase 7) records when the desktop last told the web this photo is gone — see *Photo sync columns*.
 - **`photo_masters`** — one photograph, many master files (original 300 DPI JPG, later 1200 DPI TIFF rescan, etc.). Exactly one is `is_preferred` per `photo_id` (partial unique index). Ingest inserts here first, then `photos.sha256` mirrors the preferred row. Rescans add a new preferred row and demote the old one.
+  `region` (jsonb) and `region_key` (text, default `'-'`) arrived with Phase 7:
+  a **split child** points at the *same master file* as its siblings, carrying
+  the region of the scan it was cut from — `{"frame": "display", "key":
+  "x,y,w,h", cx, cy, w, h, angle}`, in the photo's display frame at full
+  resolution. The frame is recorded explicitly rather than assumed: scans carry
+  no EXIF orientation, so display and raw coincide there, but the key says so.
+  Because of this the old global uniques on `master_path` and `sha256` became
+  `unique(master_path, region_key)` and `unique(sha256, region_key)`; a
+  whole-file master keeps `region_key = '-'`. **A split child's
+  `photos.sha256` / `photo_masters.sha256` is an identity key, not a file
+  hash**: `sha256(master_sha256 + ':' + region_key)`, deterministic and stable
+  across re-renders, because the child has no master file of its own. The
+  parent keeps the real `source_filename` (children take
+  `<parent filename>#pN`), so re-ingesting the master stays a no-op.
 - **`photo_backs`** — scans of the back of a physical print. `photo_id` is nullable (migration 15) so an "orphan back" — a scanned back whose front we cannot identify — can still be stored, OCR'd in Phase 6, and possibly reunited with its front later. Backs are never photos themselves. `transcribed_text` + `transcription_confidence` + `transcription_confirmed` hold the OCR/VLM result.
 
 ### People, names, relationships
@@ -118,6 +132,17 @@ writes the working file, regenerates the 320-px thumb via `sharp`, and
 sets `synced_file_version = file_version`. Re-running push after a
 successful one sends 0 files.
 
+`photos.tombstoned_at` (Phase 7) closes the other half of that loop. Junk,
+private and soft-deleted photos are excluded from the push selector, so a
+photo the web already holds that later goes away — a dedupe loser, a
+triage-to-junk, a Phase 7 split parent — would stay on the VM forever. Push
+sends each such row **once** as a tombstone (`is_deleted = true`, and
+`is_private` always false on the wire), then stamps `tombstoned_at`; the web's
+visibility SQL already excludes `is_deleted`, so the row is hidden everywhere
+without being removed, and `/sync/photos` never returns a tombstone in
+`need_files`. The marker needs its own column because `set_updated_at` fires on
+the `synced_at` write too, so `synced_at > updated_at` can never hold.
+
 ### Ingest staging (migration 12)
 
 - **`ingest_pairings`** — proposed front/back pairs held between the ingest scan pass and George's review. `front_photo_id` FK to the already-committed front photo (nullable as of migration 16 — a proposal whose immediate predecessor was itself a probable back has front_photo_id null, and George decides in the grid with N=orphan or F=pick front from filmstrip); `back_master_path` / `back_sha256` identify the back file on disk (unique). `back_score` 0–1 from the back-detect heuristic (1.0 when George asserts it via the Triage B key). `staging_working_path` and `staging_thumb_path` point to `WORKING_DIR/_staging/{sha256}.{ext}` and `THUMBS_DIR/_staging/{sha256}.jpg` for held (not-yet-committed) backs. `back_photo_id` (nullable, added migration 13) points to an already-committed photo when the Rebuild-back-proposals action or the Triage B key re-classifies it as a back. `back_aspect_mismatch` boolean (migration 14): true when the back's aspect ratio differs from the front's. Aspect is a hard gate below score 0.8 and a review tag at or above 0.8 — a back can be cropped very differently from its front, so aspect is evidence not veto for strong candidates. `details` JSONB (migration 19) carries proposal provenance, e.g. `{"source": "triage", "reason": "orphan_predecessor_is_back"}` for B-key entries. `status ingest_proposal_status` (`pending|accepted|rejected`) + `decided_at`. Accepting a held back inserts a `photo_backs` row for `front_photo_id` and renames the staged files into place. Accepting a photo-as-back (rebuild path) inserts a `photo_backs` row referencing the demoted photo's working file and thumb, then marks the old `photos` row `is_deleted=true` with `physical_ref_note='converted to back of photo <front_id>'`. Rejecting a held back takes it through the normal new-photo path. Rejecting a photo-as-back leaves the photo alone and blocks re-proposal (unique index on `back_photo_id` where pending prevents duplicates; the rejected row remains and rebuild skips already-rejected photos).
@@ -169,6 +194,35 @@ successful one sends 0 files.
   `photo_a < photo_b`) with unique `(photo_a, photo_b)`. Dedupe scan
   filters these out and never re-proposes them, even after new scans
   add new photos.
+
+### Cleanup (Phase 7, migration `phase-7-cleanup`)
+
+- **`cleanup_proposals`** — one row per analysis of a scan; a *proposal* until
+  George accepts it. `status cleanup_status`
+  (`pending|accepted|rejected|manual|clean|superseded`) with a partial unique
+  index `cleanup_proposals_one_pending` so at most one live pending proposal
+  exists per photo; decided rows accumulate as history and a re-analysis marks
+  the previous one `superseded`. `operations` (jsonb) is everything the
+  analyser measured — the bed it found, the print rect in the
+  full-resolution display frame, and a per-op entry under `ops`
+  (`deskew`, `crop`, `colour`, `levels`, `split`, `remote_enhance`) carrying
+  what it measured and the parameters it chose, so the caption can show real
+  numbers and nothing needs re-analysing to apply. `transform` (jsonb) is the
+  affine the full ticked set would apply (`m` plus source/output dims; see
+  `modes/cleanup/geometry.py`). `split_regions` (jsonb) is one entry per print
+  on a multi-print scan, each with its own rect and transform. `derived_path`
+  is the ~2000 px **preview** — the full-resolution derivative is cut on
+  demand, at 1:1 zoom and again at Accept. `needs_manual` + `manual_reason`
+  (`print_too_small | implausible_aspect | skew_too_large | has_back |
+  no_print_found`) mark a scan the analyser refused to guess at; it still
+  reaches the review queue, with the geometric ops disabled. `analysis_ms`
+  feeds the run report's timings. A photo where nothing would change is
+  recorded `clean` and never enters the queue.
+- **`cleanup_spend`** — cumulative remote-enhance spend so the counter
+  survives a restart. `provider`, `photo_id`, `proposal_id`, `job_ref`,
+  `cost_estimate_usd`, `actual_cost_usd`, `status`
+  (`submitted|completed|failed`). Written *before* the provider call returns,
+  so a crash mid-job still shows up.
 
 ### Audit and jobs
 

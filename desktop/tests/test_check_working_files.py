@@ -237,3 +237,82 @@ def test_repair_face_boxes_never_touches_working_path(phase6):
     assert counts.dims_swapped >= 1
     after = _wp(pid)
     assert after == before, "repair_face_boxes must not modify working_path"
+
+
+# --- Phase 7: a cleaned working copy must not be silently reverted ---------
+
+def test_check_prefers_a_kept_cleanup_version_over_the_master(phase6):
+    """Phase 7 keeps every superseded working copy in `_versions/` forever.
+
+    When a cleaned photo's working file goes missing, restoring the newest
+    kept version beats copying the raw master — the master would undo every
+    cleanup the photo has had.
+    """
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        pid = insert_photo(conn, width=100, height=80, working_path=None)
+        master_path = phase6.WORKING_DIR.parent / "masters" / "kept-orig.jpg"
+        write_test_jpeg(master_path)
+        insert_master(conn, pid, master_path=str(master_path))
+        conn.execute("update photos set file_version = 2 where id = %s", (pid,))
+        conn.commit()
+
+    sha = _sha_from_photo(pid)
+    versions = phase6.WORKING_DIR / "_versions"
+    versions.mkdir(parents=True, exist_ok=True)
+    kept = versions / f"{pid:08d}_v1.jpg"
+    write_test_jpeg(kept)
+    kept_bytes = kept.read_bytes()
+
+    counts = check_working_files.check(dry_run=False, limit=None)
+
+    standard = ingest_paths.working_path(phase6, pid, sha, "jpg")
+    assert standard.exists()
+    assert standard.read_bytes() == kept_bytes, "restored from _versions, not the master"
+    assert counts.restored_from_versions >= 1
+    assert kept.exists(), "_versions is a keep-forever archive; copy never move"
+    # It was a cleaned photo rebuilt from an older file, so it is flagged.
+    assert pid in counts.cleanup_version_lost_ids
+
+
+def test_a_cleaned_photo_rebuilt_from_the_master_is_flagged_not_silent(phase6):
+    """With no kept version left, the master is the only source — but the
+    cleanup and the face-box frame are gone, so the run must say so."""
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        pid = insert_photo(conn, width=100, height=80, working_path=None)
+        master_path = phase6.WORKING_DIR.parent / "masters" / "cleaned-orig.jpg"
+        write_test_jpeg(master_path)
+        insert_master(conn, pid, master_path=str(master_path))
+        conn.execute("update photos set file_version = 3 where id = %s", (pid,))
+        conn.commit()
+
+    counts = check_working_files.check(dry_run=False, limit=None)
+    assert counts.recopied_from_master >= 1
+    assert counts.cleanup_version_lost >= 1
+    assert pid in counts.cleanup_version_lost_ids
+    assert "re-run cleanup analysis" in check_working_files.format_summary(counts, dry_run=False)
+
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        actions = [r[0] for r in conn.execute(
+            """
+            select action from audit_log
+             where entity_type = 'photo' and entity_id = %s
+             order by id desc
+            """, (pid,)).fetchall()]
+    assert "photo.working_path_repaired.recopied_from_master_cleanup_lost" in actions
+
+
+def test_an_uncleaned_photo_rebuilt_from_the_master_is_not_flagged(phase6):
+    with dbmod.connection() as conn:
+        conn.autocommit = False
+        pid = insert_photo(conn, width=100, height=80, working_path=None)
+        master_path = phase6.WORKING_DIR.parent / "masters" / "v1-orig.jpg"
+        write_test_jpeg(master_path)
+        insert_master(conn, pid, master_path=str(master_path))
+        conn.commit()
+
+    counts = check_working_files.check(dry_run=False, limit=None)
+    assert counts.recopied_from_master >= 1
+    assert pid not in counts.cleanup_version_lost_ids

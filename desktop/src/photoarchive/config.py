@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     QUARANTINE_DIR: Path = Field(..., description="Soft-deleted files (writable)")
     MANUAL_FIX_DIR: Path = Field(..., description="Cleanup rejects awaiting manual attention (writable)")
     THUMBS_DIR: Path = Field(..., description="Thumbnail cache (writable)")
+    CLEANUP_DIR: Path = Field(
+        default=Path(r"D:\PhotoArchive\cleanup"),
+        description="Phase 7 cleanup proposals: previews, on-demand full-res renders, reports",
+    )
 
     DATABASE_URL: str
     INFERENCE_URL: str
@@ -71,6 +75,68 @@ class Settings(BaseSettings):
     # several plausible-sized ones.
     FACE_MAX_CLUSTER: int = Field(default=300, ge=1)
 
+    # --- Cleanup (Phase 7) ------------------------------------------------
+    # Analysis runs on a downscale of this long edge; everything is applied
+    # at full resolution.
+    CLEANUP_ANALYSE_EDGE: int = Field(default=2000, ge=400)
+    # The print must cover at least this fraction of the scan, or the
+    # analyser refuses to guess (needs_manual).
+    CLEANUP_MIN_PRINT_FRAC: float = Field(default=0.40, gt=0.0, le=1.0)
+    # Long/short ratio above this is not a print shape (needs_manual).
+    CLEANUP_MAX_ASPECT: float = Field(default=3.0, gt=1.0)
+    # Deskew below this is noise; above CLEANUP_MAX_DESKEW_DEG is not a
+    # skewed print (needs_manual). The bbox transform preserves face-box
+    # size, which is only honest for small angles — see geometry.py.
+    CLEANUP_DESKEW_MIN_DEG: float = Field(default=0.3, ge=0.0)
+    CLEANUP_MAX_DESKEW_DEG: float = Field(default=15.0, gt=0.0)
+    # A crop that removes less than this fraction of the area isn't worth a
+    # new file version.
+    CLEANUP_CROP_MIN_FRAC: float = Field(default=0.01, ge=0.0, le=1.0)
+    # Crop inset, in pixels at 300 DPI. Scaled by the master's DPI when
+    # known (so 16 px at 1200 DPI); this value is used as-is otherwise.
+    CLEANUP_CROP_INSET_PX_AT_300: float = Field(default=4.0, ge=0.0)
+    # A component must cover this fraction of the scan to count as a print
+    # in a multi-print split.
+    CLEANUP_SPLIT_MIN_FRAC: float = Field(default=0.12, gt=0.0, le=1.0)
+    # component area / minAreaRect area — how rectangular a component must be.
+    CLEANUP_SPLIT_RECTANGULARITY: float = Field(default=0.80, gt=0.0, le=1.0)
+    # Colour cast: Lab a/b distance from neutral, measured on the print's
+    # *near-neutral* mid-tones — the least-colourful CLEANUP_CAST_NEUTRAL_PCT
+    # per cent of them. An age cast shifts the paper, greys included; scene
+    # colour lives in the saturated pixels, so measuring over every mid-tone
+    # (plain grey-world) reads a lawn or a warm indoor shot as a cast and
+    # over-corrects. Measured on batches 1-5: grey-world fired on 270 of 444
+    # scans at a median magnitude of 14.2; this estimator fires on 168 at 6.4,
+    # and 152 of the 270 were overstated more than twofold.
+    # 100 restores plain grey-world.
+    CLEANUP_CAST_NEUTRAL_PCT: float = Field(default=40.0, gt=0.0, le=100.0)
+    CLEANUP_CAST_MIN: float = Field(default=6.0, ge=0.0)
+    # 95th-percentile Lab chroma below this is a B&W print, not a cast.
+    CLEANUP_MONO_CHROMA_MAX: float = Field(default=12.0, ge=0.0)
+    # Sepia: high chroma but almost no hue spread (circular variance).
+    CLEANUP_SEPIA_HUE_VAR_MAX: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Levels: dynamic range (p99.5 - p0.5) below this fraction of full scale
+    # is a faded print.
+    CLEANUP_CONTRAST_LOW: float = Field(default=0.72, gt=0.0, le=1.0)
+    # Strength of the mild S-curve applied with the percentile stretch.
+    CLEANUP_SCURVE: float = Field(default=0.12, ge=0.0, le=1.0)
+
+    # Remote enhance. `null` disables the E key; `claid` needs CLAID_API_KEY.
+    CLEANUP_REMOTE_PROVIDER: str = Field(default="null")
+    CLAID_API_KEY: str = Field(default="")
+    CLAID_BASE_URL: str = Field(default="https://api.claid.ai")
+    CLAID_COST_PER_OP_USD: float = Field(default=0.03, ge=0.0)
+
+    @field_validator("CLEANUP_REMOTE_PROVIDER")
+    @classmethod
+    def _known_provider(cls, v: str) -> str:
+        v = (v or "null").strip().lower()
+        if v not in {"null", "claid"}:
+            raise ValueError(
+                f"CLEANUP_REMOTE_PROVIDER {v!r} must be one of null, claid"
+            )
+        return v
+
     @field_validator("MASTER_ROOTS")
     @classmethod
     def _non_empty(cls, v: str) -> str:
@@ -95,6 +161,7 @@ class Settings(BaseSettings):
             "QUARANTINE_DIR": _norm(self.QUARANTINE_DIR),
             "MANUAL_FIX_DIR": _norm(self.MANUAL_FIX_DIR),
             "THUMBS_DIR": _norm(self.THUMBS_DIR),
+            "CLEANUP_DIR": _norm(self.CLEANUP_DIR),
         }
         for root in self.master_roots:
             master_path = _norm(root.path)

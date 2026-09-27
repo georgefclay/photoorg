@@ -74,6 +74,12 @@ class CheckCounts:
     pointer_repaired_standard: int = 0
     pointer_repaired_staging: int = 0
     recopied_from_master: int = 0
+    restored_from_versions: int = 0
+    # Phase 7: the only source left for a cleaned photo (file_version > 1) was
+    # the master, so the deskew/crop is gone and its face boxes now sit in the
+    # wrong frame. Never silent: the summary names the ids.
+    cleanup_version_lost: int = 0
+    cleanup_version_lost_ids: list[int] = field(default_factory=list)
     truly_missing: int = 0
     truly_missing_ids: list[int] = field(default_factory=list)
     # photo_backs (fix-up 11)
@@ -98,6 +104,9 @@ class CheckCounts:
             "pointer_repaired_standard": self.pointer_repaired_standard,
             "pointer_repaired_staging": self.pointer_repaired_staging,
             "recopied_from_master": self.recopied_from_master,
+            "restored_from_versions": self.restored_from_versions,
+            "cleanup_version_lost": self.cleanup_version_lost,
+            "cleanup_version_lost_ids": self.cleanup_version_lost_ids,
             "truly_missing": self.truly_missing,
             "truly_missing_ids": self.truly_missing_ids,
             "backs_scanned": self.backs_scanned,
@@ -167,7 +176,7 @@ def _load_photo_rows() -> list[tuple]:
         return conn.execute(
             """
             select p.id, p.working_path, p.sha256, p.mime,
-                   pm.master_path, p.is_deleted
+                   pm.master_path, p.is_deleted, p.file_version
             from photos p
             left join photo_masters pm
               on pm.photo_id = p.id and pm.is_preferred
@@ -213,11 +222,42 @@ def _post_condition_counts() -> tuple[int, int]:
     return int(photos), int(backs)
 
 
+def _newest_kept_version(settings, photo_id: int, ext: str) -> Path | None:
+    """The highest-numbered `WORKING_DIR/_versions/{id:08d}_v{n}.{ext}`.
+
+    Phase 7 accept moves each superseded working copy there and keeps it
+    forever, so this is the best recovery source for a photo whose working
+    file has gone missing -- better than the master, which would undo every
+    cleanup the photo has had.
+    """
+    versions = settings.WORKING_DIR / "_versions"
+    if not versions.is_dir():
+        return None
+    best: tuple[int, Path] | None = None
+    for candidate in versions.glob(f"{photo_id:08d}_v*.{ext.lstrip('.')}"):
+        try:
+            n = int(candidate.stem.split("_v")[-1])
+        except ValueError:
+            continue
+        if best is None or n > best[0]:
+            best = (n, candidate)
+    return best[1] if best else None
+
+
+def _note_cleanup_loss(counts, photo_id: int, file_version) -> None:
+    """A cleaned photo (file_version > 1) rebuilt from an older source has
+    lost its cleanup and its face boxes no longer match the pixels."""
+    if file_version and int(file_version) > 1:
+        counts.cleanup_version_lost += 1
+        counts.cleanup_version_lost_ids.append(photo_id)
+
+
 # --- photos ---------------------------------------------------------------
 
 
 def _check_photo(counts: CheckCounts, settings, row: tuple, *, dry_run: bool) -> None:
-    photo_id, working_path, sha256, _mime, master_path, is_deleted = row
+    (photo_id, working_path, sha256, _mime, master_path, is_deleted,
+     file_version) = row
     bare = bool(working_path) and not _is_absolute(working_path)
     if bare:
         counts.bare_pointers_seen += 1
@@ -296,10 +336,47 @@ def _check_photo(counts: CheckCounts, settings, row: tuple, *, dry_run: bool) ->
         counts.pointer_repaired_staging += 1
         return
 
+    # 2b. A kept cleanup version (Phase 7). `WORKING_DIR/_versions/` holds
+    #     every superseded working copy, forever, so the newest one is a real
+    #     working copy of this photo and strictly better than the raw master.
+    kept = _newest_kept_version(settings, photo_id, ext)
+    if kept is not None:
+        log.info("photo %d: nothing at the working name; restoring kept "
+                 "version %s → %s", photo_id, kept, standard)
+        if not dry_run:
+            standard.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(str(kept), str(standard))
+            except Exception as e:
+                log.error("photo %d: copy from _versions failed: %s", photo_id, e)
+                kept = None
+            else:
+                with dbmod.connection() as conn:
+                    conn.autocommit = True
+                    _set_photo_pointer(
+                        conn, photo_id, standard, bump_version=True,
+                        action="photo.working_path_repaired.restored_from_versions",
+                        prev_path=working_path,
+                    )
+        if kept is not None:
+            counts.restored_from_versions += 1
+            _note_cleanup_loss(counts, photo_id, file_version)
+            return
+
     # 3. Master → copy (masters are read-only; never move).
     if master_path and Path(master_path).exists():
         log.info("photo %d: nothing on disk; copying from master %s → %s",
                  photo_id, master_path, standard)
+        cleaned = bool(file_version) and int(file_version) > 1
+        if cleaned:
+            # The master is the raw scan: any Phase 7 crop/deskew is gone and
+            # the photo's face boxes are now in the wrong frame. Copy anyway
+            # (a photo beats no photo) but say so loudly.
+            log.warning(
+                "photo %d: file_version is %s but the only source left is the "
+                "master. The cleanup is lost -- re-run cleanup analysis and "
+                "re-check its face boxes.", photo_id, file_version,
+            )
         if not dry_run:
             standard.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -313,10 +390,13 @@ def _check_photo(counts: CheckCounts, settings, row: tuple, *, dry_run: bool) ->
                 conn.autocommit = True
                 _set_photo_pointer(
                     conn, photo_id, standard, bump_version=True,
-                    action="photo.working_path_repaired.recopied_from_master",
+                    action=("photo.working_path_repaired.recopied_from_master_cleanup_lost"
+                            if cleaned
+                            else "photo.working_path_repaired.recopied_from_master"),
                     prev_path=working_path,
                 )
         counts.recopied_from_master += 1
+        _note_cleanup_loss(counts, photo_id, file_version)
         return
 
     # 4. Nothing found anywhere.
@@ -421,7 +501,11 @@ def format_summary(counts: CheckCounts, *, dry_run: bool) -> str:
         f"  already_ok:                {d['already_ok']}",
         f"  pointer_repaired_standard: {d['pointer_repaired_standard']}",
         f"  pointer_repaired_staging:  {d['pointer_repaired_staging']}",
+        f"  restored_from_versions:    {d['restored_from_versions']}",
         f"  recopied_from_master:      {d['recopied_from_master']}",
+        f"  cleanup_version_lost:      {d['cleanup_version_lost']}"
+        + ("   <-- re-run cleanup analysis on these and re-check their face boxes"
+           if d["cleanup_version_lost"] else ""),
         f"  truly_missing:             {d['truly_missing']}",
         f"backs scanned:               {d['backs_scanned']}",
         f"  already_ok:                {d['backs_already_ok']}",

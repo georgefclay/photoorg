@@ -26,6 +26,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 
 **Progress (2026-09-15):** Phase 9 closed. The phone-on-LAN upload test could not connect and was **deferred to the live domain** — it is now verification step 2/4 of Phase 14. **Phase order changed: 14 (deploy) runs next, before 10 (pages)**, so every remaining phase is tested on a phone against `https://cyberdinosaurs.com`. Prompt: `prompts/phase-14-deploy.md`. **Phase 14 deploys the site with metadata + one test group's files only.** The full 28 GB file push is deferred until the mini's classify/describe/date jobs finish and Phase 7 (cleanup) has replaced the working copies it will replace — otherwise most files would be pushed twice. VM disk (30 GB, 19 free) is enough for the test set; grow to 80 GB before the full push.
 
+**Progress (2026-09-27):** **Phase 7 (scan cleanup) built and green — not yet run on real scans.** Desktop pytest 291/291 (+1 skipped), web 151/151, one new migration `phase-7-cleanup` (up and down both exercised). New `desktop/src/photoarchive/modes/cleanup/` (analyse / geometry / ops / render / repo / accept / split / job / report / remote / ui), two CLI entry points (`run_cleanup`, `cleanup_report`), and 6 new test files (geometry, analyse, accept, split, report, ui, remote) plus tombstone tests on both sides. Scope measured against the live DB: **4 095** scans in scope (3 947 JPEG / 148 TIFF, up to 93.7 MP), 3 666 with faces, 4 187 labelled faces on scans, 54 batches, 639 back-shaped scans excluded, `orientation` NULL on every in-scope scan (so display frame == raw frame). **Verification steps 2–4 are blocked on the `D:` drive being attached** — masters, `WORKING_DIR` and `CLEANUP_DIR` all live there and only `C:` is mounted; batches 00001–00005 (~380 photos, not the ~250 the prompt guessed) are the first run once it is back. Three real bugs found by the tests on the way: a black scanner bed masking in as one whole-scan print (HSV saturation on near-black noise), a live `QThread` dropped when a preview render was replaced, and a preview landing wiping the last decision off the status bar.
+
 **Progress (2026-09-17):** Phase 9 fix-up 1 (web-origin ids) live on the VM: `WEB_ID_FLOOR` = 10¹², all seven tables bigint, sequences moved only under `PHOTOORG_DB_ROLE=web`; push pulls first; web never re-opens accepted suggestions. Found on the way: back images and face crops had never been pushed (0 on the VM) — push now sends backs, web cuts face crops on demand; `/media/display` serves ≤1600 px for phones; two slow queries fixed. Phase 10 foundation committed locally (shared query layer, group switcher, layout, Browse + attention strip); page work in progress.
 
 **Progress (2026-09-16, later):** Phase 6 fix-up 11 landed. Root cause of the `classify` hand-over crash: the Phase 9 local verification push ran the laptop web server against the desktop's own `photoorg` DB, and the sync upsert rewrote every `working_path` (12,677 photos + 826 backs) as a bare basename. Fixed with one working-file resolver, skip-not-abort hand-overs, `check_working_files` repair (now covers backs, post-condition "still bare = 0"), a shared-DB guard in `push()` (`/sync/status` identity check), and a separate `photoorg_web` DB on the laptop. **`classify`, `describe`, `estimate_date` handed over and running on the mini** (~104 h on the M4; M6 swap on 9/22 resumes the queue). Next: Phase 10.
@@ -142,6 +144,81 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Deskew, crop, multi-print split, colour-cast and fade correction. Always a new derived file; `file_version` bumps so sync re-pushes.
 - Review queue: accept / reject-to-manual-fix / remote enhance. Provider interface; Claid + null implementations; cost counter.
 - Accept when: 50 scans processed and reviewed; rejected ones sit in `manual-fix/`; master hashes unchanged.
+- **Decisions taken in the prompt's Answers (2026-09-27), all recorded in CLAUDE.md § Cleanup:**
+  - **Split children need an identity, not a file hash.** `photos.sha256` is
+    `sha256(master_sha256 + ':' + region_key)`; `photo_masters` grows `region` +
+    `region_key` and its global uniques on `master_path` / `sha256` become
+    per-region — three unique constraints made the spec as written unstorable.
+    The parent keeps the real filename (children get `#pN`) so re-ingest is a no-op.
+  - **Analysis stores a plan, not 8–10 GB of derivatives.** A ~2000 px preview per
+    proposal; the full-resolution render is cut on demand at 1:1 zoom and at Accept
+    with exactly the ticked ops.
+  - **Tombstones.** Push now sends a photo the web already holds but that has since
+    been junked / made private / soft-deleted once more with `is_deleted = true`
+    (`photos.tombstoned_at` is the marker). This fixes a standing gap for every
+    dedupe loser and triage-to-junk since Phase 14, not just split parents.
+  - Scope is `is_scan` (so the 19 scans under the digital root are included) minus
+    back-shaped photos; `needs_manual` proposals stay in the queue with the
+    geometric ops disabled; splits are never bulk-accepted; undo is session-scoped
+    (cross-restart recipe in `GC.md`); `detect_faces` is marked done on split
+    children that inherited faces; pHash/dHash are recomputed at Accept rather than
+    flagged stale; every threshold lives in `desktop/.env`.
+  - **Face boxes keep their width and height**, with the centre mapped exactly
+    through the affine — exactly invertible, and truer than growing the box to the
+    rotated corners' bounds, since the face rotates with the image. Only honest for
+    small angles, hence `CLEANUP_MAX_DESKEW_DEG` → `needs_manual`.
+  - **File moves sit inside the accept transaction**, unlike Triage's after-commit
+    rule: a committed `file_version` bump with no bytes is unrecoverable, while a
+    failed triage move is not.
+- Found while building: a **black scanner bed masked in as one print covering the
+  whole scan**, because HSV saturation is `(max-min)/max` and a near-black pixel
+  with scanner noise reads as highly saturated. The colour-is-print clause now has
+  a brightness floor.
+- Two more found by the GUI tests: replacing a running `BackgroundJob` reference
+  let Qt destroy a live thread (now parked until `finished` fires, and joined on
+  close), and a preview render landing wiped the last decision off the status bar
+  (now two halves, the decision persisting — the Phase 3 no-flash-messages lesson).
+- Also hardened on the way through: `check_working_files` now restores a missing
+  working file from `WORKING_DIR/_versions/` before falling back to the master,
+  and a cleaned photo rebuilt from the master is reported as
+  `cleanup_version_lost` rather than silently reverted.
+- Found by the first real run on batches 1–5: every multi-print scan was also
+  flagged `needs_manual: print_too_small`, because the whole-scan size gate was
+  judging the largest single print. The split gates now run first and exempt it.
+- Also corrected: invariant 3's "a 16-bit TIFF stays 16-bit" holds for
+  *greyscale* only — Pillow has no 16-bit RGB mode at all, so colour is reduced
+  to 8 bits once on load instead of raising at save time.
+- **Memory was the fifth bug, and the worst.** A preview render loaded the full
+  image and put it through float32 copies — 1.1 GB for one copy of the 93.7 MP
+  scan — and the first report run was killed for low memory. Both tonal ops now
+  compose into one LUT per channel (mapped in place when the array is a warp
+  result nobody else holds), and previews reduce the source *before* the warp
+  via `Transform.scaled_by`. Measured on that 93.7 MP scan: preview **7 MB**
+  peak (was ~1.5 GB), accept-time full render 188 MB, analysis 75 MB. The LUT is
+  within one level of the direct arithmetic and rounds once instead of twice.
+- Sixth: re-analysing a `clean` photo added a second `clean` row instead of
+  superseding the first, double-counting it in the report. `supersede_pending`
+  now covers `clean` too; decisions are still never superseded.
+- **Invariant 2 verified on real data.** Photos 169 (4 labelled faces) and 120
+  (2) accepted with deskew+crop, then every moved box's crop compared against
+  the same face cut from the kept `_versions/` copy with its old box: mean
+  difference **2.7–4.3 / 255**, i.e. JPEG noise. `diagnose_face_box` on both
+  reports "DB dims agree with file display dims". Pairs written to
+  `CLEANUP_DIR/_report/face-check/`.
+  (A first pass at that check compared `previous_value.working_path` against
+  `new_value.working_path` — the *same* path, since the working name never
+  changes across an accept — and appeared to show the boxes slipping. The kept
+  `_versions/` file is the only handle on the old pixels.)
+- **Colour estimator changed after the batch 1–5 review (PM, 2026-09-27).** The
+  answer-13 estimator (grey-world over every mid-tone) over-corrected: it fired
+  on 270 of 444 scans, median shift 23 levels, with the worst cases pinned at
+  both gain clamps — and photo #27 showed it turning winter grass cyan. Against
+  an estimator restricted to the least-colourful 40 % of mid-tones, 152 of the
+  270 were overstated more than twofold and 113 would lose the colour op
+  entirely. Now `CLEANUP_CAST_NEUTRAL_PCT=40` (100 restores grey-world);
+  `cast_gains` shares the selection; `grey_world_magnitude` is recorded on every
+  proposal for comparison. "Answer 13 described a measurement, not a mandate —
+  over-correction is exactly what the review was for."
 
 ### Phase 8 — Web: auth (Claude Code, Windows) — spec §7
 - Express + EJS. Request-access form → admin email with Approve/Deny (POST-confirm pages, 72 h tokens) → magic links → long-lived HTTP-only session in Postgres.
@@ -201,7 +278,10 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 9. Off-site backup of the VM's nightly pg_dump (S3) — no hurry.
 10. Refresh the fail2ban whitelist IP in GC.md if the ISP changes it.
 11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only) — Phase 12. `place_aliases` (Phase 11) needs the same treatment: no sync route yet.
+15. **Backs are out of scope for Phase 7 cleanup** (639 back-shaped scans excluded, same rule Dedupe uses). Deskew/crop for backs needs its own pass — the transcription is already captured, so this is cosmetic; schedule after Phase 12.
+16. Cleanup's cross-restart undo is manual (from `WORKING_DIR/_versions/` + the `cleanup.accept` audit row); the recipe is in `GC.md`. A UI for it only if George ever wants one.
 12. ~~Phase 10 phone checklist~~ — done 2026-09-17.
+14. Search name strip shows phonetic-only people for ordinary words ("Christmas" → Christina). Harmless (score 50, never displaces hits); if it annoys anyone, hide phonetic-only people from the strip when the same term produced full-text hits. Phase 11 fix-up when convenient.
 13. Check `photos.orientation` on the desktop: Code found no photo with orientation set in the 408-photo local copy. Either the sync omits the column or the fix-up 6 backfill missed. `select orientation, count(*) from photos group by 1` on `photoorg`; phone photos should show 6/8 as well as 1.
 
 ## 6. Risks

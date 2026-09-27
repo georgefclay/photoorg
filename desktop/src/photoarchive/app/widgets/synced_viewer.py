@@ -1,7 +1,7 @@
 """Two side-by-side QGraphicsView panes whose zoom and pan stay in sync.
 
 Reusable: Phase 4 Dedupe uses it for keeper vs loser at full resolution;
-Phase 7 Cleanup will use it for before/after. The API is simple:
+Phase 7 Cleanup uses it for before/after. The API is simple:
 
     viewer = SyncedViewer()
     viewer.set_left(QPixmap(...), caption="keeper")
@@ -9,6 +9,20 @@ Phase 7 Cleanup will use it for before/after. The API is simple:
 
 Wheel over either pane zooms both around the cursor. Left-drag pans both.
 "Fit to window" (F key or fit_to_window()) resets to show each full pixmap.
+
+Detail tiles (Phase 7, answer 5). A 93 MP TIFF cannot sit in two panes at
+once, so Cleanup sets a *base* layer — a viewport-sized downscale stretched
+to the full-resolution scene size — and, once the zoom reaches 1:1, drops a
+true full-resolution crop of the visible region on top:
+
+    viewer.set_left_base(preview_pix, scene_w, scene_h, caption="before")
+    ...
+    viewer.set_left_detail(crop_pix, x, y)      # 1:1 at scene (x, y)
+    viewer.clear_details()
+
+`view_changed` fires after any zoom or pan so the owner can decide whether a
+detail tile is wanted; `visible_scene_rects()` and `scale_factor()` say what
+to cut.
 """
 from __future__ import annotations
 
@@ -54,20 +68,59 @@ class _SyncedGraphicsView(QGraphicsView):
         self.setBackgroundBrush(Qt.black)
         self._pan_last: QPoint | None = None
         self._item: QGraphicsPixmapItem | None = None
+        self._detail: QGraphicsPixmapItem | None = None
 
     def set_pixmap(self, pix: QPixmap | None) -> None:
         self.scene().clear()
         self._item = None
+        self._detail = None
         if pix is None or pix.isNull():
             return
         self._item = self.scene().addPixmap(pix)
         self.setSceneRect(QRectF(pix.rect()))
 
+    def set_base(self, pix: QPixmap | None, scene_w: int, scene_h: int) -> None:
+        """Show `pix` stretched to a `scene_w` x `scene_h` scene, so scene
+        coordinates are the image's real full-resolution pixels however
+        coarse the bitmap behind them is."""
+        self.scene().clear()
+        self._item = None
+        self._detail = None
+        if pix is None or pix.isNull() or scene_w <= 0 or scene_h <= 0:
+            return
+        item = self.scene().addPixmap(pix)
+        if pix.width() > 0:
+            item.setScale(scene_w / float(pix.width()))
+        item.setTransformationMode(Qt.SmoothTransformation)
+        item.setZValue(0)
+        self._item = item
+        self.setSceneRect(QRectF(0, 0, scene_w, scene_h))
+
+    def set_detail(self, pix: QPixmap | None, x: float, y: float) -> None:
+        self.clear_detail()
+        if pix is None or pix.isNull():
+            return
+        item = self.scene().addPixmap(pix)
+        item.setOffset(x, y)
+        item.setZValue(1)
+        self._detail = item
+
+    def clear_detail(self) -> None:
+        if self._detail is not None:
+            self.scene().removeItem(self._detail)
+            self._detail = None
+
     def pixmap_size(self) -> tuple[int, int] | None:
         if self._item is None:
             return None
-        r = self._item.pixmap().rect()
-        return r.width(), r.height()
+        r = self.sceneRect()
+        return int(r.width()), int(r.height())
+
+    def visible_scene_rect(self) -> QRectF:
+        return self.mapToScene(self.viewport().rect()).boundingRect()
+
+    def scale_factor(self) -> float:
+        return float(self.transform().m11())
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         factor = _ZOOM_STEP if event.angleDelta().y() > 0 else 1 / _ZOOM_STEP
@@ -135,6 +188,8 @@ class _PaneCaption:
 class SyncedViewer(QWidget):
     """Two synchronised graphics panes with captions above each."""
 
+    view_changed = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._left_caption = QLabel("")
@@ -178,13 +233,54 @@ class SyncedViewer(QWidget):
         self._right_view.set_pixmap(pix)
         self._right_caption.setText(caption)
 
+    # -- base / detail layers (Phase 7) ---------------------------------
+
+    def set_left_base(
+        self, pix: QPixmap | None, scene_w: int, scene_h: int, caption: str = "",
+    ) -> None:
+        self._left_view.set_base(pix, scene_w, scene_h)
+        self._left_caption.setText(caption)
+
+    def set_right_base(
+        self, pix: QPixmap | None, scene_w: int, scene_h: int, caption: str = "",
+    ) -> None:
+        self._right_view.set_base(pix, scene_w, scene_h)
+        self._right_caption.setText(caption)
+
+    def set_left_detail(self, pix: QPixmap | None, x: float, y: float) -> None:
+        self._left_view.set_detail(pix, x, y)
+
+    def set_right_detail(self, pix: QPixmap | None, x: float, y: float) -> None:
+        self._right_view.set_detail(pix, x, y)
+
+    def clear_details(self) -> None:
+        self._left_view.clear_detail()
+        self._right_view.clear_detail()
+
+    def set_left_caption(self, caption: str) -> None:
+        self._left_caption.setText(caption)
+
+    def set_right_caption(self, caption: str) -> None:
+        self._right_caption.setText(caption)
+
+    def scale_factor(self) -> float:
+        return self._left_view.scale_factor()
+
+    def visible_scene_rects(self) -> tuple[QRectF, QRectF]:
+        return (self._left_view.visible_scene_rect(),
+                self._right_view.visible_scene_rect())
+
+    def scene_sizes(self) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        return self._left_view.pixmap_size(), self._right_view.pixmap_size()
+
     def fit_to_window(self) -> None:
         for v in (self._left_view, self._right_view):
             if v._item is not None:
                 v.resetTransform()
                 v.fitInView(v.sceneRect(), Qt.KeepAspectRatio)
+        self.view_changed.emit()
 
-    def _on_zoom(self, factor: float, anchor: QPoint) -> None:
+    def _on_zoom(self, factor: float, anchor: QPoint) -> None:  # noqa: D401
         sender = self.sender()
         anchor_left = anchor if sender is self._left_view else self._map_across(
             anchor, self._right_view, self._left_view,
@@ -194,10 +290,12 @@ class SyncedViewer(QWidget):
         )
         self._left_view.apply_zoom(factor, QPointF(anchor_left))
         self._right_view.apply_zoom(factor, QPointF(anchor_right))
+        self.view_changed.emit()
 
     def _on_pan(self, dx: int, dy: int) -> None:
         self._left_view.apply_pan(dx, dy)
         self._right_view.apply_pan(dx, dy)
+        self.view_changed.emit()
 
     @staticmethod
     def _map_across(

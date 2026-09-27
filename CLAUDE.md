@@ -160,6 +160,195 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Not duplicates (N):** inserts `(least, greatest)` exclusions for every
   pair in the group; scan honours them forever.
 
+## Cleanup (Phase 7 onwards)
+
+### The four invariants
+1. **Cleanup writes a new derived file; it never overwrites.** On Accept the
+   current working file moves to `WORKING_DIR/_versions/{photo_id:08d}_v{file_version}.{ext}`
+   (**kept forever**), the render takes the standard working name,
+   `file_version` bumps (so sync re-pushes), `photos.width/height/file_size`
+   update, the thumbnail regenerates, and `photos.phash/dhash` are
+   **recomputed from the new pixels** in the same statement (there is no
+   staleness flag — fix-up-free by construction). `photos.sha256` stays the
+   master's: it is the photo's identity, not the working copy's.
+2. **Face boxes travel with the pixels.** Every geometric op composes into one
+   affine (`modes/cleanup/geometry.Transform`) and Accept applies that same
+   transform to every `faces.bbox`, regenerates the face crops, and keeps the
+   embeddings. `apply_bbox` maps the box **centre** exactly and preserves w/h —
+   exactly invertible, and more honest than growing the box to the
+   axis-aligned bounds of the rotated corners, because the face rotates with
+   the image. That only holds for small angles, which is why anything over
+   `CLEANUP_MAX_DESKEW_DEG` (15°) is `needs_manual`. Tonal ops leave boxes
+   alone. A box outside the new frame (less than 50 % of its area surviving),
+   or straddling two split regions, is soft-deleted with
+   `delete_reason='cleanup_out_of_frame'` — never silently dropped.
+3. **Format follows the source.** JPEG in → JPEG q95 out; TIFF in → TIFF (LZW)
+   out. `ops.py` is dtype-agnostic, so a 16-bit **greyscale** TIFF stays
+   16-bit (`I;16`) end to end. Pillow has no 16-bit RGB mode — `fromarray` on
+   a 3-channel uint16 array raises — so multi-channel high-bit-depth input is
+   reduced to 8 bits once, in `load_display_array`, rather than blowing up at
+   save time. Pillow's TIFF reader already hands 16-bit RGB over as 8-bit.
+4. **Masters untouched.** The ingest masters-guard probe runs at the start of
+   every `cleanup_analyse`; any writable root raises `MastersWritable` and the
+   run refuses, printing the `icacls` deny.
+
+### Scope and proposals
+- **Scope:** `is_scan` (not the root kind — that also catches the 19 scans
+  filed under the digital root), `triage_status in ('keep','private')`,
+  `is_deleted=false`, **minus back-shaped photos** (a `possible_back` triage
+  hint or any `ingest_pairings.back_photo_id` row), exactly as Dedupe
+  excludes them. Backs get their own pass later. Fronts *with* a
+  `photo_backs` row are in scope.
+- **Everything is a proposal.** `cleanup_proposals` holds
+  `pending|accepted|rejected|manual|clean|superseded`, one live `pending` per
+  photo (partial unique index). A photo where nothing would change is
+  `clean` and never reaches the queue. Re-analysis marks the old row
+  `superseded` rather than deleting it — `pending` **and `clean`**, since a
+  clean photo has no decision to preserve and leaving its old row behind
+  double-counted it in the report. A decision (`accepted`, `rejected`,
+  `manual`) is never superseded.
+- **Analysis stores a plan, not a file.** `operations` (jsonb) holds what was
+  measured; the full-resolution derivative is cut **on demand** — when the
+  review pane zooms to 1:1, and again at Accept with exactly the ops still
+  ticked. Only a ~2000 px preview is written at analysis time. Pre-rendering
+  4 000 derivatives would cost 8–10 GB most of which gets re-rendered.
+- **Analyse at ≤ `CLEANUP_ANALYSE_EDGE` (2000 px), apply at full resolution**,
+  one image in memory at a time. *Memory is a real constraint, not a slogan*:
+  the biggest scan is 93.7 MP = 281 MB as uint8 RGB, and one float32 copy of
+  that is 1.1 GB. So (a) both tonal ops compose into **one lookup table per
+  channel** (`ops.tone_luts`, 256 entries for uint8 / 65536 for uint16), mapped
+  in a single pass — and in place when the array is a warp result nobody else
+  holds; and (b) `render_preview` reduces the source *before* the warp and
+  scales the transform with `Transform.scaled_by`, so a thumbnail never puts a
+  93 MP array through a full-resolution rotation. Measured on that scan:
+  preview 7 MB peak, accept-time full render 188 MB, analysis 75 MB. The LUT
+  is within one level of the direct arithmetic and rounds once instead of
+  twice, so it is marginally *more* accurate. Every measurement is recorded in the
+  **full-resolution display frame**, so nothing needs re-analysing to apply.
+- **All thresholds live in `desktop/.env`** (`CLEANUP_*`, documented in
+  `.env.example`) so they retune without a code change. The crop inset
+  **scales with DPI**: `CLEANUP_CROP_INSET_PX_AT_300` px at 300 DPI, so 16 px
+  at 1200; unknown DPI uses the base value.
+- **Bed detection tries white and black.** A saturated pixel only counts as
+  print above a brightness floor (`BED_SAT_MIN_VALUE`): HSV saturation is
+  `(max-min)/max`, so a near-black pixel with a few levels of scanner noise
+  reads as *highly* saturated and a black bed would otherwise mask in as one
+  print covering the whole scan.
+- **A multi-print scan is not a small print.** The split gates (per region
+  ≥ `CLEANUP_SPLIT_MIN_FRAC` and rectangular) run *before* the whole-scan size
+  gate and exempt it: on a scan of three prints the largest covers a third of
+  the bed, which is the analyser understanding the scan, not failing to find a
+  print. `print_frac_all` records the combined figure. The aspect and skew
+  checks still apply, per region.
+- **`needs_manual` stays in the queue** (`print_too_small`,
+  `implausible_aspect`, `skew_too_large`, `has_back`, `no_print_found`): the
+  geometric checkboxes are disabled with the reason in the tooltip, the tonal
+  ones are still offered. `MANUAL_FIX_DIR` is written only on an explicit **R**.
+- **Colour cast is measured on the print's near-neutral mid-tones, not all of
+  them.** `ops.neutral_midtones` narrows the mid-tones (inside the rect inset
+  by 8 %, since the edge carries paper border and bed bleed) to the
+  least-colourful `CLEANUP_CAST_NEUTRAL_PCT` per cent — 40 by default; 100
+  restores plain grey-world. **Grey-world over every mid-tone assumes the
+  average scene is grey, which is exactly where it fails**: a lawn, a winter
+  field or a warm indoor shot reads as a cast and gets pushed into the
+  opposite one. An age cast shifts the paper itself, greys included, so it
+  survives the narrowing while the scene does not. Measured on batches 1–5:
+  grey-world fired on 270 of 444 scans (median magnitude 14.2) against 168
+  (6.4) for this estimator, and 152 of those 270 were overstated more than
+  twofold. `cast_gains` uses **the same pixel selection** as the measurement —
+  gains from a wider set than the measurement would not be the correction the
+  caption promised. Every proposal also records `grey_world_magnitude` so the
+  gap stays visible. p95 chroma under `CLEANUP_MONO_CHROMA_MAX` → mono; high
+  chroma with hue circular variance under `CLEANUP_SEPIA_HUE_VAR_MAX` →
+  sepia. Both skip the op and say so in the caption. Gains are clamped to
+  [0.74, 1.35] so a heavy cast cannot blow a channel — a strong cast is
+  improved, not erased.
+- **Per-op checkboxes really change the geometry.** `render.plan_from` is the
+  single place ticks become pixels: unticking *deskew* crops to the print's
+  axis-aligned bounds instead; unticking *crop* keeps the whole rotated
+  canvas, bed-filled at the corners.
+- **Bulk accept is geometric-only**: deskew and/or crop, no tonal op, no
+  split, nothing `needs_manual`. Tonal ops and splits always go through the
+  eye.
+
+### Split (multi-print scans)
+- **A split child's `photos.sha256` is an identity key, not a file hash:**
+  `sha256(master_sha256 + ':' + region_key)`. Its `photo_masters` row points
+  at the **same master file** as its siblings with `region` (jsonb, frame
+  `display`) and `region_key` (`'x,y,w,h'`); the old global uniques on
+  `master_path` and `sha256` are now per `(…, region_key)`. The parent keeps
+  the real `source_filename` so re-ingesting the master stays a no-op;
+  children take `<parent filename>#pN`.
+- **Faces are assigned by containment**: the region holding ≥ 50 % of the box
+  wins, unless a second region also holds ≥ 20 % — then it straddles the cut
+  and is soft-deleted (invariant 2). Album memberships **and live
+  `photo_groups` rows** are copied to every child: group membership is what
+  makes a photo visible on the web, so dropping it would quietly hide the
+  print from the family the parent was shared with.
+- **`detect_faces` is marked done** on a child that inherited faces, so the
+  next jobs run doesn't detect them a second time. `classify` / `describe` /
+  `estimate_date` run on children normally. Existing suggestions and
+  `photo_job_status` on an ordinary (non-split) accept are left alone.
+- **The parent leaves through the front door**:
+  `triage.apply_decision('junk', hint='split_parent')`, so it is quarantined,
+  audited and restorable.
+- **A scan with a `photo_backs` row is never auto-split** — which child owns
+  the back is not the analyser's guess to make; it becomes `needs_manual`
+  with "has a back — split by hand".
+- **Splits are never bulk-accepted**, and `accept_proposal` refuses one
+  (`split.accept_split` is the only path).
+
+### Ordering, undo, remote
+- **File moves happen inside the transaction, just before commit** — the
+  opposite of Triage's rule, deliberately. A failed triage move leaves a
+  recoverable mismatch; a committed `file_version` bump whose bytes never
+  arrived is unrecoverable. `_swap_in_new_version` moves the old copy aside,
+  then the render into place, and puts the old one back if the second move
+  fails.
+- **`check_working_files` is cleanup-aware.** A missing working file is now
+  rebuilt from the newest `_versions/` copy before the master is considered —
+  the master is the raw scan and would undo every cleanup the photo has had.
+  When only the master is left on a photo with `file_version > 1` the copy
+  still happens (a photo beats no photo) but it is audited as
+  `…recopied_from_master_cleanup_lost` and counted in `cleanup_version_lost`,
+  whose ids the summary tells George to re-clean and re-check the boxes on.
+  Never a silent revert.
+- **Undo (Z) is session-scoped.** It keeps the cleaned file (moved into
+  `_versions/` under its own version), restores the previous one to the
+  working name and bumps `file_version` **again** — history is never
+  rewritten — and restores each box **verbatim from the `cleanup.accept`
+  audit row** (exact; `Transform.invert()` exists and is tested, but the
+  recorded box is better). Cross-restart undo is a manual job from
+  `_versions/` plus the audit row: the recipe is in `GC.md`.
+- **Remote enhance is pluggable and off by default.**
+  `CLEANUP_REMOTE_PROVIDER=null|claid`; with no `CLAID_API_KEY` the **E** key
+  is disabled with a tooltip. The returned image becomes a **new pending
+  proposal** (`operations.ops.remote_enhance`) through the same review, never
+  auto-accepted; if the provider resized, the boxes go through a scale
+  transform. Spend is recorded in `cleanup_spend` before the job completes;
+  the status bar shows the session total, the header the cumulative one. The
+  Claid client is only ever exercised against a mock HTTP server.
+- **Two UI rules the GUI tests enforce.** (a) *Never drop the last Python
+  reference to a running `BackgroundJob`* — Qt aborts with "QThread: Destroyed
+  while thread is still running". Cancelling a preview render and starting the
+  next one parks the old job in `self._live_jobs` until its own `finished`
+  signal fires, and `closeEvent` cancels and joins every live job. (b) *The
+  status bar has two halves*: the left is the last **decision** and persists
+  until the next one; the right is context (which photo, what was measured,
+  what a job is doing). A preview landing must never wipe out what George just
+  did — the Phase 3 "no flash messages" lesson, restated.
+- **Audit namespace:** `cleanup.propose`, `cleanup.accept`, `cleanup.reject`,
+  `cleanup.split`, `cleanup.remote`, `cleanup.undo`, plus
+  `cleanup_analyse.start` on the `job_run`.
+- **Tombstones (Phase 7 answer 3).** Junk, private and soft-deleted photos
+  are excluded from the push selector, so a photo the web already holds that
+  later goes away — a dedupe loser, a triage-to-junk, a split parent — would
+  stay visible on the VM forever. `push()` now sends each such photo **once**
+  with `is_deleted=true` and stamps `photos.tombstoned_at`. The marker has to
+  be its own column: `set_updated_at` fires on the `synced_at` write, so
+  `synced_at > updated_at` can never hold. The web never asks for a
+  tombstone's file bytes.
+
 ## Inference client / jobs (Phase 6 onwards)
 - **`INFERENCE_URL` / `INFERENCE_TOKEN`** in `desktop/.env`. The single-image
   endpoints, `/health`, and the unattended-batch surface
@@ -345,11 +534,16 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   and the file must exist. `python -m photoarchive.tools.check_working_files`
   scans every photo; for anything missing it looks under the standard
   name (updates the pointer only), then under `_staging/{sha}.{ext}`
-  (moves into place, bumps `file_version`), then copies from the
+  (moves into place, bumps `file_version`), **then the newest
+  `_versions/{id:08d}_v{n}.{ext}` (Phase 7)**, then copies from the
   preferred master as a last resort (masters are read-only — copy,
   never move). Audit row per repair; truly-missing photo ids are
   listed. `--dry-run` for a report. Run this in the Phase 9 push
-  pre-flight and after any `_staging/` reshuffle.
+  pre-flight and after any `_staging/` reshuffle. A cleaned photo
+  (`file_version > 1`) rebuilt from the master has lost its cleanup and
+  its face-box frame: that is counted as `cleanup_version_lost`, audited
+  as `…recopied_from_master_cleanup_lost`, and the ids are printed —
+  never a silent revert.
 - **"Not a face"** soft-deletes the row (`is_deleted=true`, `deleted_at`,
   `delete_reason`) and writes an audit row. Every selector filters out
   deleted rows.
@@ -641,3 +835,16 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - `shared/migrations/` — ordered Postgres migrations.
 - `prompts/phase-NN-*.md` — the prompt for each phase; George adds answers
   under `## Answers` and says "go".
+
+## Command-line entry points (desktop)
+- `python -m photoarchive.tools.run_ingest` — ingest a master root.
+- `python -m photoarchive.tools.run_presort` — triage hints.
+- `python -m photoarchive.tools.run_cleanup [--batch "Batch 00001"] [--reanalyse]
+  [--limit N] [--no-previews] [--report]` — Phase 7 `cleanup_analyse`.
+  Masters-guard first; resumable; `--report` writes the run report.
+- `python -m photoarchive.tools.cleanup_report [--batch …] [--samples N]` —
+  the report on its own (counts, timings, op frequency, before/after sheet).
+- `python -m photoarchive.tools.check_working_files [--dry-run]` — working-file
+  integrity (now `_versions/`-aware; see Cleanup).
+- `python -m photoarchive.tools.repair_face_boxes`,
+  `python -m photoarchive.tools.diagnose_face_box PHOTO_ID` — face geometry.
