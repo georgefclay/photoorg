@@ -95,9 +95,18 @@ def plan_from(
         raise ValueError("plan_from needs the source dimensions")
 
     rect_json = region_rect or (operations or {}).get("print_rect")
-    inset = float(analysis.get("inset_px")
-                  or inset_px_for_dpi(analysis.get("dpi"),
-                                      settings.CLEANUP_CROP_INSET_PX_AT_300))
+    # Fix-up 3: the analyser cropped with `inset - safety`, so rebuilding the
+    # transform has to use the same number or the preview and the accepted
+    # file would disagree. The crop op records exactly what was used.
+    crop_op = ((operations or {}).get("ops") or {}).get("crop") or {}
+    if "inset_px" in crop_op:
+        inset = float(crop_op["inset_px"])
+    else:
+        base = float(analysis.get("inset_px")
+                     or inset_px_for_dpi(analysis.get("dpi"),
+                                         settings.CLEANUP_CROP_INSET_PX_AT_300))
+        safety = float(analysis.get("safety_px") or 0.0)
+        inset = max(0.0, base - safety)
 
     deskew = "deskew" in want and "deskew" in o
     crop = "crop" in want and ("crop" in o or region_rect is not None)

@@ -76,7 +76,10 @@ def test_the_report_carries_the_counts_timings_and_pairs(tmp_path):
 
 def test_samples_are_spread_across_the_op_kinds(tmp_path):
     """One boring deskew tells George nothing about the colour work."""
-    settings = _test_settings(tmp_path, TEST_DATABASE_URL)
+    # Levels is opt-in since fix-up 2; switch it on so there is a second
+    # op-kind bucket for the sampler to spread across.
+    settings = _test_settings(tmp_path, TEST_DATABASE_URL,
+                              CLEANUP_LEVELS_ENABLED=True)
     _init_pool(settings)
     _reset(TEST_DATABASE_URL)
 

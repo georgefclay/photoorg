@@ -106,6 +106,53 @@ class Settings(BaseSettings):
     # Crop inset, in pixels at 300 DPI. Scaled by the master's DPI when
     # known (so 16 px at 1200 DPI); this value is used as-is otherwise.
     CLEANUP_CROP_INSET_PX_AT_300: float = Field(default=4.0, ge=0.0)
+    # Fix-up 3: prefer under-cropping. A bed sliver left along an edge is
+    # harmless and obvious; a missing strip of the photograph is neither. This
+    # margin is pushed back outward after the edge is found, DPI-scaled like
+    # the inset.
+    CLEANUP_CROP_SAFETY_PX_AT_300: float = Field(default=6.0, ge=0.0)
+    # The content guard: how deep a strip to examine either side of a proposed
+    # crop edge, as a fraction of the print's short side.
+    CLEANUP_EDGE_STRIP_FRAC: float = Field(default=0.02, gt=0.0, le=0.25)
+    # What counts as bed when deciding whether an edge is a print edge: within
+    # this many grey levels of the bed's own tone, and this calm.
+    CLEANUP_BED_TOL: float = Field(default=18.0, ge=0.0)
+    # Calmness is judged against *this scan's* own bed, measured from its
+    # corners, because a fixed threshold cannot separate the two: genuine bed
+    # runs from std 1.2 on a clean scan to 10 on a noisy one, and photo #15's
+    # white curtain sits at 10.5 in between. Within one scan the gap is
+    # decisive — #15's bed reads 1.2-1.6 against that curtain's 10.5. The
+    # allowance is NOISE_FACTOR x the scan's own bed noise, floored and
+    # capped so a freakish reading cannot open or close the gate completely.
+    # How the print mask separates print from bed.
+    #   calm       — near the bed tone AND locally flat AND reachable from the
+    #                scan border. Scanner bed is calm in a way no photograph
+    #                is, so light picture content (a white cardigan, a pale
+    #                sky) stays print instead of reading as bed.
+    #   brightness — the original: darker than the bed, or saturated.
+    # Measured over batches 1-5, `calm` left the crop guard less work on 87
+    # scans and more on 9 (all small), and cut the p90 residual push from
+    # 2.14 % to 0.35 % of the print's short side. It does not solve every case
+    # on its own — #15's curtain is locally smooth — which is why the guard
+    # stays as the second line of defence either way.
+    CLEANUP_MASK_MODE: str = Field(default="calm")
+    # Window for the local standard deviation the `calm` mask uses, as a
+    # fraction of the analysis frame's long edge (floored at MIN px).
+    # It has to scale with the image: a fixed 7 px sits inside a single smooth
+    # fold of #15's curtain at 2000 px and reads as calm as bed, while the
+    # same 7 px on a 520 px thumbnail spans several folds and reads as print.
+    # Measured on #15, whose true left edge is x=95: windows of 7 and 11 put
+    # it at 379, windows of 15 upward put it at 85-91. 0.013 gives 26 px at
+    # 2000 and 7 px at 520.
+    CLEANUP_MASK_STD_WINDOW_FRAC: float = Field(default=0.013, gt=0.0, le=0.2)
+    CLEANUP_MASK_STD_WINDOW_MIN: int = Field(default=7, ge=3)
+    CLEANUP_BED_NOISE_FACTOR: float = Field(default=3.0, gt=0.0)
+    CLEANUP_BED_MIN_STD: float = Field(default=3.0, ge=0.0)
+    CLEANUP_BED_MAX_STD: float = Field(default=12.0, ge=0.0)
+    # How far the guard may drag an edge before the detection is judged
+    # untrustworthy on that side, as a fraction of the print's short side.
+    # Beyond it the side is not cropped at all.
+    CLEANUP_EDGE_MAX_MOVE_FRAC: float = Field(default=0.05, gt=0.0, le=1.0)
     # A component must cover this fraction of the scan to count as a print
     # in a multi-print split.
     CLEANUP_SPLIT_MIN_FRAC: float = Field(default=0.12, gt=0.0, le=1.0)
@@ -152,6 +199,16 @@ class Settings(BaseSettings):
     CLAID_API_KEY: str = Field(default="")
     CLAID_BASE_URL: str = Field(default="https://api.claid.ai")
     CLAID_COST_PER_OP_USD: float = Field(default=0.03, ge=0.0)
+
+    @field_validator("CLEANUP_MASK_MODE")
+    @classmethod
+    def _known_mask_mode(cls, v: str) -> str:
+        v = (v or "calm").strip().lower()
+        if v not in {"calm", "brightness"}:
+            raise ValueError(
+                f"CLEANUP_MASK_MODE {v!r} must be one of calm, brightness"
+            )
+        return v
 
     @field_validator("CLEANUP_REMOTE_PROVIDER")
     @classmethod

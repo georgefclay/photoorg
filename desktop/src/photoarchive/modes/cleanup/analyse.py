@@ -91,6 +91,81 @@ def _border_ring(grey: np.ndarray) -> np.ndarray:
     return ring
 
 
+def _local_std(grey: np.ndarray, win: int) -> np.ndarray:
+    """Per-pixel standard deviation over a `win` x `win` window."""
+    g = grey.astype(np.float32)
+    mean = cv2.blur(g, (win, win))
+    sq = cv2.blur(g * g, (win, win))
+    return np.sqrt(np.maximum(0.0, sq - mean * mean))
+
+
+def _bed_reachable_from_border(bed_mask: np.ndarray) -> np.ndarray:
+    """Restrict a bed mask to the part the scan's border can reach.
+
+    A large smooth pale area *inside* the print — an overexposed sky, a white
+    wall — is bed-coloured and calm, but it is enclosed by photograph. Only
+    bed that touches the outside of the scan is really bed.
+    """
+    h, w = bed_mask.shape
+    filled = bed_mask.copy()
+    ff = np.zeros((h + 2, w + 2), np.uint8)
+    step_x = max(1, w // 64)
+    step_y = max(1, h // 64)
+    seeds = ([(x, 0) for x in range(0, w, step_x)]
+             + [(x, h - 1) for x in range(0, w, step_x)]
+             + [(0, y) for y in range(0, h, step_y)]
+             + [(w - 1, y) for y in range(0, h, step_y)])
+    for x, y in seeds:
+        if filled[y, x] == 1:
+            cv2.floodFill(filled, ff, (x, y), 2)
+    return (filled == 2).astype(np.uint8)
+
+
+def _print_mask_calm(
+    rgb: np.ndarray, bed: "BedInfo", settings: Settings,
+) -> np.ndarray:
+    """Bed is near the bed tone, locally flat, and reachable from the border.
+
+    Fix-up 3. The brightness mask below calls a pixel bed when it is *darker
+    than the bed*, which is why photo #15's white cardigan and white curtain
+    became bed and the crop took a person's arm with them. Scanner bed is calm
+    in a way no photograph is — #15's bed reads std 1.2-1.6 — so calmness
+    separates them where brightness cannot.
+
+    It is not sufficient on its own: #15's curtain is locally smooth at a 7 px
+    window even though a full strip across it reads 10.5, so the guard in
+    `guard_crop_edges` remains the thing that actually protects the picture.
+    What this buys is a much better starting rectangle — measured over batches
+    1-5, the guard's p90 residual push fell from 2.14 % to 0.35 %.
+    """
+    grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    noise = bed_noise(rgb, bed, settings)
+    allowed = min(settings.CLEANUP_BED_MAX_STD,
+                  max(settings.CLEANUP_BED_MIN_STD,
+                      settings.CLEANUP_BED_NOISE_FACTOR * noise))
+    long_edge = max(rgb.shape[0], rgb.shape[1])
+    win = max(settings.CLEANUP_MASK_STD_WINDOW_MIN,
+              int(round(long_edge * settings.CLEANUP_MASK_STD_WINDOW_FRAC))) | 1
+    near = np.abs(grey.astype(np.float32) - bed.grey) <= settings.CLEANUP_BED_TOL
+    calm = _local_std(grey, win) <= allowed
+    bed_mask = _bed_reachable_from_border((near & calm).astype(np.uint8))
+    mask = ((1 - bed_mask) * 255).astype(np.uint8)
+    return _clean_mask(mask, rgb)
+
+
+def _clean_mask(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    """Close gaps inside a print (a sky, a white shirt), then drop specks."""
+    long_edge = max(rgb.shape[0], rgb.shape[1])
+    k = max(3, int(round(long_edge * 0.01)) | 1)
+    mask = cv2.morphologyEx(
+        mask, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    k2 = max(3, int(round(long_edge * 0.004)) | 1)
+    return cv2.morphologyEx(
+        mask, cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k2, k2)))
+
+
 def _print_mask(rgb: np.ndarray, bed_kind: str, bed_grey: float) -> np.ndarray:
     grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
@@ -102,17 +177,7 @@ def _print_mask(rgb: np.ndarray, bed_kind: str, bed_grey: float) -> np.ndarray:
     # Colour is print even where luminance matches the bed — but only above
     # the brightness floor (see BED_SAT_MIN_VALUE).
     mask = mask | ((sat > BED_SAT_MIN) & (value > BED_SAT_MIN_VALUE))
-    mask = mask.astype(np.uint8) * 255
-
-    # Close gaps inside a print (a sky, a white shirt), then drop specks.
-    long_edge = max(rgb.shape[0], rgb.shape[1])
-    k = max(3, int(round(long_edge * 0.01)) | 1)
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
-    k2 = max(3, int(round(long_edge * 0.004)) | 1)
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k2, k2))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
-    return mask
+    return _clean_mask(mask.astype(np.uint8) * 255, rgb)
 
 
 # Fix-up 2: how much of the print's outline has to agree on an orientation
@@ -312,7 +377,11 @@ def detect_bed_and_prints(
 
     best: tuple[BedInfo, list[Component]] | None = None
     for kind, bed_grey in candidates:
-        mask = _print_mask(rgb, kind, bed_grey)
+        probe = BedInfo(kind=kind, grey=bed_grey, score=0.0)
+        if settings.CLEANUP_MASK_MODE == "calm":
+            mask = _print_mask_calm(rgb, probe, settings)
+        else:
+            mask = _print_mask(rgb, kind, bed_grey)
         comps = _components(mask, settings.CLEANUP_SPLIT_MIN_FRAC * 0.5)
         if comps:
             top = comps[0]
@@ -327,6 +396,226 @@ def detect_bed_and_prints(
             best = (info, comps)
     assert best is not None
     return best
+
+
+# --------------------------------------------------------------------------
+# The content guard (fix-up 3)
+# --------------------------------------------------------------------------
+
+@dataclass
+class EdgeVerdict:
+    """What the guard found on one side of the proposed crop."""
+    side: str
+    original: float          # the edge the detector proposed
+    resolved: float          # where it ended up
+    found_bed: bool          # did we reach genuine bed?
+    hit_boundary: bool       # or did we run off the scan first?
+    steps: int
+    outside_grey: float = 0.0
+    outside_std: float = 0.0
+    inside_edge_energy: float = 0.0
+    interior_edge_energy: float = 0.0
+
+    @property
+    def moved_px(self) -> float:
+        return abs(self.resolved - self.original)
+
+    # How far the guard had to move this edge, as a fraction of the print's
+    # short side. Filled in by `guard_crop_edges`.
+    moved_frac: float = 0.0
+    unclear: bool = False
+
+    @property
+    def runs_off_scan(self) -> bool:
+        """The print reaches the edge of the scan on this side, so there is
+        nothing to crop there. Common and harmless — not a failure."""
+        return self.hit_boundary and not self.found_bed
+
+    def to_json(self) -> dict[str, Any]:
+        return {"side": self.side, "original": round(self.original, 1),
+                "resolved": round(self.resolved, 1),
+                "moved_px": round(self.moved_px, 1),
+                "moved_frac": round(self.moved_frac, 4),
+                "unclear": self.unclear,
+                "runs_off_scan": self.runs_off_scan,
+                "found_bed": self.found_bed, "hit_boundary": self.hit_boundary,
+                "steps": self.steps,
+                "outside_grey": round(self.outside_grey, 1),
+                "outside_std": round(self.outside_std, 2),
+                "inside_edge_energy": round(self.inside_edge_energy, 2),
+                "interior_edge_energy": round(self.interior_edge_energy, 2)}
+
+
+def _strip_stats(rgb: np.ndarray, x0: float, y0: float, x1: float, y1: float):
+    """Mean grey, variance and edge energy of an axis-aligned strip."""
+    h, w = rgb.shape[:2]
+    xa, xb = max(0, int(round(x0))), min(w, int(round(x1)))
+    ya, yb = max(0, int(round(y0))), min(h, int(round(y1)))
+    if xb <= xa or yb <= ya:
+        return None
+    patch = rgb[ya:yb, xa:xb]
+    grey = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY) if patch.ndim == 3 else patch
+    gx = cv2.Sobel(grey, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(grey, cv2.CV_32F, 0, 1, ksize=3)
+    return {"grey": float(grey.mean()), "std": float(grey.std()),
+            "edge": float(np.hypot(gx, gy).mean())}
+
+
+def bed_noise(rgb: np.ndarray, bed: BedInfo, settings: Settings) -> float:
+    """How textured *this scan's* bed is.
+
+    A fixed calmness threshold cannot separate bed from picture: across the
+    archive, genuine bed strips run from std 1.2 on a clean scan to 10 on a
+    noisy one, and photo #15's white curtain sits at 10.5 — right in the
+    middle. But within one scan the gap is decisive: #15's own bed reads 1.2
+    to 1.6 against that curtain's 10.5.
+
+    So measure the bed on the scan in front of us, from the corner patches,
+    which are bed on anything that is not edge-to-edge print. Patches whose
+    tone does not match the bed are dropped, so a corner covered by the print
+    does not inflate the figure.
+    """
+    grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    h, w = grey.shape
+    side = max(6, int(round(min(h, w) * 0.03)))
+    corners = [grey[:side, :side], grey[:side, -side:],
+               grey[-side:, :side], grey[-side:, -side:]]
+    stds = [float(c.std()) for c in corners
+            if abs(float(c.mean()) - bed.grey) <= settings.CLEANUP_BED_TOL]
+    if not stds:
+        return float(settings.CLEANUP_BED_MAX_STD)
+    return float(np.median(stds))
+
+
+def _looks_like_bed(
+    stats: dict | None, bed: BedInfo, settings: Settings, *, noise: float,
+) -> bool:
+    """Is this strip scanner bed — the right tone, and no busier than the bed
+    on this scan actually is?
+
+    Both halves matter. Tone alone calls a white curtain or a white cardigan
+    bed (photo #15); calmness alone calls a blank sky bed.
+    """
+    if stats is None:
+        return False
+    allowed = min(settings.CLEANUP_BED_MAX_STD,
+                  max(settings.CLEANUP_BED_MIN_STD,
+                      settings.CLEANUP_BED_NOISE_FACTOR * noise))
+    return (abs(stats["grey"] - bed.grey) <= settings.CLEANUP_BED_TOL
+            and stats["std"] <= allowed)
+
+
+def guard_crop_edges(
+    rgb: np.ndarray, rect: Rect, bed: BedInfo, settings: Settings,
+) -> tuple[Rect, list[EdgeVerdict]]:
+    """Push every crop edge outward until what lies beyond it is really bed.
+
+    Invariant: **a crop removes scanner bed, never pixels of the photograph.**
+    The print mask keys on "darker than the bed", so light picture content —
+    a pale sky, a white curtain, a white cardigan — is indistinguishable from
+    bed and falls outside the detected rectangle. On photo #15 that cut a
+    person in half.
+
+    The test that catches it is what lies *outside* the edge: if that is not
+    bed, there is more print out there, so the edge moves out. (Fix-up 3
+    proposed also requiring the inside strip to be high-detail, but #15's
+    inside strip is smooth white fabric — calm, not busy — so an `and` of the
+    two would have let it through. The inside energy is measured and reported
+    as evidence rather than used as a veto.)
+
+    An edge that reaches the scan boundary without finding bed is left at the
+    boundary and marked unclear: the print runs off the scan there, so there
+    is nothing to crop on that side.
+    """
+    h, w = rgb.shape[:2]
+    x0 = rect.cx - abs(rect.w) / 2.0
+    x1 = rect.cx + abs(rect.w) / 2.0
+    y0 = rect.cy - abs(rect.h) / 2.0
+    y1 = rect.cy + abs(rect.h) / 2.0
+    short = max(4.0, min(abs(rect.w), abs(rect.h)))
+    depth = max(3.0, settings.CLEANUP_EDGE_STRIP_FRAC * short)
+
+    interior = _strip_stats(rgb, x0 + 3 * depth, y0 + 3 * depth,
+                            x1 - 3 * depth, y1 - 3 * depth)
+    interior_edge = interior["edge"] if interior else 0.0
+    noise = bed_noise(rgb, bed, settings)
+
+    limits = {"left": 0.0, "right": float(w), "top": 0.0, "bottom": float(h)}
+    verdicts: list[EdgeVerdict] = []
+    resolved = {"left": x0, "right": x1, "top": y0, "bottom": y1}
+
+    for side in ("left", "right", "top", "bottom"):
+        start = resolved[side]
+        pos = start
+        steps = 0
+        found = False
+        hit_boundary = False
+        outside = None
+        inside = None
+        # Walk outward a strip at a time until the far side is bed.
+        # The strip being judged starts one depth beyond the edge. A strip
+        # flush against it straddles the print's own boundary — a few pixels
+        # of antialiased print in an otherwise clean strip raise its variance
+        # and it never reads as bed, so every edge would creep outward by a
+        # strip or two on a perfectly good scan.
+        while True:
+            if side == "left":
+                outside = _strip_stats(rgb, pos - 2 * depth, y0, pos - depth, y1)
+                inside = _strip_stats(rgb, pos, y0, pos + depth, y1)
+                at_limit = pos - 2 * depth <= limits[side]
+            elif side == "right":
+                outside = _strip_stats(rgb, pos + depth, y0, pos + 2 * depth, y1)
+                inside = _strip_stats(rgb, pos - depth, y0, pos, y1)
+                at_limit = pos + 2 * depth >= limits[side]
+            elif side == "top":
+                outside = _strip_stats(rgb, x0, pos - 2 * depth, x1, pos - depth)
+                inside = _strip_stats(rgb, x0, pos, x1, pos + depth)
+                at_limit = pos - 2 * depth <= limits[side]
+            else:
+                outside = _strip_stats(rgb, x0, pos + depth, x1, pos + 2 * depth)
+                inside = _strip_stats(rgb, x0, pos - depth, x1, pos)
+                at_limit = pos + 2 * depth >= limits[side]
+
+            if _looks_like_bed(outside, bed, settings, noise=noise):
+                found = True
+                break
+            if at_limit:
+                hit_boundary = True
+                pos = limits[side]
+                break
+            pos += -depth if side in ("left", "top") else depth
+            steps += 1
+            if steps > 200:                      # cannot happen; belt and braces
+                hit_boundary = True
+                break
+
+        resolved[side] = pos
+        verdict = EdgeVerdict(
+            side=side, original=start, resolved=pos, found_bed=found,
+            hit_boundary=hit_boundary, steps=steps,
+            outside_grey=(outside or {}).get("grey", 0.0),
+            outside_std=(outside or {}).get("std", 0.0),
+            inside_edge_energy=(inside or {}).get("edge", 0.0),
+            interior_edge_energy=interior_edge,
+        )
+        verdict.moved_frac = verdict.moved_px / short
+        # An edge the guard had to drag a long way means the detected
+        # rectangle was materially wrong there — the mask missed light print
+        # content, which is how #15 cut a person in half. Even the guarded
+        # edge does not deserve trust, so that side is not cropped at all.
+        verdict.unclear = verdict.moved_frac > settings.CLEANUP_EDGE_MAX_MOVE_FRAC
+        if verdict.unclear:
+            resolved[side] = limits[side]
+        verdicts.append(verdict)
+
+    guarded = Rect(
+        cx=(resolved["left"] + resolved["right"]) / 2.0,
+        cy=(resolved["top"] + resolved["bottom"]) / 2.0,
+        w=max(1.0, resolved["right"] - resolved["left"]),
+        h=max(1.0, resolved["bottom"] - resolved["top"]),
+        angle=rect.angle,
+    )
+    return guarded, verdicts
 
 
 # --------------------------------------------------------------------------
@@ -549,22 +838,57 @@ def analyse_photo(
         measured["deskew_skipped_detail"] = (
             top.edges.to_json() if top.edges else None)
 
+    # Fix-up 3: a crop removes scanner bed, never pixels of the photograph.
+    # Before proposing one, push every edge outward until what lies beyond it
+    # is genuinely bed — the print mask keys on "darker than the bed", so a
+    # pale sky, a white curtain or a white cardigan sits outside it and the
+    # raw rectangle cuts into the picture (photo #15).
+    crop_rect_full = rect_full
     crop_wanted = False
     if not result.needs_manual:
-        candidate = transform_for(
-            rect_full, src_w=src_w, src_h=src_h,
-            deskew=deskew_wanted, crop=True, inset_px=inset,
-        )
-        src_area = float(src_w * src_h)
-        removed = 1.0 - (candidate.out_w * candidate.out_h) / src_area
-        if removed >= settings.CLEANUP_CROP_MIN_FRAC:
-            crop_wanted = True
-            measured["ops"]["crop"] = {
-                "rect": [round(v, 2) for v in (candidate.crop or (0, 0, 0, 0))],
-                "out_w": candidate.out_w, "out_h": candidate.out_h,
-                "inset_px": round(inset, 2),
-                "removed_frac": round(removed, 4),
-            }
+        guarded_small, verdicts = guard_crop_edges(rgb, top.rect, bed, settings)
+        measured["crop_guard"] = [v.to_json() for v in verdicts]
+        unclear = [v.side for v in verdicts if v.unclear]
+        off_scan = [v.side for v in verdicts if v.runs_off_scan]
+        if off_scan:
+            measured["crop_runs_off_scan"] = off_scan
+        moved = {v.side: round(v.moved_px * scale, 1)
+                 for v in verdicts if v.moved_px > 0.5}
+        if moved:
+            measured["crop_guard_moved_px"] = moved
+
+        if len(unclear) >= 2:
+            # Two or more edges we could not find: this is not a print on a
+            # bed, it is a scan George needs to look at.
+            result.needs_manual = True
+            result.manual_reason = "print_edge_unclear"
+            measured["crop_unclear_sides"] = unclear
+        else:
+            if unclear:
+                measured["crop_unclear_sides"] = unclear
+            crop_rect_full = guarded_small.scaled(scale)
+            # Prefer under-cropping: give the found edges a margin back.
+            safety = inset_px_for_dpi(
+                dpi, settings.CLEANUP_CROP_SAFETY_PX_AT_300)
+            measured["crop_safety_px"] = round(safety, 2)
+            candidate = transform_for(
+                crop_rect_full, src_w=src_w, src_h=src_h,
+                deskew=deskew_wanted, crop=True,
+                inset_px=max(0.0, inset - safety),
+            )
+            src_area = float(src_w * src_h)
+            removed = 1.0 - (candidate.out_w * candidate.out_h) / src_area
+            if removed >= settings.CLEANUP_CROP_MIN_FRAC:
+                crop_wanted = True
+                measured["ops"]["crop"] = {
+                    "rect": [round(v, 2) for v in (candidate.crop or (0, 0, 0, 0))],
+                    "out_w": candidate.out_w, "out_h": candidate.out_h,
+                    "inset_px": round(max(0.0, inset - safety), 2),
+                    "safety_px": round(safety, 2),
+                    "removed_frac": round(removed, 4),
+                    "guard_moved_px": moved or None,
+                    "unclear_sides": unclear or None,
+                }
 
     # --- tone -------------------------------------------------------------
     tone = measure_tone(rgb, top.rect, settings)
@@ -665,11 +989,17 @@ def analyse_photo(
         }
 
     # --- verdict ----------------------------------------------------------
+    # `render.plan_from` rebuilds the transform from `print_rect`, so the
+    # guarded rectangle is the one that has to be stored.
+    measured["print_rect"] = crop_rect_full.to_json()
+    measured["print_rect_raw"] = rect_full.to_json()
     result.operations = measured
     if measured["ops"]:
+        safety = inset_px_for_dpi(dpi, settings.CLEANUP_CROP_SAFETY_PX_AT_300)
         result.transform = transform_for(
-            rect_full, src_w=src_w, src_h=src_h,
-            deskew=deskew_wanted, crop=crop_wanted, inset_px=inset,
+            crop_rect_full, src_w=src_w, src_h=src_h,
+            deskew=deskew_wanted, crop=crop_wanted,
+            inset_px=max(0.0, inset - safety),
         )
         result.status = "pending"
     elif result.needs_manual:
@@ -709,6 +1039,10 @@ def caption_for(operations: dict[str, Any]) -> str:
         bits.append("remote enhance")
     if (operations or {}).get("deskew_skipped") == "edges_disagree":
         bits.append("deskew skipped (print edges disagree)")
+    unclear = (operations or {}).get("crop_unclear_sides")
+    if unclear:
+        bits.append("crop skipped on " + ", ".join(unclear)
+                    + ": print edge unclear")
     skipped = (operations or {}).get("colour_skipped")
     if skipped in ("mono", "sepia"):
         bits.append(f"colour skipped ({skipped})")

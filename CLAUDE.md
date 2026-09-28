@@ -261,6 +261,38 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   `(max-min)/max`, so a near-black pixel with a few levels of scanner noise
   reads as *highly* saturated and a black bed would otherwise mask in as one
   print covering the whole scan.
+- **A crop removes scanner bed, never pixels of the photograph** (fix-up 3).
+  Two lines of defence, because the second one holds even when the first is
+  wrong:
+  1. **The print mask keys on calmness, not brightness** (`CLEANUP_MASK_MODE`,
+     default `calm`). A pixel is bed only when it is near the bed tone, *locally
+     flat*, **and** reachable from the scan's border — an overexposed sky
+     inside a print is pale and calm but enclosed by photograph. The old
+     brightness mask ("darker than bed − 25") called photo #15's white curtain
+     and a grandmother's white cardigan bed, so the rectangle started 290 px
+     inside the picture and the crop took her arm. **The flatness window must
+     scale with the image** (`CLEANUP_MASK_STD_WINDOW_FRAC`, 0.013 of the long
+     edge): a fixed 7 px sits inside one smooth fold of that curtain at 2000 px
+     and reads as calm as bed, while the same 7 px on a 520 px thumbnail spans
+     several folds — which is why a fixture can pass while the real frame fails.
+  2. **The content guard** (`guard_crop_edges`) then pushes every edge outward
+     until what lies *beyond* it is genuinely bed, or the scan boundary is
+     reached (a print scanned to its edge simply has nothing to crop there —
+     that is `runs_off_scan`, not a failure). The strip being judged starts one
+     depth beyond the edge: flush against it, a few antialiased print pixels
+     raise the variance and every edge creeps outward on a perfectly good scan.
+     An edge dragged further than `CLEANUP_EDGE_MAX_MOVE_FRAC` (5 % of the
+     short side) is not trusted at all and that side is left uncropped —
+     "crop skipped on left: print edge unclear"; two or more such sides means
+     `needs_manual: print_edge_unclear`. A safety margin
+     (`CLEANUP_CROP_SAFETY_PX_AT_300`, 6 px at 300 DPI) is given back outward:
+     bed slivers are harmless and obvious, missing pixels are neither.
+  **Calmness is judged against *this scan's own* bed**, measured from its
+  corners (`bed_noise`), never a fixed number: genuine bed runs from std 1.2 on
+  a clean scan to 10 on a noisy one, and #15's curtain sits at 10.5 in between.
+  Within one scan the gap is decisive. Measured over batches 1–5, crop edges
+  placed inside the picture went **30 of 455 → 12**, and edges misplaced at all
+  **106 → 31**.
 - **A multi-print scan is not a small print.** The split gates (per region
   ≥ `CLEANUP_SPLIT_MIN_FRAC` and rectangular) run *before* the whole-scan size
   gate and exempt it: on a scan of three prints the largest covers a third of

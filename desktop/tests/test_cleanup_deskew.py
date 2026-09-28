@@ -89,7 +89,10 @@ def test_a_ragged_real_scan_is_not_deskewed_by_its_enclosing_box(tmp_path):
     edge of the scan. The enclosing rectangle reads about +2.3 deg on a print
     that is straight."""
     assert FIXTURE.exists(), "real-scan fixture missing"
-    settings = _settings(tmp_path)
+    # The misleading enclosing rectangle is a property of the brightness mask,
+    # which is what produced this bug. Fix-up 3's calm mask also softens it
+    # (+2.21 -> -1.30 here), but the angle must come from the edges either way.
+    settings = _settings(tmp_path, CLEANUP_MASK_MODE="brightness")
     arr = np.asarray(Image.open(FIXTURE).convert("RGB"))
 
     bed, comps = analyse_mod.detect_bed_and_prints(arr, settings)

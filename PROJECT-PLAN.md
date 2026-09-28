@@ -271,6 +271,39 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
   Batches 1-5 after both changes: 389 pending, 66 clean, 8 needs_manual,
   2 splits; ops crop 372, deskew 45, split 2.
 
+- **Fix-up 3 (2026-09-27)** — #15's crop removed the left side of a person.
+  Diagnosed: the print mask keyed on "darker than bed - 25", so a white curtain
+  and a grandmother's white cardigan read as bed; the rectangle started at
+  x=383 in a 2000-wide frame against a true edge of x~95 (column profile: bed
+  std 1.19-1.55 at x=0-80, print std 7.5-20 from x=100). Two lines of defence:
+  a **calm** print mask (near the bed tone AND locally flat AND reachable from
+  the scan border) and a **content guard** that pushes every crop edge outward
+  until what lies beyond it is genuinely bed.
+  Two deviations from the brief, both approved: the specified rule-2
+  conjunction ("inside busy AND outside not bed") would not have caught #15 —
+  its inside strip is smooth white fabric, energy 18.7 against a 38.6 interior
+  — so outside-is-not-bed drives the push alone; and a fixed calmness threshold
+  cannot work, because genuine bed runs std 1.2 to 10 across the archive while
+  #15's curtain sits at 10.5. Calmness is judged against each scan's own bed.
+  The PM's calm-mask pilot initially failed on #15 (edge at 379.6) — **the
+  window has to scale with the image**: 7 and 11 px put it at 379, 15 px and up
+  put it at 85-91. Now 0.013 x long edge. A 520 px fixture passed while the
+  2000 px frame failed, which is the trap.
+  Two bugs found by the tests: the guard pushed 36.8 px on **every** edge of a
+  clean synthetic scan (the first strip straddles the print's antialiased
+  boundary — it now starts one depth out), and edges already at the scan
+  boundary were counted as unresolved, which would have sent 356 of 455 scans
+  to needs_manual.
+  Batch check: crop edges inside the picture **30 of 455 -> 12**; edges
+  misplaced at all **106 -> 31**; #15 no longer appears. Crop proposals fell
+  372 -> 111, which the stored rectangles justify: of the 325 now-clean scans,
+  **323 leave a bed margin of 0.00%** (p99 0.04%) - the print reaches the scan
+  edge, so there was never bed to crop - while the 130 pending ones have real
+  margins (median 4.84%, p90 13.9%). #15 now removes 18% instead of 36% with
+  the grandmother intact.
+  Batches 1-5 after: 130 pending, 325 clean, 7 needs_manual (4
+  print_edge_unclear), 1 split; ops crop 111, deskew 41.
+
 ### Phase 8 — Web: auth (Claude Code, Windows) — spec §7
 - Express + EJS. Request-access form → admin email with Approve/Deny (POST-confirm pages, 72 h tokens) → magic links → long-lived HTTP-only session in Postgres.
 - Roles admin/contributor; suspension kills sessions, keeps contributions. Service-account token for the desktop app.

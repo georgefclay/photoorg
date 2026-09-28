@@ -199,9 +199,16 @@ def test_crop_lands_within_three_pixels_of_the_print(tmp_path, bed):
 
     crop = result.operations["ops"]["crop"]
     truth = rects[0]
-    # Minus the 4 px inset on each side (300 DPI base, unknown DPI here).
-    assert crop["out_w"] == pytest.approx(truth.w - 8, abs=3)
-    assert crop["out_h"] == pytest.approx(truth.h - 8, abs=3)
+    # Fix-up 3 deliberately prefers under-cropping: the content guard pushes
+    # each edge out to genuine bed and a safety margin is given back, so the
+    # crop keeps the whole print plus a small sliver of bed. The invariant is
+    # "never cut the print", not an exact size.
+    assert crop["out_w"] >= truth.w - 2, (
+        f"the crop must not cut into the print ({crop['out_w']} < {truth.w})")
+    assert crop["out_h"] >= truth.h - 2, (
+        f"the crop must not cut into the print ({crop['out_h']} < {truth.h})")
+    assert crop["out_w"] <= truth.w * 1.06, "…nor leave much bed behind"
+    assert crop["out_h"] <= truth.h * 1.06, "…nor leave much bed behind"
 
 
 def test_skew_under_the_threshold_produces_no_deskew_op(tmp_path):
