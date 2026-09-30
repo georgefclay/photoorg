@@ -688,20 +688,69 @@ def load_for_analysis(
     coordinate in the small frame to get the full-resolution one.
     """
     with open_image(path) as im:
-        im = ImageOps.exif_transpose(im)
-        if im.mode != "RGB":
-            im = im.convert("RGB")
-        src_w, src_h = im.size
-        long_edge = max(src_w, src_h)
+        # Raw dimensions first: `draft` below changes `size`, and everything
+        # downstream is in the full-resolution display frame.
+        raw_w, raw_h = im.size
+
+        # Decode at a reduced scale where the format allows it. A JPEG can be
+        # decoded straight out of the DCT at 1/2, 1/4 or 1/8, so a 38 MP scan
+        # costs ~5 MB instead of the 114 MB a full decode would take — and the
+        # result is downscaled to `edge` regardless. On this archive the
+        # biggest scan is 93.7 MP, and the laptop has under 2 GB free.
+        #
+        # The requested box must match the image's aspect ratio. Pillow picks
+        # the scale as min(w // box_w, h // box_h), so a square (edge, edge)
+        # box is governed by the SHORT edge: a 4400x3000 scan asking for
+        # 2000x2000 gets min(2, 1) = 1 and is decoded in full. Asking in
+        # proportion gives min(2, 2) = 2, and still guarantees the reduced long
+        # edge is >= `edge`, so the resize below never upscales.
+        try:
+            raw_long = max(raw_w, raw_h)
+            if raw_long > edge:
+                f = edge / float(raw_long)
+                im.draft("RGB", (max(1, int(raw_w * f)),
+                                 max(1, int(raw_h * f))))
+        except Exception:
+            pass                      # TIFF and friends: no-op, decode in full
+
+        # In place: `exif_transpose` returns `image.copy()` when there is no
+        # orientation to apply, which on the 93.7 MP TIFF is a 281 MB copy to
+        # produce an identical image. Almost every scan is orientation 1.
+        pre = im.size
+        ImageOps.exif_transpose(im, in_place=True)
+        # Whether the display frame swaps axes is read off what the transpose
+        # actually did, not off EXIF tag 0x0112: `exif_transpose` also honours
+        # an XMP orientation, and the two must never disagree about which way
+        # round `src_w`/`src_h` are. (A square image cannot be told apart here,
+        # and does not need to be.)
+        if im.size == (pre[1], pre[0]) and pre[0] != pre[1]:
+            src_w, src_h = raw_h, raw_w
+        else:
+            src_w, src_h = raw_w, raw_h
+
+        long_edge = max(im.size)
+        target = None
         if long_edge > edge:
             factor = edge / float(long_edge)
-            small = im.resize(
-                (max(1, int(round(src_w * factor))),
-                 max(1, int(round(src_h * factor)))),
-                Image.LANCZOS,
-            )
+            target = (max(1, int(round(im.width * factor))),
+                      max(1, int(round(im.height * factor))))
+
+        # Downscale before converting, where the two commute. Twelve of the
+        # archive's scans are greyscale TIFFs; the largest is 93.7 MP, which
+        # decodes to 94 MB but costs another 281 MB the moment it becomes RGB
+        # — for a picture that is about to be thrown away at 2000 px.
+        # Replicating one channel into three commutes exactly with a linear
+        # resample, so the order is free to change. Palette, 16-bit and alpha
+        # modes either do not resample faithfully or do not commute; they keep
+        # the old order.
+        if target is not None and im.mode in ("L", "RGB"):
+            small = im.resize(target, Image.LANCZOS)
         else:
-            small = im.copy()
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            small = im.resize(target, Image.LANCZOS) if target else im.copy()
+        if small.mode != "RGB":
+            small = small.convert("RGB")
         arr = np.asarray(small)
     scale = src_w / float(arr.shape[1])
     return arr, src_w, src_h, scale
