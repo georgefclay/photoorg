@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget,
@@ -55,6 +55,8 @@ from .remote import build_provider
 log = logging.getLogger(__name__)
 
 FILMSTRIP_THUMB = 88
+#: QSettings key for the review queue's `Show:` filter (fix-up 4).
+QUEUE_FILTER_KEY = "cleanup/queue_filter"
 # Zoom at which a real full-resolution crop replaces the stretched preview.
 DETAIL_SCALE = 0.9
 # Cap on one detail tile so a full-screen 1:1 view of a 93 MP scan stays sane.
@@ -127,6 +129,19 @@ class CleanupPanel(QWidget):
 
         self._batch_box = QComboBox()
         self._batch_box.addItem("All batches", None)
+
+        # Fix-up 4: George reviews the 17 splits, not the 981 minimal crops.
+        self._filter_box = QComboBox()
+        for key, label in repo.QUEUE_FILTERS:
+            self._filter_box.addItem(label, key)
+        self._filter_box.setToolTip(
+            "Which pending proposals the queue and filmstrip show. "
+            "The choice is remembered between sessions."
+        )
+        idx = self._filter_box.findData(self._load_queue_filter())
+        self._filter_box.setCurrentIndex(max(0, idx))
+        self._filter_box.currentIndexChanged.connect(self._on_queue_filter_changed)
+
         self._reanalyse = QCheckBox("Re-analyse")
         self._reanalyse.setToolTip(
             "Re-measure photos that already have a proposal. Off by default, "
@@ -143,6 +158,8 @@ class CleanupPanel(QWidget):
         run_row = QHBoxLayout()
         run_row.addWidget(QLabel("Batch:"))
         run_row.addWidget(self._batch_box)
+        run_row.addWidget(QLabel("Show:"))
+        run_row.addWidget(self._filter_box)
         run_row.addWidget(self._reanalyse)
         run_row.addWidget(self._run_btn)
         run_row.addWidget(self._cancel_btn)
@@ -304,21 +321,33 @@ class CleanupPanel(QWidget):
                 counts = repo.status_counts(conn)
                 scope = repo.scope_count(conn)
                 spend = repo.spend_total(conn)
+                by_filter = repo.pending_counts_by_filter(
+                    conn, batches=self._selected_batches())
                 if self._manual_mode:
                     ids = [p.id for p in repo.manual_queue(conn)]
                 else:
-                    ids = repo.pending_ids(conn, batches=self._selected_batches())
+                    ids = repo.pending_ids(conn,
+                                           batches=self._selected_batches(),
+                                           queue_filter=self._queue_filter())
         except Exception as e:
             self._say(f"Database not ready: {e}")
             return
 
         self._reload_batches(labels)
+        self._relabel_filters(by_filter)
         self._proposal_ids = ids
         if self._cursor >= len(ids):
             self._cursor = max(0, len(ids) - 1)
         counts_text = "  ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+        # The count the header leads with is the queue actually in front of
+        # George, which is the point of the filter — the archive-wide totals
+        # follow it.
+        shown = (f"showing {len(ids)} {self._queue_filter_label().lower()}"
+                 if not self._manual_mode
+                 else f"showing {len(ids)} sent to manual fix")
         self._header.setText(
-            f"Cleanup — scope {scope} scans; {counts_text or 'no proposals yet'}"
+            f"Cleanup — {shown}; scope {scope} scans; "
+            f"{counts_text or 'no proposals yet'}"
             + (f"; total remote spend ${spend:.2f}" if spend else "")
         )
         if not ids:
@@ -343,6 +372,44 @@ class CleanupPanel(QWidget):
     def _selected_batches(self) -> list[str] | None:
         data = self._batch_box.currentData()
         return [data] if data else None
+
+    # -- the Show: filter ----------------------------------------------
+
+    def _queue_filter(self) -> str:
+        return self._filter_box.currentData() or "all"
+
+    def _queue_filter_label(self) -> str:
+        key = self._queue_filter()
+        return dict(repo.QUEUE_FILTERS).get(key, "All pending")
+
+    @staticmethod
+    def _qsettings() -> QSettings:
+        return QSettings("PhotoArchive", "PhotoArchive")
+
+    def _load_queue_filter(self) -> str:
+        """The stored choice, validated — a key removed from `QUEUE_FILTERS`
+        in a later version must not leave the queue showing nothing."""
+        stored = self._qsettings().value(QUEUE_FILTER_KEY, "all")
+        valid = {key for key, _label in repo.QUEUE_FILTERS}
+        return stored if stored in valid else "all"
+
+    def _on_queue_filter_changed(self) -> None:
+        self._qsettings().setValue(QUEUE_FILTER_KEY, self._queue_filter())
+        # A different queue means a different photo: start at its top rather
+        # than keeping an index into the list that just went away.
+        self._cursor = 0
+        self._refresh_queue()
+
+    def _relabel_filters(self, counts: dict[str, int]) -> None:
+        """Put each filter's size in its label, so the choice is informed."""
+        self._filter_box.blockSignals(True)
+        for i in range(self._filter_box.count()):
+            key = self._filter_box.itemData(i)
+            label = dict(repo.QUEUE_FILTERS).get(key, key)
+            n = counts.get(key)
+            self._filter_box.setItemText(
+                i, label if n is None else f"{label} ({n})")
+        self._filter_box.blockSignals(False)
 
     def _load_current(self) -> None:
         if not self._proposal_ids:
@@ -438,9 +505,17 @@ class CleanupPanel(QWidget):
             return
         n = len(self._proposal_ids)
         loc = f"{p.scan_batch or '-'}#{p.scan_sequence if p.scan_sequence is not None else '?'}"
+        # "3 of 17" means nothing without saying 17 of what: the count is the
+        # filtered queue, so the filter has to be named beside it.
+        if self._manual_mode:
+            scope = " sent to manual fix"
+        elif self._queue_filter() != "all":
+            scope = f" {self._queue_filter_label().lower()}"
+        else:
+            scope = " pending"
         self._header.setText(
-            f"Cleanup — {self._cursor + 1} / {n}  ·  photo #{p.photo_id}  ·  "
-            f"{loc}  ·  {p.source_filename}"
+            f"Cleanup — showing {self._cursor + 1} / {n}{scope}  ·  "
+            f"photo #{p.photo_id}  ·  {loc}  ·  {p.source_filename}"
         )
         enabled = not self._manual_mode
         for b in (self._accept_btn, self._reject_btn, self._remote_btn):

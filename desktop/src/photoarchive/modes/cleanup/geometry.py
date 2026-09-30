@@ -329,9 +329,14 @@ def transform_for(
     pixels, so unticking "deskew" really does change the crop.
 
       deskew + crop : rotate flat, then crop to the print (the usual case)
-      deskew only   : rotate flat, keep the whole expanded canvas
+      deskew only   : rotate flat, keep the source-sized frame
       crop only     : no rotation; crop to the print's axis-aligned bounds
       neither       : identity
+
+    Fix-up 4: for anything that is not a split region the output never exceeds
+    the source in either axis. The rotated canvas has to be larger than the
+    source to hold the corners, and keeping it whole made accepted files
+    bigger than the scans they came from.
     """
     if not deskew and not crop:
         return Transform.identity(src_w, src_h)
@@ -351,13 +356,28 @@ def transform_for(
 
     rotation = Transform.build(src_w=src_w, src_h=src_h, angle_deg=rect.angle)
     if not crop:
-        return rotation
+        # Deskewing must never grow the picture (fix-up 4). The rotated canvas
+        # is larger than the source by construction — it has to hold the
+        # corners — and keeping it whole meant an accepted file came out
+        # bigger than the scan it was made from, bed-filled at the edges.
+        # Clip back to a source-sized window centred on that canvas: the same
+        # framing, straightened, with bed only where the rotation pulled it in.
+        rot_w = float(rotation.notes["rot_w"])
+        rot_h = float(rotation.notes["rot_h"])
+        w = min(float(src_w), rot_w)
+        h = min(float(src_h), rot_h)
+        return Transform.build(
+            src_w=src_w, src_h=src_h, angle_deg=rect.angle,
+            crop=((rot_w - w) / 2.0, (rot_h - h) / 2.0, w, h),
+        )
 
     # After the rotation the print is axis-aligned, centred on wherever its
-    # centre landed. Crop that box, inset on every side.
+    # centre landed. Crop that box, inset on every side. The clamp to the
+    # source size is the same rule as above: a guarded rect can reach the scan
+    # edge, and a rotation must not turn that into a larger file.
     ccx, ccy = rotation.apply_point(rect.cx, rect.cy)
-    w = max(1.0, abs(rect.w) - 2.0 * inset_px)
-    h = max(1.0, abs(rect.h) - 2.0 * inset_px)
+    w = max(1.0, min(abs(rect.w) - 2.0 * inset_px, float(src_w)))
+    h = max(1.0, min(abs(rect.h) - 2.0 * inset_px, float(src_h)))
     return Transform.build(
         src_w=src_w, src_h=src_h, angle_deg=rect.angle,
         crop=(ccx - w / 2.0, ccy - h / 2.0, w, h),

@@ -304,7 +304,42 @@ def _to_proposal(r: dict[str, Any]) -> Proposal:
     )
 
 
-def pending_ids(conn: psycopg.Connection, *, batches: Sequence[str] | None = None) -> list[int]:
+#: The review queue's `Show:` filter. Keys are stored in QSettings, so they
+#: are part of the on-disk contract — add to this, never rename.
+QUEUE_FILTERS: tuple[tuple[str, str], ...] = (
+    ("all", "All pending"),
+    ("splits", "Splits"),
+    ("manual", "Needs manual"),
+    ("geometric", "Geometric-only"),
+)
+
+#: Each filter's `where` clause. "geometric" is `Proposal.is_geometric_only`
+#: written in SQL — at least one op, and nothing outside deskew/crop — with
+#: the same exclusions bulk accept applies, so what the filter shows is
+#: exactly what the bulk button would take.
+_QUEUE_FILTER_SQL: dict[str, str] = {
+    "all": "",
+    "splits": " and cp.split_regions is not null",
+    "manual": " and cp.needs_manual",
+    "geometric": """
+        and cp.split_regions is null
+        and not cp.needs_manual
+        and coalesce(cp.operations -> 'ops', '{}'::jsonb) ?| array['deskew', 'crop']
+        and not exists (
+            select 1
+              from jsonb_object_keys(
+                       coalesce(cp.operations -> 'ops', '{}'::jsonb)) as k
+             where k not in ('deskew', 'crop'))
+    """,
+}
+
+
+def pending_ids(
+    conn: psycopg.Connection,
+    *,
+    batches: Sequence[str] | None = None,
+    queue_filter: str = "all",
+) -> list[int]:
     sql = """
         select cp.id
           from cleanup_proposals cp
@@ -315,8 +350,19 @@ def pending_ids(conn: psycopg.Connection, *, batches: Sequence[str] | None = Non
     if batches:
         sql += " and p.scan_batch = any(%s)"
         args.append(list(batches))
+    sql += _QUEUE_FILTER_SQL.get(queue_filter, "")
     sql += " order by p.scan_batch nulls last, p.scan_sequence nulls last, p.id"
     return [r[0] for r in conn.execute(sql, args).fetchall()]
+
+
+def pending_counts_by_filter(
+    conn: psycopg.Connection, *, batches: Sequence[str] | None = None,
+) -> dict[str, int]:
+    """How many pending proposals each filter would show, for the combo's
+    labels — George picked *Splits* because it was 17, so the number belongs
+    next to the choice, not behind it."""
+    return {key: len(pending_ids(conn, batches=batches, queue_filter=key))
+            for key, _label in QUEUE_FILTERS}
 
 
 def load_proposal(conn: psycopg.Connection, proposal_id: int) -> Proposal | None:

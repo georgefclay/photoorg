@@ -83,8 +83,12 @@ def plan_from(
 
     Unticking `deskew` while `crop` stays on crops to the print's
     axis-aligned bounds instead; unticking `crop` while `deskew` stays on
-    keeps the whole rotated canvas, bed-filled at the corners. Both are
-    honest, so a checkbox always does something visible.
+    keeps the whole frame, straightened, bed-filled where the rotation pulled
+    bed in. Both are honest, so a checkbox always does something visible.
+
+    Whatever is ticked, the result never comes out larger than the source
+    (fix-up 4) — only a split region is cut to a different frame, and that is
+    smaller by construction.
     """
     want = {t for t in ticked if t in ALL_OPS and op_enabled(t, settings)}
     o = (operations or {}).get("ops") or {}

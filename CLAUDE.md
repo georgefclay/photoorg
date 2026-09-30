@@ -352,8 +352,28 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   white is clean".
 - **Per-op checkboxes really change the geometry.** `render.plan_from` is the
   single place ticks become pixels: unticking *deskew* crops to the print's
-  axis-aligned bounds instead; unticking *crop* keeps the whole rotated
-  canvas, bed-filled at the corners.
+  axis-aligned bounds instead; unticking *crop* keeps the whole frame,
+  straightened, bed-filled where the rotation pulled bed in.
+- **A deskew never grows the picture** (fix-up 4). Rotating needs a canvas big
+  enough to hold the corners, and keeping that expanded canvas made accepted
+  files *larger* than the scans they came from — up to +47 % in area on a
+  13.5° print; 109 live proposals would have rendered that way, and photo #50
+  was accepted before the fix (3510×2357 → 3527×2382 on disk). A skipped crop
+  now clips back to a source-sized window centred on the rotated canvas. The
+  rule: **for anything that is not a split region, `out_w <= src_w` and
+  `out_h <= src_h`**, enforced in `geometry.transform_for` so every caller
+  gets it, and pinned over the whole angle/size/tick space by
+  `test_cleanup_canvas.py`. Split children are the one exemption — they are
+  cut from a region, so they are smaller by construction.
+- **The review queue has a `Show:` filter** (fix-up 4): *All pending* /
+  *Splits* / *Needs manual* / *Geometric-only*, each labelled with its size,
+  persisted in QSettings under `cleanup/queue_filter`. George's verdict on the
+  full queue was that the crops are minimal by design and reviewing 981 of
+  them is not worth it, so the queue has to be able to show just the 17
+  splits. `repo.QUEUE_FILTERS` is the list and `_QUEUE_FILTER_SQL` the
+  clauses; *Geometric-only* is `Proposal.is_geometric_only` written in SQL and
+  a test asserts the two agree, because two definitions of one rule is how the
+  bulk-accept button and the filter drift apart.
 - **Bulk accept is geometric-only**: deskew and/or crop, no tonal op, no
   split, nothing `needs_manual`. Tonal ops and splits always go through the
   eye.

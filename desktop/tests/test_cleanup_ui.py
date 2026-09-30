@@ -236,3 +236,121 @@ def test_the_manual_queue_toggle_disables_the_decision_buttons(panel):
         assert not b.isEnabled()
     assert "No manual proposals" in p._status_bar.text()
     p.close()
+
+
+# --------------------------------------------------------------------------
+# Fix-up 4: the Show: filter
+# --------------------------------------------------------------------------
+
+def _mixed_queue(settings):
+    """One split, one needs-manual, one plain geometric proposal."""
+    from .test_cleanup_split import _mk_two_print_photo
+
+    split_id, _rects = _mk_two_print_photo(settings, sha="e" * 64)
+    geo_id = _mk_scan_photo(settings, sha="f" * 64, angle=3.0,
+                            scan_sequence=8, filename="IMG_geo.jpg")
+    # A print that fills almost the whole bed reads as implausible/too small
+    # depending on the gate; either way it lands in needs_manual.
+    manual_id = _mk_scan_photo(settings, sha="0" * 64, w=1200, h=140,
+                               scan_sequence=9, filename="IMG_manual.jpg")
+    job_mod.run_cleanup_analyse(settings, write_previews=False)
+    return split_id, geo_id, manual_id
+
+
+def test_the_filter_narrows_the_queue_to_its_kind(panel):
+    settings, ui_mod = panel
+    split_id, geo_id, manual_id = _mixed_queue(settings)
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        everything = repo.pending_ids(conn, queue_filter="all")
+        splits = repo.pending_ids(conn, queue_filter="splits")
+        manual = repo.pending_ids(conn, queue_filter="manual")
+        geometric = repo.pending_ids(conn, queue_filter="geometric")
+        by_filter = repo.pending_counts_by_filter(conn)
+
+        loaded = {i: repo.load_proposal(conn, i) for i in everything}
+
+    assert len(everything) >= 3
+    assert {loaded[i].photo_id for i in splits} == {split_id}
+    assert all(loaded[i].is_split for i in splits)
+    assert all(loaded[i].needs_manual for i in manual)
+    assert manual_id in {loaded[i].photo_id for i in manual}
+
+    # Geometric-only is exactly the bulk-acceptable set, so the SQL and the
+    # dataclass property must agree — two definitions of one rule is how the
+    # bulk button and the filter drift apart.
+    assert geo_id in {loaded[i].photo_id for i in geometric}
+    for i in everything:
+        p = loaded[i]
+        expected = (p.is_geometric_only and not p.is_split and not p.needs_manual)
+        assert (i in geometric) == expected, (p.photo_id, p.op_names,
+                                              p.needs_manual, p.is_split)
+
+    assert by_filter == {"all": len(everything), "splits": len(splits),
+                         "manual": len(manual), "geometric": len(geometric)}
+
+
+def test_choosing_a_filter_reloads_the_queue_and_the_header(panel):
+    settings, ui_mod = panel
+    split_id, _geo_id, _manual_id = _mixed_queue(settings)
+
+    p = _open_panel(ui_mod)
+    all_ids = list(p._proposal_ids)
+    assert len(all_ids) >= 3
+    assert "showing" in p._header.text()
+
+    idx = p._filter_box.findData("splits")
+    assert idx >= 0
+    p._filter_box.setCurrentIndex(idx)
+    _pump(400)
+
+    assert p._proposal_ids and len(p._proposal_ids) < len(all_ids)
+    assert p._proposal is not None and p._proposal.photo_id == split_id
+    assert p._cursor == 0, "a new queue starts at its top"
+    assert "showing 1 / 1 splits" in p._header.text().lower(), p._header.text()
+    # The filmstrip is the queue, so it has to narrow with it.
+    assert p._filmstrip.count() == len(p._proposal_ids)
+    p.close()
+
+
+def test_each_filter_carries_its_size_in_the_label(panel):
+    settings, ui_mod = panel
+    _mixed_queue(settings)
+    p = _open_panel(ui_mod)
+    labels = [p._filter_box.itemText(i) for i in range(p._filter_box.count())]
+    assert any(t.startswith("Splits (1)") for t in labels), labels
+    assert any(t.startswith("All pending (") for t in labels), labels
+    p.close()
+
+
+def test_the_choice_survives_a_restart(panel):
+    settings, ui_mod = panel
+    _mixed_queue(settings)
+
+    p = _open_panel(ui_mod)
+    p._filter_box.setCurrentIndex(p._filter_box.findData("splits"))
+    _pump(300)
+    p.close()
+
+    again = _open_panel(ui_mod)
+    assert again._filter_box.currentData() == "splits"
+    again.close()
+
+    # Reset, so the stored value doesn't leak into the next test.
+    ui_mod.CleanupPanel._qsettings().setValue(ui_mod.QUEUE_FILTER_KEY, "all")
+
+
+def test_an_unknown_stored_filter_falls_back_to_all(panel):
+    """A key dropped in a later version must not leave George looking at an
+    empty queue with no way to tell why."""
+    settings, ui_mod = panel
+    ui_mod.CleanupPanel._qsettings().setValue(ui_mod.QUEUE_FILTER_KEY,
+                                              "no-such-filter")
+    _mixed_queue(settings)
+    p = _open_panel(ui_mod)
+    assert p._filter_box.currentData() == "all"
+    assert p._proposal_ids
+    p.close()
+    ui_mod.CleanupPanel._qsettings().setValue(ui_mod.QUEUE_FILTER_KEY, "all")
