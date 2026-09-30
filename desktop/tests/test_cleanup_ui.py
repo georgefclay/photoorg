@@ -19,7 +19,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEventLoop
+from PySide6.QtCore import QCoreApplication, QEventLoop, Qt
 from PySide6.QtWidgets import QApplication
 
 from photoarchive import db
@@ -74,6 +74,10 @@ def panel(monkeypatch, tmp_path):
 
 def _open_panel(ui_mod):
     p = ui_mod.CleanupPanel()
+    # `close()` hides a QWidget, it does not destroy it: without this every
+    # panel a test opens stays alive with its pixmaps for the rest of the
+    # session, and the run dies of memory on a laptop with a gigabyte free.
+    p.setAttribute(Qt.WA_DeleteOnClose, True)
     p.resize(1200, 800)
     p.show()
     _pump()
@@ -482,16 +486,31 @@ def test_cancelling_the_editor_changes_nothing(panel, monkeypatch):
     p.close()
 
 
-def test_z_undoes_an_accepted_split(panel):
+def test_z_undoes_an_accepted_split(panel, monkeypatch):
     """Answer 9: a split is undoable within the session. The module-level
-    path is tested elsewhere; this is the one that goes through the key."""
+    path is tested elsewhere; this is the one that goes through the key.
+
+    Accepting a split asks first, and a modal dialog offscreen waits for a
+    click that never comes — so the confirmation is stubbed, and the fact
+    that it was asked at all is checked rather than assumed. A split must
+    never happen without it.
+    """
     settings, ui_mod = panel
     pid = _split_photo(settings)
     p = _open_panel(ui_mod)
     assert p._proposal.is_split
 
+    asked = []
+
+    def _yes(*args, **kwargs):
+        asked.append(args[1] if len(args) > 1 else "")
+        return ui_mod.QMessageBox.Yes
+
+    monkeypatch.setattr(ui_mod.QMessageBox, "question", staticmethod(_yes))
+
     p._accept()
     _pump(1500)
+    assert asked, "a split must be confirmed before it is accepted"
     assert p._undo_stack and p._undo_stack[-1].kind == "split"
 
     p._undo()
