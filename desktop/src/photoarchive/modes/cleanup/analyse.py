@@ -318,6 +318,32 @@ def _extent_at_angle(comp: np.ndarray, angle: float) -> Rect:
                 w=float(x1 - x0), h=float(y1 - y0), angle=float(angle))
 
 
+def _component_from_mask(comp: np.ndarray, img_area: float) -> Component | None:
+    """Measure one connected blob: its extent, tilt and rectangularity."""
+    pts = cv2.findNonZero(comp.astype(np.uint8))
+    if pts is None:
+        return None
+    (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
+    angle, w, h = normalise_angle(angle, w, h)
+
+    # Fix-up 2: the tilt comes from the print's edges, not from the minimum
+    # enclosing rectangle — see `edge_orientation`. The enclosing rectangle
+    # still gives the extent, measured in the frame the edges say is straight.
+    edges = edge_orientation(comp)
+    if edges is not None and edges.confidence >= EDGE_MIN_CONFIDENCE:
+        rect = _extent_at_angle(comp, edges.angle)
+    else:
+        rect = Rect(cx=float(cx), cy=float(cy), w=float(w), h=float(h),
+                    angle=float(angle))
+    rect_area = rect.area or 1.0
+    area = float(np.count_nonzero(comp))
+    return Component(
+        rect=rect, area_frac=area / img_area,
+        rectangularity=min(1.0, area / rect_area),
+        edges=edges, mask=comp,
+    )
+
+
 def _components(mask: np.ndarray, min_frac: float) -> list[Component]:
     img_area = float(mask.shape[0] * mask.shape[1])
     n, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -328,29 +354,9 @@ def _components(mask: np.ndarray, min_frac: float) -> list[Component]:
         area = float(stats[label, cv2.CC_STAT_AREA])
         if area / img_area < min_frac:
             continue
-        comp = (labels == label)
-        pts = cv2.findNonZero(comp.astype(np.uint8))
-        if pts is None:
-            continue
-        (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
-        angle, w, h = normalise_angle(angle, w, h)
-
-        # Fix-up 2: the tilt comes from the print's edges, not from the
-        # minimum enclosing rectangle — see `edge_orientation`. The enclosing
-        # rectangle still gives the extent, measured in the frame the edges
-        # say is straight.
-        edges = edge_orientation(comp)
-        if edges is not None and edges.confidence >= EDGE_MIN_CONFIDENCE:
-            rect = _extent_at_angle(comp, edges.angle)
-        else:
-            rect = Rect(cx=float(cx), cy=float(cy), w=float(w), h=float(h),
-                        angle=float(angle))
-        rect_area = rect.area or 1.0
-        out.append(Component(
-            rect=rect, area_frac=area / img_area,
-            rectangularity=min(1.0, area / rect_area),
-            edges=edges, mask=comp,
-        ))
+        built = _component_from_mask(labels == label, img_area)
+        if built is not None:
+            out.append(built)
     out.sort(key=lambda c: c.area_frac, reverse=True)
     return out
 
@@ -503,6 +509,154 @@ def _looks_like_bed(
                       settings.CLEANUP_BED_NOISE_FACTOR * noise))
     return (abs(stats["grey"] - bed.grey) <= settings.CLEANUP_BED_TOL
             and stats["std"] <= allowed)
+
+
+# --------------------------------------------------------------------------
+# Prints that touch (fix-up 5)
+# --------------------------------------------------------------------------
+
+#: A gutter is bed all the way across the component, not merely in places.
+GUTTER_MIN_BED = 0.90
+
+
+def bed_by_tone(
+    rgb: np.ndarray, bed: "BedInfo", settings: Settings,
+) -> np.ndarray:
+    """Pixels at the bed's tone that the outside of the scan can reach.
+
+    The same three tests as `_print_mask_calm` — tone, flatness, reachability
+    — but with a flatness window a fifth the size, and that difference is the
+    whole point. A gutter between two prints is only as wide as the gap
+    between them, and at 1.3 % of the long edge the mask's window is 26 px at
+    analysis scale: wider than many gutters, so every pixel in one reads as
+    busy because of the prints on either side of it. That is exactly why those
+    prints arrive as one component in the first place. A small window fits
+    inside the gutter and sees that it is flat.
+
+    The other two tests still earn their place. Tone alone would call a pale
+    band of picture a gutter; reachability answers that, because a gutter runs
+    out to the edge of the scan and an overexposed sky is enclosed by
+    photograph. Flatness alone would call that same sky a gutter; scanner bed
+    is flat at every scale, while photographic paper carries grain and scanner
+    noise even where it is nearly white.
+    """
+    grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    noise = bed_noise(rgb, bed, settings)
+    allowed = min(settings.CLEANUP_BED_MAX_STD,
+                  max(settings.CLEANUP_BED_MIN_STD,
+                      settings.CLEANUP_BED_NOISE_FACTOR * noise))
+    long_edge = max(rgb.shape[0], rgb.shape[1])
+    win = max(3, int(round(long_edge * settings.CLEANUP_GUTTER_STD_WINDOW_FRAC))) | 1
+    near = np.abs(grey.astype(np.float32) - bed.grey) <= settings.CLEANUP_BED_TOL
+    calm = _local_std(grey, win) <= allowed
+    return _bed_reachable_from_border((near & calm).astype(np.uint8)).astype(bool)
+
+
+def _gutter_cuts(
+    rgb: np.ndarray, comp_mask: np.ndarray, bed: BedInfo, settings: Settings,
+    *, gutter: np.ndarray, axis: int, y0: int, y1: int, x0: int, x1: int,
+) -> list[int]:
+    """Where, along `axis`, this blob is cut in two by scanner bed.
+
+    Photo #708 is three prints stacked on one bed; the lower two touch closely
+    enough that one connected component covers both, so the analyser saw two
+    prints and proposed a two-way split. The giveaway is a 62 px band of bed
+    running straight across that component.
+
+    The evidence is the bed map from `bed_by_tone`, not the absence of the
+    print mask. On a scan whose prints have pale backgrounds the mask is full
+    of holes that are not gutters (photo #1398); on a scan whose prints sit
+    close together the mask has already bridged the gutter that is there,
+    which is why they arrived as one component. A band counts when it is bed
+    nearly all the way across the component.
+    """
+    band_map = gutter[y0:y1 + 1, x0:x1 + 1]
+    profile = band_map.mean(axis=1 - axis)
+    span = len(profile)
+    min_gutter = max(3, int(round(0.004 * max(rgb.shape[0], rgb.shape[1]))))
+    if span < 4 * min_gutter:
+        return []
+
+    cuts: list[int] = []
+    start: int | None = None
+    for i in range(span + 1):
+        is_bed = i < span and profile[i] >= GUTTER_MIN_BED
+        if is_bed:
+            start = i if start is None else start
+            continue
+        if start is None:
+            continue
+        run_start, run_end = start, i - 1
+        start = None
+        # Interior only: the bed beyond either end of the blob is margin,
+        # not a gutter.
+        if run_start < min_gutter or run_end > span - 1 - min_gutter:
+            continue
+        if run_end - run_start + 1 < min_gutter:
+            continue
+        cuts.append((run_start + run_end) // 2)
+    return cuts
+
+
+def split_touching_prints(
+    rgb: np.ndarray, comp: Component, bed: BedInfo, settings: Settings,
+    *, gutter: np.ndarray,
+) -> list[Component]:
+    """Cut one component into the prints it is really made of.
+
+    Returns `[comp]` unchanged unless the cut produces at least two pieces
+    that each look like a print in their own right — a subdivision that
+    produces one real print and a sliver is the detector being wrong twice,
+    not a multi-print scan.
+    """
+    ys, xs = np.nonzero(comp.mask)
+    if ys.size == 0:
+        return [comp]
+    y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
+
+    row_cuts = _gutter_cuts(rgb, comp.mask, bed, settings, gutter=gutter,
+                            axis=0, y0=y0, y1=y1, x0=x0, x1=x1)
+    col_cuts = _gutter_cuts(rgb, comp.mask, bed, settings, gutter=gutter,
+                            axis=1, y0=y0, y1=y1, x0=x0, x1=x1)
+    if not row_cuts and not col_cuts:
+        return [comp]
+
+    row_edges = [0] + [c + 1 for c in row_cuts] + [y1 - y0 + 1]
+    col_edges = [0] + [c + 1 for c in col_cuts] + [x1 - x0 + 1]
+    img_area = float(rgb.shape[0] * rgb.shape[1])
+
+    pieces: list[Component] = []
+    for ra, rb in zip(row_edges, row_edges[1:]):
+        for ca, cb in zip(col_edges, col_edges[1:]):
+            cell = np.zeros_like(comp.mask)
+            cell[y0 + ra:y0 + rb, x0 + ca:x0 + cb] =                 comp.mask[y0 + ra:y0 + rb, x0 + ca:x0 + cb]
+            if not cell.any():
+                continue
+            built = _component_from_mask(cell, img_area)
+            if built is not None:
+                pieces.append(built)
+
+    good = [c for c in pieces
+            if c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC * 0.5
+            and c.rectangularity >= settings.CLEANUP_SPLIT_RECTANGULARITY]
+    if len(good) < 2:
+        return [comp]
+    good.sort(key=lambda c: c.area_frac, reverse=True)
+    return good
+
+
+def split_merged_components(
+    rgb: np.ndarray, comps: list[Component], bed: BedInfo, settings: Settings,
+) -> list[Component]:
+    """Apply `split_touching_prints` to every component, largest first."""
+    if not settings.CLEANUP_SPLIT_GUTTERS or not comps:
+        return comps
+    gutter = bed_by_tone(rgb, bed, settings)
+    out: list[Component] = []
+    for c in comps:
+        out.extend(split_touching_prints(rgb, c, bed, settings, gutter=gutter))
+    out.sort(key=lambda c: c.area_frac, reverse=True)
+    return out
 
 
 def guard_crop_edges(
@@ -763,11 +917,16 @@ def analyse_photo(
     working_path: Path,
     dpi: int | None = None,
     has_back: bool = False,
+    ai_label: str | None = None,
 ) -> Analysis:
     """Measure one scan and decide which ops it needs.
 
     `has_back` forces `needs_manual`: which child of a split owns the
     scanned back is not something the analyser may guess (Phase 7 answer 2).
+
+    `ai_label` is the classifier's verdict, when the classify job has run.
+    A `document` never splits (fix-up 5): photo #3839 is a newspaper cutting
+    whose columns of text, separated by white gutters, read as two prints.
     """
     started = time.perf_counter()
     rgb, src_w, src_h, scale = load_for_analysis(
@@ -777,6 +936,11 @@ def analyse_photo(
                       src_w=src_w, src_h=src_h)
 
     bed, comps = detect_bed_and_prints(rgb, settings)
+    # Prints that touch arrive as one component. Cut them apart before the
+    # gates below judge anything, so "the largest print" means a print
+    # (fix-up 5, photo #708).
+    merged_count = len(comps)
+    comps = split_merged_components(rgb, comps, bed, settings)
     measured: dict[str, Any] = {
         "bed": {"kind": bed.kind, "grey": round(bed.grey, 1), "score": bed.score},
         "analysis": {"edge": int(max(rgb.shape[0], rgb.shape[1])),
@@ -807,14 +971,31 @@ def analyse_photo(
     # Found first, because it changes how the size gate below is read: on a
     # scan of three prints the *largest* one covers only a third of the bed,
     # which is not the analyser failing to find a print.
+    # A region counts as a print if it is big in absolute terms OR big
+    # relative to the largest region (fix-up 5). Eight prints on one bed are
+    # ~10 % of the scan each and every one failed the absolute gate, but what
+    # makes them prints is that they are all the same size as each other.
+    biggest = max((c.area_frac for c in comps), default=0.0)
+    rel_floor = biggest * settings.CLEANUP_SPLIT_REL_MIN
     prints = [
         c for c in comps
-        if c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC
+        if (c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC
+            or (c.area_frac >= rel_floor
+                and c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC * 0.5))
         and c.rectangularity >= settings.CLEANUP_SPLIT_RECTANGULARITY
     ]
-    is_multi = len(prints) >= 2 and not has_back
+    skip_labels = {x.strip().lower()
+                   for x in (settings.CLEANUP_SPLIT_SKIP_LABELS or "").split(",")
+                   if x.strip()}
+    label_vetoes = bool(ai_label) and ai_label.strip().lower() in skip_labels
+    is_multi = len(prints) >= 2 and not has_back and not label_vetoes
     if len(prints) >= 2:
         measured["print_frac_all"] = round(sum(c.area_frac for c in prints), 4)
+    if merged_count != len(comps):
+        measured["gutter_cuts"] = {"components_before": merged_count,
+                                   "components_after": len(comps)}
+    if label_vetoes:
+        measured["split_vetoed_by_label"] = ai_label
 
     if is_multi:
         # The per-region gates (CLEANUP_SPLIT_MIN_FRAC + rectangularity) have
@@ -838,7 +1019,10 @@ def analyse_photo(
         result.needs_manual = True
         result.manual_reason = "skew_too_large"
 
-    if len(prints) >= 2:
+    if len(prints) >= 2 and label_vetoes:
+        # Offer the crop, never the split: the regions are columns of text.
+        measured["split_candidates"] = len(prints)
+    elif len(prints) >= 2:
         if has_back:
             result.needs_manual = True
             result.manual_reason = "has_back"

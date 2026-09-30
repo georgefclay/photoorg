@@ -52,6 +52,9 @@ class ScopeRow:
     source_filename: str = ""
     dpi: int | None = None
     has_back: bool = False
+    #: The newest AI classification label, if the classify job has run.
+    #: A newspaper's columns read as separate prints (fix-up 5, photo #3839).
+    ai_label: str | None = None
     proposal_status: str | None = None
 
     def resolved_path(self, settings: Settings) -> Path | None:
@@ -145,6 +148,11 @@ def select_scope(
                p.source_filename,
                (select max(pm.dpi) from photo_masters pm where pm.photo_id = p.id) as dpi,
                exists (select 1 from photo_backs b where b.photo_id = p.id) as has_back,
+               (select s.payload ->> 'label'
+                  from suggestions s
+                 where s.photo_id = p.id and s.kind = 'classification'
+                   and s.status <> 'rejected'
+                 order by s.id desc limit 1) as ai_label,
                cp.status::text as proposal_status
           from photos p
           left join lateral (
@@ -252,6 +260,34 @@ def set_derived_path(conn: psycopg.Connection, proposal_id: int, path: str | Non
     conn.execute(
         "update cleanup_proposals set derived_path = %s where id = %s",
         (path, proposal_id),
+    )
+
+
+def update_split_regions(
+    conn: psycopg.Connection, proposal_id: int,
+    regions: list[dict[str, Any]], *, actor: str,
+) -> None:
+    """Replace a proposal's split regions with the ones George drew.
+
+    `operations.ops.split` is kept in step so the caption and the report do
+    not go on claiming a region count that is no longer true.
+    """
+    conn.execute(
+        """
+        update cleanup_proposals
+           set split_regions = %s::jsonb,
+               operations = jsonb_set(
+                   jsonb_set(operations, '{ops,split}',
+                             coalesce(operations -> 'ops' -> 'split', '{}'::jsonb)
+                             || jsonb_build_object(
+                                    'regions', %s::int,
+                                    'edited_by', %s::text)),
+                   '{split_edited}', 'true'::jsonb),
+               updated_at = now()
+         where id = %s
+        """,
+        (json.dumps(regions, default=str), len(regions), actor,
+         proposal_id),
     )
 
 

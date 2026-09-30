@@ -61,6 +61,13 @@ def panel(monkeypatch, tmp_path):
     import photoarchive.modes.cleanup.ui as ui_mod
     monkeypatch.setattr(ui_mod, "load_config", lambda: settings)
     monkeypatch.setattr(config_mod, "load", lambda: settings)
+    # The panel remembers the queue filter in QSettings, which is per-machine
+    # and shared with George's real app. A test must not read it, write it, or
+    # leak a choice into the next test — point it at a file under tmp_path.
+    from PySide6.QtCore import QSettings
+    ini = str(tmp_path / "settings.ini")
+    monkeypatch.setattr(ui_mod.CleanupPanel, "_qsettings",
+                        staticmethod(lambda: QSettings(ini, QSettings.IniFormat)))
     _app()
     yield settings, ui_mod
 
@@ -338,9 +345,6 @@ def test_the_choice_survives_a_restart(panel):
     assert again._filter_box.currentData() == "splits"
     again.close()
 
-    # Reset, so the stored value doesn't leak into the next test.
-    ui_mod.CleanupPanel._qsettings().setValue(ui_mod.QUEUE_FILTER_KEY, "all")
-
 
 def test_an_unknown_stored_filter_falls_back_to_all(panel):
     """A key dropped in a later version must not leave George looking at an
@@ -353,4 +357,148 @@ def test_an_unknown_stored_filter_falls_back_to_all(panel):
     assert p._filter_box.currentData() == "all"
     assert p._proposal_ids
     p.close()
-    ui_mod.CleanupPanel._qsettings().setValue(ui_mod.QUEUE_FILTER_KEY, "all")
+
+
+# --------------------------------------------------------------------------
+# Fix-up 5: W keeps the scan whole, G edits the regions
+# --------------------------------------------------------------------------
+
+def _split_photo(settings):
+    from .test_cleanup_split import _mk_two_print_photo
+    pid, _rects = _mk_two_print_photo(settings, sha="9" * 64)
+    job_mod.run_cleanup_analyse(settings, write_previews=False)
+    return pid
+
+
+def test_w_keeps_the_scan_whole_and_advances(panel):
+    settings, ui_mod = panel
+    pid = _split_photo(settings)
+    p = _open_panel(ui_mod)
+    assert p._proposal is not None and p._proposal.is_split
+    proposal_id = p._proposal.id
+
+    p._keep_whole()
+    _pump(300)
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        after = repo.load_proposal(conn, proposal_id)
+    assert after.status == "rejected"
+    assert "kept whole" in p._status_bar.text()
+    assert str(pid) in p._status_bar.text()
+    p.close()
+
+
+def test_the_keep_whole_button_is_off_in_the_manual_queue(panel):
+    settings, ui_mod = panel
+    _split_photo(settings)
+    p = _open_panel(ui_mod)
+    assert p._whole_btn.isEnabled()
+    p._toggle_manual(True)
+    assert not p._whole_btn.isEnabled()
+    p.close()
+
+
+def test_the_region_button_is_only_live_on_a_split(panel):
+    settings, ui_mod = panel
+    _mk_scan_photo(settings, sha="8" * 64, angle=3.0)
+    job_mod.run_cleanup_analyse(settings, write_previews=False)
+    p = _open_panel(ui_mod)
+    assert p._proposal is not None and not p._proposal.is_split
+    assert not p._regions_btn.isEnabled(), (
+        "there are no regions to edit on an ordinary proposal")
+    p.close()
+
+
+def test_g_saves_the_regions_the_editor_returns(panel, monkeypatch):
+    """The dialog itself is driven by a mouse; what matters here is that what
+    it returns reaches the proposal, with the audit row to say a person put
+    it there."""
+    settings, ui_mod = panel
+    pid = _split_photo(settings)
+    p = _open_panel(ui_mod)
+    assert p._proposal.is_split and len(p._proposal.split_regions) == 2
+    proposal_id = p._proposal.id
+    w, h = p._proposal.width, p._proposal.height
+
+    from photoarchive.modes.cleanup import regions as regions_mod
+    drawn = [regions_mod.Box(10.0, 10.0, w / 3 - 20, h - 20),
+             regions_mod.Box(w / 3 + 10, 10.0, w / 3 - 20, h - 20),
+             regions_mod.Box(2 * w / 3 + 10, 10.0, w / 3 - 20, h - 20)]
+
+    class _FakeDialog:
+        def __init__(self, *a, **kw):
+            pass
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+            return QDialog.Accepted
+
+        def result_boxes(self):
+            return drawn
+
+    monkeypatch.setattr(ui_mod, "RegionEditorDialog", _FakeDialog)
+    p._edit_regions()
+    _pump(300)
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        after = repo.load_proposal(conn, proposal_id)
+    assert len(after.split_regions) == 3
+    assert all(r["edited_by"] == "human" for r in after.split_regions)
+    assert "regions edited by hand" in p._status_bar.text()
+    p.close()
+
+
+def test_cancelling_the_editor_changes_nothing(panel, monkeypatch):
+    settings, ui_mod = panel
+    _split_photo(settings)
+    p = _open_panel(ui_mod)
+    proposal_id = p._proposal.id
+    before = list(p._proposal.split_regions)
+
+    class _Cancelled:
+        def __init__(self, *a, **kw):
+            pass
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+            return QDialog.Rejected
+
+        def result_boxes(self):
+            raise AssertionError("must not be asked after a cancel")
+
+    monkeypatch.setattr(ui_mod, "RegionEditorDialog", _Cancelled)
+    p._edit_regions()
+    _pump(200)
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        after = repo.load_proposal(conn, proposal_id)
+    assert after.split_regions == before
+    p.close()
+
+
+def test_z_undoes_an_accepted_split(panel):
+    """Answer 9: a split is undoable within the session. The module-level
+    path is tested elsewhere; this is the one that goes through the key."""
+    settings, ui_mod = panel
+    pid = _split_photo(settings)
+    p = _open_panel(ui_mod)
+    assert p._proposal.is_split
+
+    p._accept()
+    _pump(1500)
+    assert p._undo_stack and p._undo_stack[-1].kind == "split"
+
+    p._undo()
+    _pump(1500)
+
+    from .test_cleanup_split import _children
+    kids = _children(TEST_DATABASE_URL, pid)
+    assert kids and all(k["is_deleted"] for k in kids)
+    assert "undone" in p._status_bar.text().lower()
+    p.close()

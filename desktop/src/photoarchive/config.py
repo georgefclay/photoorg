@@ -158,6 +158,22 @@ class Settings(BaseSettings):
     CLEANUP_SPLIT_MIN_FRAC: float = Field(default=0.12, gt=0.0, le=1.0)
     # component area / minAreaRect area — how rectangular a component must be.
     CLEANUP_SPLIT_RECTANGULARITY: float = Field(default=0.80, gt=0.0, le=1.0)
+    # …or this fraction of the LARGEST region's area (fix-up 5). Eight prints
+    # on one bed are ~10 % of the scan each and every one failed the absolute
+    # gate above (photo #1398); what makes them prints is that they are the
+    # same size as each other, not that they fill a tenth of the bed.
+    CLEANUP_SPLIT_REL_MIN: float = Field(default=0.55, gt=0.0, le=1.0)
+    # Cut a component that is really several prints touching, along the bands
+    # of scanner bed running through it (fix-up 5, photo #708).
+    CLEANUP_SPLIT_GUTTERS: bool = True
+    # The flatness window used to recognise a gutter, as a fraction of the long
+    # edge. Much smaller than CLEANUP_MASK_STD_WINDOW_FRAC because it has to
+    # fit *inside* a gutter: at 1.3 % the window is wider than the gap between
+    # two prints, so every pixel in it reads as busy and the gutter vanishes.
+    CLEANUP_GUTTER_STD_WINDOW_FRAC: float = Field(default=0.003, gt=0.0, le=1.0)
+    # Never propose a split on a photo the classifier called one of these.
+    # A newspaper's columns read as separate prints (photo #3839).
+    CLEANUP_SPLIT_SKIP_LABELS: str = "document,screenshot,back_of_print"
     # Colour cast: Lab a/b distance from neutral, measured on the print's
     # *near-neutral* mid-tones — the least-colourful CLEANUP_CAST_NEUTRAL_PCT
     # per cent of them. An age cast shifts the paper, greys included; scene

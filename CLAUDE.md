@@ -399,6 +399,52 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **The parent leaves through the front door**:
   `triage.apply_decision('junk', hint='split_parent')`, so it is quarantined,
   audited and restorable.
+- **Prints that touch arrive as one component, and are cut apart** (fix-up 5).
+  Photo #708 is three prints stacked on one bed; the lower two touch, so one
+  connected component covered both and the analyser proposed a two-way split.
+  No gate was wrong — the prints were never separated. `split_merged_components`
+  looks for bands of scanner bed running right across a component and cuts on
+  them. The evidence is `bed_by_tone` (bed tone + **reachable from the scan
+  border**), not the absence of the print mask: on a scan whose prints sit
+  close together the mask has already bridged the gutter, which is why they
+  merged, and on one whose prints have pale backgrounds (#1398) the mask is
+  full of holes that are not gutters. Its flatness window
+  (`CLEANUP_GUTTER_STD_WINDOW_FRAC`, 0.003) is a fifth of the mask's, because
+  it has to fit *inside* a gutter — at 1.3 % the window is wider than the gap
+  and every pixel in it reads as busy. A cut is kept only if it yields two or
+  more pieces that each look like a print.
+- **A region counts if it is big in absolute terms OR relative to the largest**
+  (`CLEANUP_SPLIT_REL_MIN`, 0.55). Eight prints on one bed are ~10 % of the
+  scan each and every one failed the 12 % gate (#1398); what makes them prints
+  is that they are the same size as each other.
+- **A `document` is never split.** Photo #3839 is a newspaper cutting whose
+  columns of text, separated by white gutters, are exactly what a multi-print
+  scan looks like. No image heuristic is needed — the classify job already
+  labelled it `document` at 0.98 — so `CLEANUP_SPLIT_SKIP_LABELS`
+  (`document,screenshot,back_of_print`) vetoes the split and the crop is
+  offered instead. The label comes down the scope query as `ScopeRow.ai_label`
+  (newest non-rejected `classification` suggestion).
+- **What the detector still cannot do, the region editor can.** #3817 is a
+  ten-picture proof sheet whose prints touch with *no* bed between them: there
+  is no gutter to find, and measuring says so. **G** opens
+  `region_editor.RegionEditorDialog` — drag to move, corners to resize, drag
+  on empty bed to add, `Del` to remove, plus a rows × columns **grid** helper
+  laid over the area the regions already cover. Every rule lives in
+  `regions.py`, which is free of Qt and of the database: regions may not
+  overlap (beyond a 2 % touching tolerance — adjacent prints share an edge),
+  may not leave the scan, and must be more than 0.5 % of it. Saving rewrites
+  `cleanup_proposals.split_regions` with `edited_by='human'` per region and
+  writes a `cleanup.split` audit row carrying **both** the measured and the
+  drawn regions. The transform is built by `transform_for` with the same
+  arguments the analyser uses, so `accept_split` cannot tell an edited region
+  from a measured one — faces still map by containment, children still get
+  their own `region_key`.
+- **W — keep whole.** R was the only way to refuse a proposal, and R copies
+  the file to `MANUAL_FIX_DIR` and parks the photo in a queue, which is the
+  wrong answer when nothing is wrong with the photo. **W** marks the proposal
+  `rejected` with `reason='not_a_split'`, writes the audit row, and stops: no
+  file is written, no pixels change, `photos` is untouched. It works on any
+  proposal, not just a split.
 - **A scan with a `photo_backs` row is never auto-split** — which child owns
   the back is not the analyser's guess to make; it becomes `needs_manual`
   with "has a back — split by hand".

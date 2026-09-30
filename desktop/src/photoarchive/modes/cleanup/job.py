@@ -149,6 +149,7 @@ def run_cleanup_analyse(
                 result = analyse_mod.analyse_photo(
                     settings, photo_id=row.photo_id, working_path=path,
                     dpi=row.dpi, has_back=row.has_back,
+                    ai_label=row.ai_label,
                 )
             except Exception as e:
                 stats.failed += 1

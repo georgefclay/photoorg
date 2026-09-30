@@ -30,7 +30,7 @@ from PIL import Image
 from PySide6.QtCore import QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget,
 )
@@ -47,9 +47,11 @@ from . import paths as cpaths
 from . import remote_enhance as remote_mod
 from . import render as render_mod
 from . import report as report_mod
+from . import regions as regions_mod
 from . import repo
 from . import split as split_mod
 from .geometry import Transform
+from .region_editor import RegionEditorDialog
 from .remote import build_provider
 
 log = logging.getLogger(__name__)
@@ -170,6 +172,18 @@ class CleanupPanel(QWidget):
         self._accept_btn.clicked.connect(self._accept)
         self._reject_btn = QPushButton("Reject → manual (R)")
         self._reject_btn.clicked.connect(self._reject)
+        self._regions_btn = QPushButton("Edit regions… (G)")
+        self._regions_btn.setToolTip(
+            "Move, resize, add or delete the split regions by hand. For a "
+            "proof sheet whose prints touch, lay out a grid and nudge it."
+        )
+        self._regions_btn.clicked.connect(self._edit_regions)
+        self._whole_btn = QPushButton("Keep whole (W)")
+        self._whole_btn.setToolTip(
+            "The scan is one object — reject the proposal and leave the photo "
+            "exactly as it is. No file is written."
+        )
+        self._whole_btn.clicked.connect(self._keep_whole)
         self._skip_btn = QPushButton("Skip (S)")
         self._skip_btn.clicked.connect(self._skip)
         self._remote_btn = QPushButton("Remote enhance (E)")
@@ -189,6 +203,8 @@ class CleanupPanel(QWidget):
         act_row = QHBoxLayout()
         act_row.addWidget(self._accept_btn)
         act_row.addWidget(self._reject_btn)
+        act_row.addWidget(self._regions_btn)
+        act_row.addWidget(self._whole_btn)
         act_row.addWidget(self._skip_btn)
         act_row.addWidget(self._remote_btn)
         act_row.addWidget(self._undo_btn)
@@ -264,6 +280,8 @@ class CleanupPanel(QWidget):
 
         _sc("A", self._accept)
         _sc("R", self._reject)
+        _sc("W", self._keep_whole)
+        _sc("G", self._edit_regions)
         _sc("S", self._skip)
         _sc("E", self._remote)
         _sc("Z", self._undo)
@@ -477,8 +495,8 @@ class CleanupPanel(QWidget):
     def _toggle_manual(self, on: bool) -> None:
         self._manual_mode = bool(on)
         self._cursor = 0
-        for b in (self._accept_btn, self._reject_btn, self._remote_btn,
-                  self._bulk_batch_btn, self._bulk_all_btn):
+        for b in (self._accept_btn, self._reject_btn, self._whole_btn,
+                  self._remote_btn, self._bulk_batch_btn, self._bulk_all_btn):
             b.setEnabled(not on)
         self._refresh_queue()
 
@@ -494,8 +512,8 @@ class CleanupPanel(QWidget):
         self._viewer.set_right_base(None, 0, 0, caption="")
         self._facts.setText("")
         self._clear_op_boxes()
-        for b in (self._accept_btn, self._reject_btn, self._skip_btn,
-                  self._remote_btn):
+        for b in (self._accept_btn, self._reject_btn, self._whole_btn,
+                  self._regions_btn, self._skip_btn, self._remote_btn):
             b.setEnabled(False)
         self._say(f"No {which} proposals. Run analysis to build the queue.")
 
@@ -518,10 +536,13 @@ class CleanupPanel(QWidget):
             f"photo #{p.photo_id}  ·  {loc}  ·  {p.source_filename}"
         )
         enabled = not self._manual_mode
-        for b in (self._accept_btn, self._reject_btn, self._remote_btn):
+        for b in (self._accept_btn, self._reject_btn, self._whole_btn,
+                  self._remote_btn):
             b.setEnabled(enabled and not (b is self._remote_btn
                                           and not self._provider.available))
         self._skip_btn.setEnabled(True)
+        # Regions only mean something on a split.
+        self._regions_btn.setEnabled(enabled and p.is_split)
 
         self._rebuild_filmstrip()
         self._rebuild_op_boxes()
@@ -681,8 +702,11 @@ class CleanupPanel(QWidget):
         self._after_dims = tuple(payload.get("after_dims") or (0, 0))    # type: ignore
         self._paint_bases()
         caption = analyse_mod.caption_for(p.operations)
-        self._say(f"photo {p.photo_id}: {caption}. "
-                  f"A accept · R manual · S skip · E remote · Z undo · T A/B")
+        keys = "A accept · W keep whole · R manual · S skip"
+        if p.is_split:
+            keys += " · G edit regions"
+        keys += " · E remote · Z undo · T A/B"
+        self._say(f"photo {p.photo_id}: {caption}. {keys}")
 
     def _on_views_failed(self, tb: str) -> None:
         self._view_job = None
@@ -809,6 +833,77 @@ class CleanupPanel(QWidget):
             return
         self._say_action(f"photo {p.photo_id} copied to {res.manual_path} "
                          f"and parked in the manual queue.")
+        self._advance_past_current()
+
+    def _edit_regions(self) -> None:
+        """G — the analyser's regions are wrong; draw the right ones."""
+        p = self._proposal
+        if p is None or self._manual_mode or not p.is_split:
+            return
+        src_w = int(p.width or (p.operations.get("analysis") or {}).get("src_w") or 0)
+        src_h = int(p.height or (p.operations.get("analysis") or {}).get("src_h") or 0)
+        if src_w <= 0 or src_h <= 0:
+            self._say("Cannot edit regions: the scan's dimensions are unknown.")
+            return
+
+        pix = QPixmap(str(self._before_path)) if self._before_path else QPixmap()
+        dlg = RegionEditorDialog(
+            pix, src_w=src_w, src_h=src_h,
+            boxes=regions_mod.boxes_from_regions(p.split_regions or []),
+            settings=self._settings, photo_id=p.photo_id, parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        boxes = dlg.result_boxes()
+        dpi = (p.operations.get("analysis") or {}).get("dpi")
+        inset = (p.operations.get("analysis") or {}).get("inset_px")
+        edited = regions_mod.to_regions(
+            boxes, settings=self._settings, src_w=src_w, src_h=src_h,
+            dpi=dpi, inset_px=float(inset) if inset is not None else None,
+        )
+        before = p.split_regions or []
+        try:
+            with db.connection() as conn:
+                conn.autocommit = False
+                try:
+                    repo.update_split_regions(conn, p.id, edited, actor="desktop")
+                    db.audit(conn, actor="desktop", action="cleanup.split",
+                             entity_type="photo", entity_id=p.photo_id,
+                             previous_value={"regions": len(before),
+                                             "split_regions": before},
+                             new_value={"proposal_id": p.id,
+                                        "regions": len(edited),
+                                        "edited_by": "human",
+                                        "split_regions": edited})
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+        except Exception as e:
+            log.exception("cleanup: saving edited regions failed")
+            QMessageBox.critical(self, "Could not save regions", str(e))
+            return
+
+        self._say_action(f"photo {p.photo_id}: regions edited by hand, "
+                         f"{len(before)} → {len(edited)}.")
+        self._load_current()
+
+    def _keep_whole(self) -> None:
+        """W — the analyser found prints that are not there (fix-up 5)."""
+        p = self._proposal
+        if p is None or self._manual_mode:
+            return
+        try:
+            res = accept_mod.keep_whole(self._settings, p.id)
+        except Exception as e:
+            log.exception("cleanup: keep-whole failed")
+            QMessageBox.critical(self, "Keep whole failed", str(e))
+            return
+        what = (f"{res.regions} regions" if res.regions
+                else "the proposed changes")
+        self._say_action(f"photo {p.photo_id} kept whole — {what} rejected, "
+                         f"nothing written.")
         self._advance_past_current()
 
     def _remote(self) -> None:

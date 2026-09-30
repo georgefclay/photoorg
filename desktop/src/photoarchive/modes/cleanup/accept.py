@@ -422,6 +422,54 @@ def reject_proposal(
                         manual_path=str(target))
 
 
+@dataclass
+class KeepWholeResult:
+    photo_id: int
+    proposal_id: int
+    regions: int
+
+
+def keep_whole(
+    settings: Settings, proposal_id: int, *, actor: str = "desktop",
+    reason: str = "not_a_split",
+) -> KeepWholeResult:
+    """W: the scan is one object, whatever the analyser saw in it.
+
+    Photo #3839 is a newspaper cutting whose columns of text read as two
+    prints. There was no way to say so: R copies the file to MANUAL_FIX_DIR
+    and parks the photo in a queue for hand-editing, which is the wrong answer
+    when nothing is wrong with the photo. This marks the proposal `rejected`
+    and stops. No file is written, no pixels change, and `photos` is not
+    touched — the scan stays exactly as it is.
+    """
+    with db.connection() as conn:
+        conn.autocommit = True
+        proposal = repo.load_proposal(conn, proposal_id)
+    if proposal is None:
+        raise CleanupError(f"proposal {proposal_id} not found")
+    if proposal.status != "pending":
+        raise CleanupError(
+            f"proposal {proposal_id} is {proposal.status}, not pending")
+
+    with db.connection() as conn:
+        conn.autocommit = False
+        try:
+            repo.decide(conn, proposal_id, "rejected", actor=actor)
+            db.audit(conn, actor=actor, action="cleanup.reject",
+                     entity_type="photo", entity_id=proposal.photo_id,
+                     previous_value={"status": "pending"},
+                     new_value={"proposal_id": proposal_id,
+                                "status": "rejected", "reason": reason,
+                                "regions": len(proposal.split_regions or []),
+                                "kept_whole": True})
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return KeepWholeResult(photo_id=proposal.photo_id, proposal_id=proposal_id,
+                           regions=len(proposal.split_regions or []))
+
+
 # --------------------------------------------------------------------------
 # Undo (session-scoped; the recipe for a cross-restart undo is in GC.md)
 # --------------------------------------------------------------------------
