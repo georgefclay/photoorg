@@ -612,6 +612,12 @@ def split_touching_prints(
     ys, xs = np.nonzero(comp.mask)
     if ys.size == 0:
         return [comp]
+    # A component that fills the scan is one print scanned edge to edge, and
+    # the bands inside it are picture, not bed. Photo #1033 is a single
+    # photograph covering 98 % of the frame; cutting it in two took a quarter
+    # of it away. Several prints on a bed always leave bed around them.
+    if comp.area_frac > settings.CLEANUP_SPLIT_MAX_FILL:
+        return [comp]
     y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
 
     row_cuts = _gutter_cuts(rgb, comp.mask, bed, settings, gutter=gutter,
@@ -935,12 +941,14 @@ def analyse_photo(
     result = Analysis(photo_id=photo_id, status="pending",
                       src_w=src_w, src_h=src_h)
 
-    bed, comps = detect_bed_and_prints(rgb, settings)
-    # Prints that touch arrive as one component. Cut them apart before the
-    # gates below judge anything, so "the largest print" means a print
-    # (fix-up 5, photo #708).
-    merged_count = len(comps)
-    comps = split_merged_components(rgb, comps, bed, settings)
+    bed, whole_comps = detect_bed_and_prints(rgb, settings)
+    # Prints that touch arrive as one component, so they are cut apart before
+    # the split gates judge anything (fix-up 5, photo #708). The cut decides
+    # the *split* only: which component is "the print" for cropping still
+    # comes from the uncut list unless a split is actually proposed. A cut
+    # that does not become a split is a fragment of one photograph, and
+    # letting the crop follow it removed a third of a clean scan.
+    cut_comps = split_merged_components(rgb, whole_comps, bed, settings)
     measured: dict[str, Any] = {
         "bed": {"kind": bed.kind, "grey": round(bed.grey, 1), "score": bed.score},
         "analysis": {"edge": int(max(rgb.shape[0], rgb.shape[1])),
@@ -952,12 +960,66 @@ def analyse_photo(
     measured["analysis"]["dpi"] = dpi
     measured["analysis"]["inset_px"] = round(inset, 2)
 
-    if not comps:
+    if not whole_comps:
         result.needs_manual = True
         result.manual_reason = "no_print_found"
         result.operations = measured
         result.analysis_ms = int((time.perf_counter() - started) * 1000)
         return result
+
+    # --- multi-print split ----------------------------------------------
+    # Decided first, because it changes how the size gate below is read: on a
+    # scan of three prints the *largest* one covers only a third of the bed,
+    # which is not the analyser failing to find a print. It also decides which
+    # component list the crop works from.
+    #
+    # A region counts as a print if it is big in absolute terms OR big
+    # relative to the largest region (fix-up 5). Eight prints on one bed are
+    # ~10 % of the scan each and every one failed the absolute gate, but what
+    # makes them prints is that they are all the same size as each other.
+    def _split_candidates(components: list[Component]) -> list[Component]:
+        biggest = max((c.area_frac for c in components), default=0.0)
+        rel_floor = biggest * settings.CLEANUP_SPLIT_REL_MIN
+        return [
+            c for c in components
+            if (c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC
+                or (c.area_frac >= rel_floor
+                    and c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC * 0.5))
+            and c.rectangularity >= settings.CLEANUP_SPLIT_RECTANGULARITY
+        ]
+
+    # Try the cut pieces, and fall back to the uncut components when cutting
+    # did not help. On photo #3833 the cut turned four prints into seven
+    # pieces that no longer looked like prints, and judging only the cut list
+    # lost a four-way split that was already correct. Cutting may find a
+    # split; it may never destroy one.
+    prints = _split_candidates(cut_comps)
+    used_cut = True
+    if len(prints) < 2 and cut_comps is not whole_comps:
+        fallback = _split_candidates(whole_comps)
+        if len(fallback) >= 2:
+            prints, used_cut = fallback, False
+
+    skip_labels = {x.strip().lower()
+                   for x in (settings.CLEANUP_SPLIT_SKIP_LABELS or "").split(",")
+                   if x.strip()}
+    label_vetoes = bool(ai_label) and ai_label.strip().lower() in skip_labels
+    is_multi = len(prints) >= 2 and not has_back and not label_vetoes
+
+    # Only a scan that really is several prints is measured from the cut
+    # pieces. Everywhere else the crop follows the whole component, because a
+    # piece of one photograph is not a smaller photograph.
+    comps = cut_comps if (is_multi and used_cut) else whole_comps
+    if len(prints) >= 2:
+        measured["print_frac_all"] = round(sum(c.area_frac for c in prints), 4)
+    if len(cut_comps) != len(whole_comps):
+        measured["gutter_cuts"] = {
+            "components_before": len(whole_comps),
+            "components_after": len(cut_comps),
+            "used": is_multi and used_cut,
+        }
+    if label_vetoes:
+        measured["split_vetoed_by_label"] = ai_label
 
     # --- the print, in full-resolution display coordinates ---------------
     top = comps[0]
@@ -966,36 +1028,6 @@ def analyse_photo(
     measured["print_frac"] = round(top.area_frac, 4)
     measured["rectangularity"] = round(top.rectangularity, 4)
     measured["edges"] = top.edges.to_json() if top.edges else None
-
-    # --- multi-print split ----------------------------------------------
-    # Found first, because it changes how the size gate below is read: on a
-    # scan of three prints the *largest* one covers only a third of the bed,
-    # which is not the analyser failing to find a print.
-    # A region counts as a print if it is big in absolute terms OR big
-    # relative to the largest region (fix-up 5). Eight prints on one bed are
-    # ~10 % of the scan each and every one failed the absolute gate, but what
-    # makes them prints is that they are all the same size as each other.
-    biggest = max((c.area_frac for c in comps), default=0.0)
-    rel_floor = biggest * settings.CLEANUP_SPLIT_REL_MIN
-    prints = [
-        c for c in comps
-        if (c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC
-            or (c.area_frac >= rel_floor
-                and c.area_frac >= settings.CLEANUP_SPLIT_MIN_FRAC * 0.5))
-        and c.rectangularity >= settings.CLEANUP_SPLIT_RECTANGULARITY
-    ]
-    skip_labels = {x.strip().lower()
-                   for x in (settings.CLEANUP_SPLIT_SKIP_LABELS or "").split(",")
-                   if x.strip()}
-    label_vetoes = bool(ai_label) and ai_label.strip().lower() in skip_labels
-    is_multi = len(prints) >= 2 and not has_back and not label_vetoes
-    if len(prints) >= 2:
-        measured["print_frac_all"] = round(sum(c.area_frac for c in prints), 4)
-    if merged_count != len(comps):
-        measured["gutter_cuts"] = {"components_before": merged_count,
-                                   "components_after": len(comps)}
-    if label_vetoes:
-        measured["split_vetoed_by_label"] = ai_label
 
     if is_multi:
         # The per-region gates (CLEANUP_SPLIT_MIN_FRAC + rectangularity) have

@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     # Cut a component that is really several prints touching, along the bands
     # of scanner bed running through it (fix-up 5, photo #708).
     CLEANUP_SPLIT_GUTTERS: bool = True
+    # ...but never one that covers more than this much of the scan. A print
+    # filling the frame was scanned edge to edge and has no bed in it; the
+    # bands inside it are picture (photo #1033, a single photo at 98 %).
+    CLEANUP_SPLIT_MAX_FILL: float = Field(default=0.85, gt=0.0, le=1.0)
     # The flatness window used to recognise a gutter, as a fraction of the long
     # edge. Much smaller than CLEANUP_MASK_STD_WINDOW_FRAC because it has to
     # fit *inside* a gutter: at 1.3 % the window is wider than the gap between

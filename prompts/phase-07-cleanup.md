@@ -198,21 +198,71 @@ merged component, #3817 has none at any threshold.
   the original wrong answer, so the fix cannot be proved by a fixture that
   stopped exhibiting the bug.
 
+**The archive sweep found three regressions that the four diagnosis photos
+and the whole test suite had missed.** All 3,446 live proposals were
+re-measured against the new detector, writing nothing. The headline was small
+— 14 region-count changes, 29 rect moves — but reading the 29 one by one
+showed the gutter cut was *fragmenting single prints*, and when the fragments
+failed the split gates no split was proposed, yet the crop still followed a
+fragment:
+
+| scan | was | would have become |
+|---|---|---|
+| #1790 | clean, no crop | crop removing **30 %** |
+| #1033 | clean, no crop | crop removing **27 %** — a single photo at 98 % of the frame |
+| #2251 | clean, no crop | crop removing **22 %** |
+| #3833 | a correct 4-way split | **split destroyed**, `print_too_small` |
+
+Fix-up 3's content guard caught none of them: a fragment's edges genuinely
+abut bed-toned bands, so it reported no unclear sides. Three corrections:
+
+1. **The cut decides the split and nothing else.** The crop follows the
+   *uncut* component unless a split is actually proposed.
+2. **Cutting may find a split; it may never destroy one.** If the cut pieces
+   fail the gates, the uncut components are reconsidered.
+3. **A component filling the scan is never cut** (`CLEANUP_SPLIT_MAX_FILL`,
+   0.85). Several prints on a bed always leave bed around them; a print at
+   98 % has none, so the bands inside it are picture.
+
+Three more tests pin these. The sweep was then re-run in full against the
+corrected detector — in 14 chunks of 250, each a fresh process, because a
+single hour-long run was killed for memory three times and never handed the
+space back:
+
+| | before the corrections | after |
+|---|---|---|
+| region count changed | 14 | **9** |
+| print rect moved > 8 px | 29 | **19** |
+| …crop moved with it | — | 17 |
+| ……already accepted (artefact) | — | 10 |
+| ……became a split (regions crop instead) | — | 7 |
+| **……a real crop change** | 4 destructive | **0** |
+
+The ten "artefacts" are accepted photos whose working file is already the
+cropped one, so re-measuring finds no bed left to remove — the accept having
+worked, not the detector changing its mind.
+
+**Newly a split (7):** #2171, #2651, #2716, #2717, #2718, #4071 by the gutter
+cut; **#3815 by the relative gate** — 8 components at 11.0–11.3 % each, all
+rectangular, all near-zero angle, every one failing the old 12 % gate. That is
+the #1398 shape found independently, and the best evidence the relative gate
+is right.
+
+**No longer a split (1):** #3839, the newspaper, which is the intended
+behaviour. 44 photos carry a veto label; only that one actually lost a split.
+
+`CLEANUP_SPLIT_GUTTERS` stays **on** by default on this evidence.
+
 **Outstanding.**
 
 - **#1398 and #3817 are not fixed by detection**, and I do not think they can
   be. #1398's prints have pale calm backgrounds that any bed test reads as
   bed; #3817's prints touch with no bed between them. The region editor and
   its grid helper are the answer for both — as the PM anticipated for #3817.
-- **The archive-wide sweep is still running** (3,446 live proposals
-  re-measured against the new detector, writing nothing). At 800 it stood at
-  **2 region-count changes and 14 print-rect moves > 8 px**. This is the
-  number that decides whether `CLEANUP_SPLIT_GUTTERS` should stay on by
-  default, and it also answers "how many clean/crop-only scans have ≥ 2 real
-  regions". **Not yet reported.**
-- `test_cleanup_ui.py` re-run pending (the earlier failures were two pytest
-  processes against the shared `photoorg_test` at once, not a code fault —
-  the same collision noted during the full-scope run).
+- The 9 changed proposals are **not** written back — the sweep writes nothing.
+  Re-analysing those photos (`run_cleanup --reanalyse`, or per batch) is what
+  would apply them, and that is your call, not something to do under you mid-
+  review.
 
 ### Fix-up 4 — queue filter, deskew never grows the canvas (2026-09-30)
 

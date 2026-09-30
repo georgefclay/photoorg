@@ -70,7 +70,8 @@ def test_the_gutter_cut_finds_the_third_print(tmp_path):
     assert n_off == 2, "the fixture must still split two ways without the cut"
     assert n_on == 3, f"expected three prints, got {n_on}"
     assert r_on.operations["gutter_cuts"] == {"components_before": 2,
-                                              "components_after": 3}
+                                              "components_after": 3,
+                                              "used": True}
 
 
 def test_the_three_regions_are_the_three_prints(tmp_path):
@@ -205,3 +206,88 @@ def test_the_veto_list_is_a_setting(tmp_path):
     settings = _settings(tmp_path, CLEANUP_SPLIT_SKIP_LABELS="")
     _r, n = _regions(NEWSPAPER, settings, ai_label="document")
     assert n == 2, "an empty list must veto nothing"
+
+
+# --------------------------------------------------------------------------
+# What the archive sweep caught: cutting must never make things worse
+# --------------------------------------------------------------------------
+
+def test_a_print_that_fills_the_scan_is_never_cut(tmp_path):
+    """Photo #1033 is one photograph scanned edge to edge, covering 98 % of
+    the frame. The cut found a "gutter" in the picture — a horizon, a painted
+    line — and the crop that followed took a quarter of the photo away.
+
+    Several prints on a bed always leave bed around them. A component that
+    fills the scan has none, so there is nothing in it that can be a gutter.
+    """
+    settings = _settings(tmp_path)
+    H, W = 1000, 1400
+    # A print covering 95 % of the scan, with a band of bed tone across its
+    # middle that a gutter map would happily believe in.
+    rgb = np.full((H, W, 3), 242, np.uint8)
+    rng = np.random.default_rng(21)
+    grid = rng.integers(20, 210, size=(H // 20, W // 20)).astype(np.uint8)
+    tile = np.kron(grid, np.ones((20, 20), np.uint8))[:H, :W]
+    rgb[25:975, 35:1365] = np.repeat(tile[:950, :1330, None], 3, axis=2)
+
+    mask = np.zeros((H, W), bool)
+    mask[25:975, 35:1365] = True
+    comp = analyse_mod._component_from_mask(mask, float(H * W))
+    assert comp.area_frac > settings.CLEANUP_SPLIT_MAX_FILL, comp.area_frac
+
+    bed = analyse_mod.BedInfo(kind="white", grey=242.0, score=1.0)
+    gutter = np.zeros((H, W), bool)
+    gutter[480:540, :] = True          # a band right across it, and beyond
+    gutter[:, :35] = True
+    gutter[:, 1365:] = True
+
+    pieces = analyse_mod.split_touching_prints(rgb, comp, bed, settings,
+                                               gutter=gutter)
+    assert pieces == [comp], (
+        "a print filling the scan has no bed in it to be a gutter")
+
+    # Lift the ceiling and the very same band does cut it in two, which is
+    # what used to happen and what took a quarter off photo #1033.
+    loose = _settings(tmp_path, CLEANUP_SPLIT_MAX_FILL=1.0)
+    assert len(analyse_mod.split_touching_prints(
+        rgb, comp, bed, loose, gutter=gutter)) == 2
+
+
+def test_a_cut_that_is_not_a_split_leaves_the_crop_alone(tmp_path):
+    """The regression the sweep found on #1790 and #2251: the cut fragmented
+    one print, the pieces failed the split gates, and the crop then followed
+    a fragment — removing 30 % of a clean scan. Cutting decides the split and
+    nothing else."""
+    settings = _settings(tmp_path)
+    off = _settings(tmp_path, CLEANUP_SPLIT_GUTTERS=False)
+    path, _rects = make_scan(tmp_path / "one.jpg", angle=1.0, print_frac=0.55)
+
+    with_cut = analyse_mod.analyse_photo(settings, photo_id=1, working_path=path)
+    without = analyse_mod.analyse_photo(off, photo_id=1, working_path=path)
+
+    assert not with_cut.split_regions
+    a = (with_cut.operations.get("ops") or {}).get("crop") or {}
+    b = (without.operations.get("ops") or {}).get("crop") or {}
+    assert a.get("removed_frac", 0.0) == pytest.approx(
+        b.get("removed_frac", 0.0), abs=0.01)
+    ra = analyse_mod.Rect.from_json(with_cut.operations["print_rect"])
+    rb = analyse_mod.Rect.from_json(without.operations["print_rect"])
+    assert abs(ra.w) == pytest.approx(abs(rb.w), abs=2)
+    assert abs(ra.h) == pytest.approx(abs(rb.h), abs=2)
+
+
+def test_cutting_never_destroys_a_split_that_was_already_right(tmp_path):
+    """Photo #3833 was a correct four-way split; the cut turned it into seven
+    pieces that no longer looked like prints, and judging only the cut list
+    lost the split entirely. The uncut components are reconsidered."""
+    settings = _settings(tmp_path)
+    off = _settings(tmp_path, CLEANUP_SPLIT_GUTTERS=False)
+    path, _rects = make_scan(tmp_path / "two.jpg", prints=2, angle=1.0,
+                             print_frac=0.18)
+
+    with_cut = analyse_mod.analyse_photo(settings, photo_id=1, working_path=path)
+    without = analyse_mod.analyse_photo(off, photo_id=1, working_path=path)
+
+    assert len(without.split_regions or []) == 2
+    assert len(with_cut.split_regions or []) >= 2, (
+        "the cut must not lose a split the uncut components already found")
