@@ -654,8 +654,21 @@ def split_touching_prints(
 def split_merged_components(
     rgb: np.ndarray, comps: list[Component], bed: BedInfo, settings: Settings,
 ) -> list[Component]:
-    """Apply `split_touching_prints` to every component, largest first."""
+    """Apply `split_touching_prints` to every component, largest first.
+
+    The cut may *subdivide* prints the mask already separated; it may not
+    *manufacture* a split out of a single component. A photo-studio proof
+    sheet is one piece of paper carrying a grid of poses with white margins
+    between them, and those margins are indistinguishable from the bed
+    between two prints — photos #2651 and #2716-2718 were each cut into two
+    or three pieces of one sheet. Every split George accepted started from at
+    least two components the mask found on its own; every wrong one started
+    from exactly one. Turning a proof sheet into its poses is a job for the
+    region editor, where the answer is six and a person knows it.
+    """
     if not settings.CLEANUP_SPLIT_GUTTERS or not comps:
+        return comps
+    if len(comps) < settings.CLEANUP_SPLIT_CUT_MIN_COMPONENTS:
         return comps
     gutter = bed_by_tone(rgb, bed, settings)
     out: list[Component] = []

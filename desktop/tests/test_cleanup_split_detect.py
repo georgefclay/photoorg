@@ -291,3 +291,66 @@ def test_cutting_never_destroys_a_split_that_was_already_right(tmp_path):
     assert len(without.split_regions or []) == 2
     assert len(with_cut.split_regions or []) >= 2, (
         "the cut must not lose a split the uncut components already found")
+
+
+def test_the_cut_does_not_invent_a_split_from_one_component(tmp_path):
+    """Photo-studio proof sheets: #2651 and #2716-2718 are each one sheet of
+    six poses, and the white margins between the poses are indistinguishable
+    from the bed between two prints. Each was cut into two or three pieces of
+    one sheet.
+
+    Every split George accepted started from at least two components the mask
+    found on its own; every wrong one started from exactly one. So the cut
+    subdivides prints that were found, and never manufactures a split.
+    """
+    settings = _settings(tmp_path)
+    H, W = 1400, 1800
+    rgb = np.full((H, W, 3), 243, np.uint8)
+    rng = np.random.default_rng(31)
+    # One sheet, six pictures printed on it. The margins between them are
+    # narrower than the print mask's flatness window, so the whole sheet masks
+    # as one component — which is exactly why the real sheets do, and why the
+    # gutter test's smaller window still finds the margins.
+    pw, ph, gap = 500, 600, 20
+    x_off = (W - (3 * pw + 2 * gap)) // 2
+    y_off = (H - (2 * ph + gap)) // 2
+    for r in range(2):
+        for c in range(3):
+            x0 = x_off + c * (pw + gap)
+            y0 = y_off + r * (ph + gap)
+            grid = rng.integers(25, 205, size=(ph // 20, pw // 20)).astype(np.uint8)
+            tile = np.kron(grid, np.ones((20, 20), np.uint8))[:ph, :pw]
+            rgb[y0:y0 + ph, x0:x0 + pw] = np.repeat(tile[:, :, None], 3, axis=2)
+
+    path = tmp_path / "proof_sheet.jpg"
+    Image.fromarray(rgb).save(path, "JPEG", quality=95)
+
+    loose = _settings(tmp_path, CLEANUP_SPLIT_CUT_MIN_COMPONENTS=1)
+    without = analyse_mod.analyse_photo(loose, photo_id=1, working_path=path)
+    strict = analyse_mod.analyse_photo(settings, photo_id=1, working_path=path)
+
+    rgb_small, _w, _h, _sc = analyse_mod.load_for_analysis(
+        path, settings.CLEANUP_ANALYSE_EDGE)
+    _bed, comps = analyse_mod.detect_bed_and_prints(rgb_small, settings)
+    assert len(comps) == 1, (
+        "the sheet must mask as one component, as the real ones do")
+
+    assert len(without.split_regions or []) == 6, (
+        "the fixture must still reproduce the cut it used to get")
+    assert not strict.split_regions, (
+        "one component is one print as far as the detector is concerned")
+
+
+def test_a_scan_the_mask_already_split_is_still_subdivided(tmp_path):
+    """The rule must not cost #708, whose third print was recovered by the
+    cut *because* the mask had already found two."""
+    settings = _settings(tmp_path)
+    assert THREE_PRINTS.exists()
+    rgb, _w, _h, _s = analyse_mod.load_for_analysis(
+        THREE_PRINTS, settings.CLEANUP_ANALYSE_EDGE)
+    _bed, comps = analyse_mod.detect_bed_and_prints(rgb, settings)
+    assert len(comps) >= settings.CLEANUP_SPLIT_CUT_MIN_COMPONENTS
+
+    r, n = _regions(THREE_PRINTS, settings)
+    assert n == 3, f"expected three prints, got {n}"
+    assert r.operations["gutter_cuts"]["used"] is True

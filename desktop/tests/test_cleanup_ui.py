@@ -404,15 +404,72 @@ def test_the_keep_whole_button_is_off_in_the_manual_queue(panel):
     p.close()
 
 
-def test_the_region_button_is_only_live_on_a_split(panel):
+def test_the_region_button_is_live_on_an_ordinary_proposal_too(panel):
+    """A proof sheet of six poses is one print to every test the detector
+    has and six photographs to George. Gating G on `is_split` meant the
+    scans that most need regions drawn by hand were the ones that could
+    not have them."""
     settings, ui_mod = panel
     _mk_scan_photo(settings, sha="8" * 64, angle=3.0)
     job_mod.run_cleanup_analyse(settings, write_previews=False)
     p = _open_panel(ui_mod)
     assert p._proposal is not None and not p._proposal.is_split
-    assert not p._regions_btn.isEnabled(), (
-        "there are no regions to edit on an ordinary proposal")
+    assert p._regions_btn.isEnabled()
     p.close()
+
+
+def test_g_turns_an_ordinary_proposal_into_a_split(panel, monkeypatch):
+    settings, ui_mod = panel
+    pid = _mk_scan_photo(settings, sha="w" * 64, angle=0.0)
+    job_mod.run_cleanup_analyse(settings, write_previews=False)
+
+    p = _open_panel(ui_mod)
+    assert not p._proposal.is_split
+    proposal_id = p._proposal.id
+    w, h = p._proposal.width, p._proposal.height
+
+    from photoarchive.modes.cleanup import regions as regions_mod
+    seen = {}
+
+    class _Grid:
+        def __init__(self, pix, *, src_w, src_h, boxes, **kw):
+            # The dialog opens on the print, so the grid has something to lay
+            # itself over rather than the whole bed.
+            seen["boxes"] = list(boxes)
+            self._area = regions_mod.bounds_of(boxes)
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+            return QDialog.Accepted
+
+        def result_boxes(self):
+            return regions_mod.grid_boxes(self._area, 2, 3)
+
+    monkeypatch.setattr(ui_mod, "RegionEditorDialog", _Grid)
+    p._edit_regions()
+    _pump(300)
+
+    assert len(seen["boxes"]) == 1, "an ordinary proposal seeds one region"
+    assert seen["boxes"][0].w < w, "seeded from the print, not the whole scan"
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        after = repo.load_proposal(conn, proposal_id)
+    assert after.is_split
+    assert len(after.split_regions) == 6
+    assert all(r["edited_by"] == "human" for r in after.split_regions)
+    assert "is now a 6-way split" in p._status_bar.text()
+    p.close()
+
+
+def test_one_region_is_not_enough_to_save(panel):
+    """The dialog will not save a single region, so an accidental G cannot
+    turn a photo into a one-way split."""
+    from photoarchive.modes.cleanup import regions as regions_mod
+    issues = regions_mod.problems([regions_mod.Box(10.0, 10.0, 400.0, 300.0)],
+                                  src_w=800, src_h=600)
+    assert any("at least two" in m for m in issues), issues
 
 
 def test_g_saves_the_regions_the_editor_returns(panel, monkeypatch):

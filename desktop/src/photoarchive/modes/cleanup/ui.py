@@ -50,7 +50,7 @@ from . import report as report_mod
 from . import regions as regions_mod
 from . import repo
 from . import split as split_mod
-from .geometry import Transform
+from .geometry import Rect, Transform
 from .region_editor import RegionEditorDialog
 from .remote import build_provider
 
@@ -172,10 +172,13 @@ class CleanupPanel(QWidget):
         self._accept_btn.clicked.connect(self._accept)
         self._reject_btn = QPushButton("Reject → manual (R)")
         self._reject_btn.clicked.connect(self._reject)
-        self._regions_btn = QPushButton("Edit regions… (G)")
+        self._regions_btn = QPushButton("Split regions… (G)")
         self._regions_btn.setToolTip(
-            "Move, resize, add or delete the split regions by hand. For a "
-            "proof sheet whose prints touch, lay out a grid and nudge it."
+            "Draw the regions this scan should be split into: drag to move, "
+            "corners to resize, drag on empty bed to add, Del to remove, or "
+            "lay out a grid of rows x columns. Works whether or not the "
+            "analyser proposed a split — a proof sheet of six poses is one "
+            "print to a detector and six photographs to you."
         )
         self._regions_btn.clicked.connect(self._edit_regions)
         self._whole_btn = QPushButton("Keep whole (W)")
@@ -541,8 +544,9 @@ class CleanupPanel(QWidget):
             b.setEnabled(enabled and not (b is self._remote_btn
                                           and not self._provider.available))
         self._skip_btn.setEnabled(True)
-        # Regions only mean something on a split.
-        self._regions_btn.setEnabled(enabled and p.is_split)
+        # On any proposal, not just a split: the scans that most need regions
+        # drawn by hand are the ones no detector called a split.
+        self._regions_btn.setEnabled(enabled)
 
         self._rebuild_filmstrip()
         self._rebuild_op_boxes()
@@ -836,9 +840,16 @@ class CleanupPanel(QWidget):
         self._advance_past_current()
 
     def _edit_regions(self) -> None:
-        """G — the analyser's regions are wrong; draw the right ones."""
+        """G — draw the regions this scan should be split into.
+
+        Open on a split and the analyser's regions are there to correct. Open
+        on anything else and the print rectangle is there as a single region,
+        waiting for a second one: a proof sheet of six poses is one print to
+        every test the detector has and six photographs to George, and
+        without this there was no way to say so.
+        """
         p = self._proposal
-        if p is None or self._manual_mode or not p.is_split:
+        if p is None or self._manual_mode:
             return
         src_w = int(p.width or (p.operations.get("analysis") or {}).get("src_w") or 0)
         src_h = int(p.height or (p.operations.get("analysis") or {}).get("src_h") or 0)
@@ -846,10 +857,21 @@ class CleanupPanel(QWidget):
             self._say("Cannot edit regions: the scan's dimensions are unknown.")
             return
 
+        if p.split_regions:
+            boxes = regions_mod.boxes_from_regions(p.split_regions)
+        else:
+            # Start from the print, so the grid helper has something to lay
+            # itself over. One region is not a split, and the dialog says so
+            # until a second arrives.
+            rect_json = p.operations.get("print_rect")
+            if rect_json:
+                boxes = [regions_mod.Box.from_rect(Rect.from_json(rect_json))]
+            else:
+                boxes = [regions_mod.Box(0.0, 0.0, float(src_w), float(src_h))]
+
         pix = QPixmap(str(self._before_path)) if self._before_path else QPixmap()
         dlg = RegionEditorDialog(
-            pix, src_w=src_w, src_h=src_h,
-            boxes=regions_mod.boxes_from_regions(p.split_regions or []),
+            pix, src_w=src_w, src_h=src_h, boxes=boxes,
             settings=self._settings, photo_id=p.photo_id, parent=self,
         )
         if dlg.exec() != QDialog.Accepted:
@@ -885,8 +907,12 @@ class CleanupPanel(QWidget):
             QMessageBox.critical(self, "Could not save regions", str(e))
             return
 
-        self._say_action(f"photo {p.photo_id}: regions edited by hand, "
-                         f"{len(before)} → {len(edited)}.")
+        if before:
+            self._say_action(f"photo {p.photo_id}: regions edited by hand, "
+                             f"{len(before)} → {len(edited)}.")
+        else:
+            self._say_action(f"photo {p.photo_id} is now a "
+                             f"{len(edited)}-way split, drawn by hand.")
         self._load_current()
 
     def _keep_whole(self) -> None:

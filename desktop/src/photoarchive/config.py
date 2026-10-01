@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     # filling the frame was scanned edge to edge and has no bed in it; the
     # bands inside it are picture (photo #1033, a single photo at 98 %).
     CLEANUP_SPLIT_MAX_FILL: float = Field(default=0.85, gt=0.0, le=1.0)
+    # ...and never at all unless the mask already found this many prints. The
+    # cut subdivides prints that were found; it does not invent a split out of
+    # one component. A proof sheet's white margins look exactly like the bed
+    # between two prints (photos #2651, #2716-2718, each cut into pieces of
+    # one sheet); turning one into its poses is the region editor's job.
+    CLEANUP_SPLIT_CUT_MIN_COMPONENTS: int = Field(default=2, ge=1)
     # The flatness window used to recognise a gutter, as a fraction of the long
     # edge. Much smaller than CLEANUP_MASK_STD_WINDOW_FRAC because it has to
     # fit *inside* a gutter: at 1.3 % the window is wider than the gap between
