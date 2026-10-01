@@ -354,3 +354,25 @@ def test_a_scan_the_mask_already_split_is_still_subdivided(tmp_path):
     r, n = _regions(THREE_PRINTS, settings)
     assert n == 3, f"expected three prints, got {n}"
     assert r.operations["gutter_cuts"]["used"] is True
+
+
+def test_print_bounds_covers_every_print_not_just_the_largest(tmp_path):
+    """The grid frame needs the sheet. `print_rect` is only the biggest
+    component, which on #3817 was one of two halves — framing a grid on it
+    is what made the cells drift (fix-up 6)."""
+    settings = _settings(tmp_path)
+    path, rects = make_scan(tmp_path / "two.jpg", prints=2, angle=0.0,
+                            print_frac=0.18)
+    r = analyse_mod.analyse_photo(settings, photo_id=1, working_path=path)
+
+    pr = analyse_mod.Rect.from_json(r.operations["print_rect"])
+    pb = r.operations["print_bounds"]
+    assert pb["w"] > abs(pr.w) * 1.8, (
+        "the bounds must span both prints, the rect only one")
+
+    # It really is the outer bound of the prints that were put there.
+    left = min(rect.cx - abs(rect.w) / 2 for rect in rects)
+    right = max(rect.cx + abs(rect.w) / 2 for rect in rects)
+    assert pb["x"] == pytest.approx(left, abs=25)
+    assert pb["x"] + pb["w"] == pytest.approx(right, abs=25)
+    assert 0 <= pb["x"] and pb["x"] + pb["w"] <= r.src_w + 0.5

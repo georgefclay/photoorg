@@ -30,7 +30,8 @@ from PIL import Image
 from PySide6.QtCore import QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget,
     QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget,
 )
@@ -162,6 +163,19 @@ class CleanupPanel(QWidget):
         run_row.addWidget(self._batch_box)
         run_row.addWidget(QLabel("Show:"))
         run_row.addWidget(self._filter_box)
+
+        # A photo that leaves its filter is otherwise unfindable among a
+        # thousand pending crops: the four proof sheets came back with no
+        # regions after fix-up 5b and dropped straight out of the Splits view.
+        self._goto = QLineEdit()
+        self._goto.setPlaceholderText("Go to #")
+        self._goto.setFixedWidth(90)
+        self._goto.setToolTip(
+            "Type a photo id and press Enter to jump straight to it, whatever "
+            "the Show filter is set to."
+        )
+        self._goto.returnPressed.connect(self._go_to_photo)
+        run_row.addWidget(self._goto)
         run_row.addWidget(self._reanalyse)
         run_row.addWidget(self._run_btn)
         run_row.addWidget(self._cancel_btn)
@@ -413,6 +427,46 @@ class CleanupPanel(QWidget):
         stored = self._qsettings().value(QUEUE_FILTER_KEY, "all")
         valid = {key for key, _label in repo.QUEUE_FILTERS}
         return stored if stored in valid else "all"
+
+    def _go_to_photo(self) -> None:
+        """Jump the queue to a photo id, whatever the filter is showing."""
+        raw = self._goto.text().strip().lstrip("#")
+        if not raw:
+            return
+        if not raw.isdigit():
+            self._say(f"“{raw}” is not a photo id.")
+            return
+        photo_id = int(raw)
+        try:
+            with db.connection() as conn:
+                conn.autocommit = True
+                proposal = repo.load_pending_for_photo(conn, photo_id)
+        except Exception as e:
+            self._say(f"Database not ready: {e}")
+            return
+        if proposal is None:
+            self._say(f"Photo #{photo_id} has no proposal waiting — it may be "
+                      f"accepted, rejected, clean, or out of scope.")
+            return
+
+        if proposal.id not in self._proposal_ids:
+            # It is in the queue, just not in the queue George is looking at.
+            if self._manual_mode:
+                self._manual_btn.setChecked(False)
+            idx = self._filter_box.findData("all")
+            if idx >= 0 and self._queue_filter() != "all":
+                self._filter_box.blockSignals(True)
+                self._filter_box.setCurrentIndex(idx)
+                self._filter_box.blockSignals(False)
+                self._qsettings().setValue(QUEUE_FILTER_KEY, "all")
+            self._refresh_queue()
+        if proposal.id not in self._proposal_ids:
+            self._say(f"Photo #{photo_id} is not in this batch.")
+            return
+        self._cursor = self._proposal_ids.index(proposal.id)
+        self._goto.clear()
+        self._load_current()
+        self._say(f"Jumped to photo #{photo_id}.")
 
     def _on_queue_filter_changed(self) -> None:
         self._qsettings().setValue(QUEUE_FILTER_KEY, self._queue_filter())
@@ -869,9 +923,22 @@ class CleanupPanel(QWidget):
             else:
                 boxes = [regions_mod.Box(0.0, 0.0, float(src_w), float(src_h))]
 
+        # The grid frame is the *sheet* — the outer bounds of every print the
+        # analyser found. Laying a grid over the regions instead is what made
+        # the cells drift on #3817. `print_bounds` arrived in fix-up 6, so
+        # fall back for proposals measured before it.
+        pb = p.operations.get("print_bounds")
+        if pb:
+            frame = regions_mod.Box(float(pb["x"]), float(pb["y"]),
+                                    float(pb["w"]), float(pb["h"]))
+        elif boxes:
+            frame = regions_mod.bounds_of(boxes)
+        else:
+            frame = regions_mod.Box(0.0, 0.0, float(src_w), float(src_h))
+
         pix = QPixmap(str(self._before_path)) if self._before_path else QPixmap()
         dlg = RegionEditorDialog(
-            pix, src_w=src_w, src_h=src_h, boxes=boxes,
+            pix, src_w=src_w, src_h=src_h, boxes=boxes, frame=frame,
             settings=self._settings, photo_id=p.photo_id, parent=self,
         )
         if dlg.exec() != QDialog.Accepted:

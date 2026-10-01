@@ -253,6 +253,18 @@ def test_the_manual_queue_toggle_disables_the_decision_buttons(panel):
 # Fix-up 4: the Show: filter
 # --------------------------------------------------------------------------
 
+def _loaded(panel):
+    """The proposals currently in the panel's queue."""
+    _init_pool_for(panel)
+    with db.connection() as conn:
+        conn.autocommit = True
+        return [repo.load_proposal(conn, i) for i in panel._proposal_ids]
+
+
+def _init_pool_for(panel):
+    _init_pool(panel._settings)
+
+
 def _mixed_queue(settings):
     """One split, one needs-manual, one plain geometric proposal."""
     from .test_cleanup_split import _mk_two_print_photo
@@ -299,8 +311,11 @@ def test_the_filter_narrows_the_queue_to_its_kind(panel):
         assert (i in geometric) == expected, (p.photo_id, p.op_names,
                                               p.needs_manual, p.is_split)
 
-    assert by_filter == {"all": len(everything), "splits": len(splits),
-                         "manual": len(manual), "geometric": len(geometric)}
+    assert by_filter["all"] == len(everything)
+    assert by_filter["splits"] == len(splits)
+    assert by_filter["manual"] == len(manual)
+    assert by_filter["geometric"] == len(geometric)
+    assert set(by_filter) == {k for k, _label in repo.QUEUE_FILTERS}
 
 
 def test_choosing_a_filter_reloads_the_queue_and_the_header(panel):
@@ -578,3 +593,99 @@ def test_z_undoes_an_accepted_split(panel, monkeypatch):
     assert kids and all(k["is_deleted"] for k in kids)
     assert "undone" in p._status_bar.text().lower()
     p.close()
+
+
+# --------------------------------------------------------------------------
+# Fix-up 6: finding a photo again, and the Hand-split filter
+# --------------------------------------------------------------------------
+
+def test_go_to_jumps_to_a_photo_outside_the_current_filter(panel):
+    """The four proof sheets came back with no regions and dropped straight
+    out of the Splits view, into a thousand pending crops. Typing the id has
+    to find them whatever the filter says."""
+    settings, ui_mod = panel
+    split_id, geo_id, _manual_id = _mixed_queue(settings)
+
+    p = _open_panel(ui_mod)
+    p._filter_box.setCurrentIndex(p._filter_box.findData("splits"))
+    _pump(300)
+    assert p._proposal.photo_id == split_id
+    assert geo_id not in [q.photo_id for q in _loaded(p)], (
+        "the geometric photo is not in the Splits view")
+
+    p._goto.setText(str(geo_id))
+    p._go_to_photo()
+    _pump(400)
+
+    assert p._proposal is not None and p._proposal.photo_id == geo_id
+    assert p._queue_filter() == "all", "the filter widens to show the photo"
+    assert p._goto.text() == "", "the field clears once it has worked"
+    p.close()
+
+
+def test_go_to_says_so_when_there_is_no_proposal(panel):
+    settings, ui_mod = panel
+    _mixed_queue(settings)
+    p = _open_panel(ui_mod)
+    before = p._proposal.photo_id
+
+    p._goto.setText("999999")
+    p._go_to_photo()
+    _pump(200)
+
+    assert p._proposal.photo_id == before, "the queue does not move"
+    assert "no proposal waiting" in p._status_bar.text()
+    p.close()
+
+
+def test_go_to_rejects_something_that_is_not_an_id(panel):
+    settings, ui_mod = panel
+    _mixed_queue(settings)
+    p = _open_panel(ui_mod)
+    p._goto.setText("not a number")
+    p._go_to_photo()
+    _pump(200)
+    assert "not a photo id" in p._status_bar.text()
+    p.close()
+
+
+def test_the_hand_split_filter_lists_work_in_progress(panel, monkeypatch):
+    """Regions drawn with G and not yet accepted are findable on their own,
+    so a half-finished sheet is not lost in the queue."""
+    settings, ui_mod = panel
+    pid = _split_photo(settings)
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        assert repo.pending_ids(conn, queue_filter="hand_split") == []
+
+    p = _open_panel(ui_mod)
+    w, h = p._proposal.width, p._proposal.height
+    from photoarchive.modes.cleanup import regions as regions_mod
+    drawn = [regions_mod.Box(10.0, 10.0, w / 2 - 20, h - 20),
+             regions_mod.Box(w / 2 + 10, 10.0, w / 2 - 20, h - 20)]
+
+    class _Dialog:
+        def __init__(self, *a, **kw):
+            pass
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+            return QDialog.Accepted
+
+        def result_boxes(self):
+            return drawn
+
+    monkeypatch.setattr(ui_mod, "RegionEditorDialog", _Dialog)
+    p._edit_regions()
+    _pump(300)
+    p.close()
+
+    with db.connection() as conn:
+        conn.autocommit = True
+        ids = repo.pending_ids(conn, queue_filter="hand_split")
+        assert len(ids) == 1
+        assert repo.load_proposal(conn, ids[0]).photo_id == pid
+        counts = repo.pending_counts_by_filter(conn)
+    assert counts["hand_split"] == 1

@@ -391,15 +391,42 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   gets it, and pinned over the whole angle/size/tick space by
   `test_cleanup_canvas.py`. Split children are the one exemption — they are
   cut from a region, so they are smaller by construction.
-- **The review queue has a `Show:` filter** (fix-up 4): *All pending* /
-  *Splits* / *Needs manual* / *Geometric-only*, each labelled with its size,
+- **The grid helper is framed on the sheet, not on the regions** (fix-up 6).
+  `grid_boxes(frame, rows, cols, gutter_pct=…)` divides the frame it is given
+  and nothing else. Framing it on the union of the regions already found is
+  what made the cells drift on #3817: those two regions were narrower than the
+  sheet, so every cell came out narrow and the error accumulated across the
+  columns until the rightmost box sat a whole cell left of its print. The
+  frame defaults to `operations.print_bounds` — the outer bounds of **every**
+  print component, which on a proof sheet is the sheet — and is dragged in the
+  dialog by its border or corners, so the interior stays free for drawing
+  regions. `print_rect` is only the largest component and is the wrong frame.
+  `gutter_pct` shrinks each cell about its centre, which is scale-free in a
+  way an absolute gap is not.
+- **Nudging moves a column or a row, not just a box** (fix-up 6). In the
+  editor, arrows move the selected region 2 px (Shift 10); **Ctrl** moves every
+  region in its column, **Alt** every region in its row. Membership comes from
+  where the boxes sit (`same_column` / `same_row`, centre within half a cell)
+  rather than from remembering the grid, so it still works after the sheet has
+  been straightened one box at a time.
+- **The review queue has a `Show:` filter** (fix-up 4, extended in 6): *All
+  pending* / *Splits* / *Hand-split* / *Needs manual* / *Geometric-only*, each
+  labelled with its size,
   persisted in QSettings under `cleanup/queue_filter`. George's verdict on the
   full queue was that the crops are minimal by design and reviewing 981 of
   them is not worth it, so the queue has to be able to show just the 17
   splits. `repo.QUEUE_FILTERS` is the list and `_QUEUE_FILTER_SQL` the
   clauses; *Geometric-only* is `Proposal.is_geometric_only` written in SQL and
   a test asserts the two agree, because two definitions of one rule is how the
-  bulk-accept button and the filter drift apart.
+  bulk-accept button and the filter drift apart. *Hand-split* lists proposals
+  carrying `operations.split_edited`, so regions drawn with **G** and not yet
+  accepted are findable as work in progress.
+- **`Go to #` finds a photo whatever the filter says** (fix-up 6). A photo
+  that changes shape leaves its filter: the four proof sheets came back with
+  no regions after 5b and dropped out of *Splits* into a thousand pending
+  crops, where George could not find them. Typing an id jumps the queue to it,
+  widening the filter to *All pending* and leaving the manual queue if it has
+  to, and says plainly when the photo has no proposal waiting.
 - **Bulk accept is geometric-only**: deskew and/or crop, no tonal op, no
   split, nothing `needs_manual`. Tonal ops and splits always go through the
   eye.

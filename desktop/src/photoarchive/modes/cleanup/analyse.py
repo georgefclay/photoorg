@@ -1038,6 +1038,22 @@ def analyse_photo(
     top = comps[0]
     rect_full = top.rect.scaled(scale)
     measured["print_rect"] = rect_full.to_json()
+    # The outer bounds of *every* print component, which on a proof sheet is
+    # the sheet itself. `print_rect` is only the largest component, so it is
+    # the wrong frame to lay a grid over (fix-up 6, photo #3817: the two
+    # measured regions were narrower than the sheet and the cells drifted).
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for c in comps:
+        bx, by, bw, bh = c.rect.scaled(scale).axis_aligned_bounds()
+        xs0.append(bx)
+        ys0.append(by)
+        xs1.append(bx + bw)
+        ys1.append(by + bh)
+    measured["print_bounds"] = {
+        "x": round(max(0.0, min(xs0)), 2), "y": round(max(0.0, min(ys0)), 2),
+        "w": round(min(float(src_w), max(xs1)) - max(0.0, min(xs0)), 2),
+        "h": round(min(float(src_h), max(ys1)) - max(0.0, min(ys0)), 2),
+    }
     measured["print_frac"] = round(top.area_frac, 4)
     measured["rectangularity"] = round(top.rectangularity, 4)
     measured["edges"] = top.edges.to_json() if top.edges else None

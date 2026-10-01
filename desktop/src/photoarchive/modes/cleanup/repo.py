@@ -354,6 +354,7 @@ def _to_proposal(r: dict[str, Any]) -> Proposal:
 QUEUE_FILTERS: tuple[tuple[str, str], ...] = (
     ("all", "All pending"),
     ("splits", "Splits"),
+    ("hand_split", "Hand-split"),
     ("manual", "Needs manual"),
     ("geometric", "Geometric-only"),
 )
@@ -365,6 +366,9 @@ QUEUE_FILTERS: tuple[tuple[str, str], ...] = (
 _QUEUE_FILTER_SQL: dict[str, str] = {
     "all": "",
     "splits": " and cp.split_regions is not null",
+    # Work in progress: regions George drew with G and has not accepted yet.
+    # `split_edited` is written by `update_split_regions`.
+    "hand_split": " and coalesce(cp.operations -> 'split_edited', 'false') = 'true'::jsonb",
     "manual": " and cp.needs_manual",
     "geometric": """
         and cp.split_regions is null

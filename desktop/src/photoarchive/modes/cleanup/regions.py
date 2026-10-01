@@ -127,29 +127,67 @@ def problems(
 
 
 def grid_boxes(
-    bounds: Box, rows: int, cols: int, *, gap: float = 0.0,
+    frame: Box, rows: int, cols: int, *, gutter_pct: float = 0.0,
 ) -> list[Box]:
-    """Lay `rows` x `cols` equal regions over `bounds`.
+    """Lay `rows` x `cols` equal regions over `frame`.
 
     The proof sheet (#3817) is ten pictures in a grid with no bed between
     them, which no detector is going to find. Typing "3 x 4" and nudging the
     result is quicker than drawing ten boxes, and quicker than George cutting
     them by hand in another program.
+
+    `frame` is the *sheet*, not the regions already found. Laying the grid
+    over the union of the measured regions is what made the boxes drift: on
+    #3817 those two regions were narrower than the sheet, so every cell was
+    narrow and the error accumulated across the columns until the rightmost
+    box sat well left of its print. The caller passes the sheet and can drag
+    it; this function only divides what it is given.
+
+    `gutter_pct` shrinks each cell about its own centre, for a sheet with
+    white space between the pictures. It leaves `gutter_pct` of a cell between
+    neighbours and half that at the frame edge, which is how a printed sheet
+    is usually laid out.
     """
     rows = max(1, int(rows))
     cols = max(1, int(cols))
-    cell_w = (bounds.w - gap * (cols - 1)) / cols
-    cell_h = (bounds.h - gap * (rows - 1)) / rows
+    shrink = min(max(float(gutter_pct), 0.0), 0.9)
+    cell_w = frame.w / cols
+    cell_h = frame.h / rows
     out: list[Box] = []
     for r in range(rows):
         for c in range(cols):
-            out.append(Box(
-                x=bounds.x + c * (cell_w + gap),
-                y=bounds.y + r * (cell_h + gap),
-                w=max(1.0, cell_w), h=max(1.0, cell_h),
-                angle=bounds.angle,
-            ))
+            cx = frame.x + (c + 0.5) * cell_w
+            cy = frame.y + (r + 0.5) * cell_h
+            w = max(1.0, cell_w * (1.0 - shrink))
+            h = max(1.0, cell_h * (1.0 - shrink))
+            out.append(Box(x=cx - w / 2.0, y=cy - h / 2.0, w=w, h=h,
+                           angle=frame.angle))
     return out
+
+
+def same_column(boxes: Sequence[Box], index: int) -> list[int]:
+    """Indices of the boxes sharing a column with `boxes[index]`.
+
+    Membership is by centre proximity rather than by remembering the grid,
+    so it still works after the boxes have been nudged about one at a time.
+    """
+    if not boxes or not (0 <= index < len(boxes)):
+        return []
+    sel = boxes[index]
+    tol = max(1.0, sel.w * 0.5)
+    return [i for i, b in enumerate(boxes) if abs(b.cx - sel.cx) <= tol]
+
+
+def same_row(boxes: Sequence[Box], index: int) -> list[int]:
+    if not boxes or not (0 <= index < len(boxes)):
+        return []
+    sel = boxes[index]
+    tol = max(1.0, sel.h * 0.5)
+    return [i for i, b in enumerate(boxes) if abs(b.cy - sel.cy) <= tol]
+
+
+def moved(box: Box, dx: float, dy: float) -> Box:
+    return Box(x=box.x + dx, y=box.y + dy, w=box.w, h=box.h, angle=box.angle)
 
 
 def bounds_of(boxes: Iterable[Box]) -> Box | None:

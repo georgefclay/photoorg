@@ -107,20 +107,26 @@ def test_the_grid_covers_the_area_without_overlapping():
 
 
 def test_the_grid_can_leave_a_gutter():
-    boxes = R.grid_boxes(R.Box(0.0, 0.0, 800.0, 600.0), 2, 2, gap=20.0)
+    """The gutter is a percentage of a cell rather than an absolute gap, so
+    it means the same thing on a 600 px thumbnail and a 6000 px scan."""
+    boxes = R.grid_boxes(R.Box(0.0, 0.0, 800.0, 600.0), 2, 2, gutter_pct=0.05)
     assert len(boxes) == 4
     assert R.overlap_area(boxes[0], boxes[1]) == 0.0
-    assert boxes[1].x - (boxes[0].x + boxes[0].w) == pytest.approx(20.0)
+    assert boxes[1].x - (boxes[0].x + boxes[0].w) == pytest.approx(400.0 * 0.05)
 
 
-def test_the_grid_starts_from_the_regions_already_there():
-    """#3817's ten prints sit inside the sheet, not the whole bed, so the
-    grid has to be laid over what was found rather than over the scan."""
-    found = [R.Box(120.0, 90.0, 600.0, 200.0), R.Box(120.0, 300.0, 600.0, 200.0)]
-    area = R.bounds_of(found)
-    boxes = R.grid_boxes(area, 2, 4)
-    assert R.bounds_of(boxes).x == pytest.approx(120.0)
-    assert R.bounds_of(boxes).w == pytest.approx(600.0)
+def test_the_grid_fills_exactly_the_frame_it_is_given():
+    """#3817's pictures sit inside the sheet, not on the whole bed, so the
+    grid is laid over a frame the caller chooses — the sheet, which the
+    analyser now records as `print_bounds`, and which George can drag. This
+    function divides what it is handed and nothing else."""
+    frame = R.Box(120.0, 90.0, 600.0, 410.0)
+    boxes = R.grid_boxes(frame, 2, 4)
+    got = R.bounds_of(boxes)
+    assert got.x == pytest.approx(frame.x)
+    assert got.y == pytest.approx(frame.y)
+    assert got.w == pytest.approx(frame.w)
+    assert got.h == pytest.approx(frame.h)
 
 
 # --------------------------------------------------------------------------
@@ -182,3 +188,89 @@ def test_regions_are_numbered_the_way_they_sit_on_the_bed():
     ordered = R.reading_order(drawn)
     assert [(b.x, b.y) for b in ordered] == [
         (40.0, 40.0), (400.0, 40.0), (40.0, 400.0), (400.0, 400.0)]
+
+
+# --------------------------------------------------------------------------
+# Fix-up 6: the grid is laid over the sheet, and nudged by column or row
+# --------------------------------------------------------------------------
+
+def _sheet(rows=3, cols=4, x0=100.0, y0=80.0, cell_w=300.0, cell_h=260.0):
+    """The true picture centres of a rows x cols sheet, and its bounds."""
+    centres = [(x0 + (c + 0.5) * cell_w, y0 + (r + 0.5) * cell_h)
+               for r in range(rows) for c in range(cols)]
+    frame = R.Box(x0, y0, cell_w * cols, cell_h * rows)
+    return frame, centres
+
+
+def test_the_grid_lands_on_every_picture_when_framed_on_the_sheet():
+    """Item 4: a 3 x 4 sheet where the analyser only found the left two
+    thirds. Framed on the sheet, every cell is centred on its picture."""
+    frame, centres = _sheet()
+    boxes = R.grid_boxes(frame, 3, 4)
+    assert len(boxes) == 12
+    cell_w, cell_h = frame.w / 4, frame.h / 3
+    for b, (cx, cy) in zip(boxes, centres):
+        assert abs(b.cx - cx) <= cell_w * 0.02, (b.cx, cx)
+        assert abs(b.cy - cy) <= cell_h * 0.02, (b.cy, cy)
+
+
+def test_framing_on_the_found_regions_is_what_made_the_boxes_drift():
+    """The bug, stated as a measurement: the two regions the analyser found
+    on #3817 were narrower than the sheet, so the cells were narrow and the
+    error accumulated across the columns."""
+    frame, centres = _sheet()
+    # What the analyser found: only the left two thirds of the sheet.
+    found = [R.Box(frame.x, frame.y, frame.w * 2 / 3, frame.h)]
+    drifted = R.grid_boxes(R.bounds_of(found), 3, 4)
+
+    cell_w = frame.w / 4
+    first = abs(drifted[0].cx - centres[0][0])
+    last = abs(drifted[3].cx - centres[3][0])
+    assert first < cell_w * 0.2, "the leftmost column is nearly right"
+    assert last > cell_w * 0.9, "and the rightmost is a whole cell out"
+    assert last > first * 3, "the error accumulates across the columns"
+
+
+def test_the_gutter_shrinks_each_cell_about_its_centre():
+    frame, centres = _sheet(rows=2, cols=2, cell_w=400.0, cell_h=300.0)
+    tight = R.grid_boxes(frame, 2, 2)
+    loose = R.grid_boxes(frame, 2, 2, gutter_pct=0.1)
+    for a, b in zip(tight, loose):
+        assert b.w == pytest.approx(a.w * 0.9)
+        assert b.h == pytest.approx(a.h * 0.9)
+        # Centres do not move, so the cells stay on their pictures.
+        assert b.cx == pytest.approx(a.cx)
+        assert b.cy == pytest.approx(a.cy)
+    assert R.problems(loose, src_w=2000, src_h=1200) == []
+
+
+def test_the_gutter_leaves_space_between_neighbours():
+    boxes = R.grid_boxes(R.Box(0.0, 0.0, 800.0, 600.0), 1, 2, gutter_pct=0.1)
+    gap = boxes[1].x - (boxes[0].x + boxes[0].w)
+    assert gap == pytest.approx(400.0 * 0.1)
+    assert R.overlap_area(boxes[0], boxes[1]) == 0.0
+
+
+def test_a_column_and_a_row_are_found_by_where_the_boxes_sit():
+    frame, _centres = _sheet()
+    boxes = R.grid_boxes(frame, 3, 4)
+    # Index 5 is row 1, column 1 of a 3x4 grid laid out row-major.
+    assert R.same_column(boxes, 5) == [1, 5, 9]
+    assert R.same_row(boxes, 5) == [4, 5, 6, 7]
+
+
+def test_column_membership_survives_a_nudged_box():
+    """Membership is by position, not by remembering the grid, so it still
+    works after the sheet has been straightened one box at a time."""
+    frame, _centres = _sheet()
+    boxes = R.grid_boxes(frame, 3, 4)
+    boxes[5] = R.moved(boxes[5], 8.0, 6.0)
+    assert R.same_column(boxes, 5) == [1, 5, 9]
+    assert R.same_row(boxes, 5) == [4, 5, 6, 7]
+
+
+def test_moving_a_box_leaves_its_size_alone():
+    b = R.Box(10.0, 20.0, 300.0, 200.0, angle=1.5)
+    m = R.moved(b, -4.0, 7.0)
+    assert (m.x, m.y) == (6.0, 27.0)
+    assert (m.w, m.h, m.angle) == (b.w, b.h, b.angle)
