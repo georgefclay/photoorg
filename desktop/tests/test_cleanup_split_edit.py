@@ -374,3 +374,54 @@ def test_a_named_photo_list_restricts_the_pass(settings):
         after_other = repo.load_pending_for_photo(conn, other)
     assert after_wanted.id != before[wanted], "the named photo was re-measured"
     assert after_other.id == before[other], "the other photo was left alone"
+
+
+# --------------------------------------------------------------------------
+# The manual queue drops photos that have come back
+# --------------------------------------------------------------------------
+
+def test_a_photo_that_came_back_leaves_the_manual_queue(settings):
+    """A decision is never superseded, so a photo rejected with R keeps its
+    `manual` row forever. When the analyser is fixed and that photo is
+    re-analysed it gains a live `pending` proposal, and listing it in both
+    queues shows the same scan twice with the stale answer in one of them.
+    """
+    from photoarchive.modes.cleanup import job as job_mod
+
+    pid, _rects = _mk_two_print_photo(settings, sha="m" * 64)
+    proposal = _analyse_split(settings, pid)
+    accept_mod.reject_proposal(settings, proposal.id)
+
+    with db.connection() as conn:
+        conn.autocommit = True
+        assert pid in [p.photo_id for p in repo.manual_queue(conn)], (
+            "a rejected photo belongs in the manual queue")
+
+    # The analyser is fixed and the photo is measured again.
+    job_mod.run_cleanup_analyse(settings, reanalyse=True, photo_ids=[pid],
+                                write_previews=False)
+
+    with db.connection() as conn:
+        conn.autocommit = True
+        assert pid not in [p.photo_id for p in repo.manual_queue(conn)], (
+            "the newer proposal is the real one")
+        assert repo.load_pending_for_photo(conn, pid) is not None
+        # …and the record of the rejection is still there.
+        rows = conn.execute(
+            """select count(*) from cleanup_proposals
+                where photo_id = %s and status = 'manual'""", (pid,)).fetchone()
+        assert rows[0] == 1, "the manual row is history, not a queue entry"
+
+
+def test_the_manual_queue_still_lists_a_photo_with_no_pending_proposal(settings):
+    pid = _mk_scan_photo(settings, sha="n" * 64, angle=3.0)
+    from photoarchive.modes.cleanup import job as job_mod
+    job_mod.run_cleanup_analyse(settings, write_previews=False)
+    with db.connection() as conn:
+        conn.autocommit = True
+        p = repo.load_pending_for_photo(conn, pid)
+    accept_mod.reject_proposal(settings, p.id)
+
+    with db.connection() as conn:
+        conn.autocommit = True
+        assert pid in [q.photo_id for q in repo.manual_queue(conn)]

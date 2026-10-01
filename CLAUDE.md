@@ -314,6 +314,21 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   `implausible_aspect`, `skew_too_large`, `has_back`, `no_print_found`): the
   geometric checkboxes are disabled with the reason in the tooltip, the tonal
   ones are still offered. `MANUAL_FIX_DIR` is written only on an explicit **R**.
+- **`MANUAL_FIX_DIR` files are derived convenience copies, and may be
+  deleted.** R *copies* the working file there (`shutil.copy2`) and leaves the
+  working copy where it is, so the file is a convenience for hand-editing in
+  another program — not archive content, and not covered by "no real deletes,
+  ever". A copy whose photo has since gained a live `pending` proposal is of a
+  decision that has been overtaken and is safe to remove, once the photo's
+  working file is confirmed present; pressing R again recreates it. The
+  photograph, the proposal rows and the audit trail are untouched either way.
+- **The manual queue skips photos that have come back** (fix-up 5b). A
+  decision is never superseded, so an R leaves a `manual` row forever; when
+  the analyser is fixed and the photo is re-analysed it gains a live `pending`
+  proposal, and without the filter the same scan is listed in both queues with
+  the stale answer in one of them. `repo.manual_queue` excludes any photo with
+  a live `pending` proposal. The `manual` row stays as the record that George
+  rejected what came before.
 - **Colour cast is measured on the print's near-neutral mid-tones, not all of
   them.** `ops.neutral_midtones` narrows the mid-tones (inside the rect inset
   by 8 %, since the edge carries paper border and bed bleed) to the

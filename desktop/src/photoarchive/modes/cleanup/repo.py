@@ -428,10 +428,23 @@ def load_pending_for_photo(conn: psycopg.Connection, photo_id: int) -> Proposal 
 
 
 def manual_queue(conn: psycopg.Connection) -> list[Proposal]:
+    """Photos parked for hand-fixing — minus any that have come back.
+
+    A decision is never superseded, so a photo rejected with R keeps its
+    `manual` row forever. When the analyser is fixed and that photo is
+    re-analysed it gains a live `pending` proposal, and listing it in both
+    queues shows the same scan twice with the stale answer in one of them.
+    The newer proposal is the real one; the `manual` row stays as the record
+    that George rejected what came before it.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             _PROPOSAL_SELECT
             + """ where cp.status = 'manual'
+                    and not exists (
+                          select 1 from cleanup_proposals live
+                           where live.photo_id = cp.photo_id
+                             and live.status = 'pending')
                   order by p.scan_batch nulls last, p.scan_sequence nulls last, p.id"""
         )
         rows = cur.fetchall()
