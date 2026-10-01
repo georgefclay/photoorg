@@ -157,174 +157,74 @@ Commit: `Phase 7 fix-up 6: grid helper frame, nudges, go-to`.
 
 ## Progress
 
-Newest first. Commits are on `main` and pushed unless marked otherwise.
+Newest first. Everything below is committed and pushed to `main`.
 
-### Fix-up 5 — split diagnosis, manual region editing, split undo (2026-09-30)
+### Where it stands (2026-10-01)
 
-**Done.**
+| | |
+|---|---|
+| pending | **1,026** — 964 geometric-only, 61 needs-manual, 1 split, 0 hand-split |
+| clean (nothing to do) | 2,391 |
+| accepted | 27, which have created **49 split children** |
+| manual | 15 rows, 10 of them showing (5b hides those that came back) |
+| rejected | 5 |
 
-**Diagnosed all four scans with an overlay** — mask, components, and every
-gate's value. They failed for three different reasons, and only one of them is
-a gate:
+**Nothing is waiting on me.** The next move is George's: *Show: Geometric-only*
+is 964 bulk-acceptable crops and deskews, and the four Sears proof sheets are
+`Go to #` → **G** → 2 × 3 → *Lay out grid*.
 
-| scan | wanted | cause | now |
-|---|---|---|---|
-| #708 | 3, got 2 | the lower two prints **touch** — one component covered both | **3** |
-| #1398 | 8, got 2 | pale studio backgrounds read as bed; the mask is holes | 2 |
-| #3817 | 10, got 2 | prints touch with **no bed at all** between them | components 2→6, 2 regions |
-| #3839 | 0, got 2 | two newspaper cuttings — real objects, not prints | **0** (vetoed) |
+### Fix-up 6 — grid frame, nudges, go-to (`ef77d06`)
 
-The per-region-minimum hypothesis was only part of it, and not the part that
-mattered for #708 or #3817: those prints were never separated, so no gate could
-have saved them. Measured directly — #708 has a 62 px band of bed through the
-merged component, #3817 has none at any threshold.
+- `grid_boxes` divides the frame it is given. The frame defaults to the new
+  `operations.print_bounds` (outer bounds of **every** print component = the
+  sheet), is dragged by its border or corners, and has a percent **Gutter**
+  that shrinks each cell about its centre. Framing on the found regions is
+  what made #3817's cells drift a whole cell by the rightmost column.
+  Measured after re-analysis: the frame is 79–89 % of the scan on the Sears
+  sheets, 98 % on #3817.
+- Arrows nudge 2 px (Shift 10); **Ctrl** moves the whole column, **Alt** the
+  whole row, by where the boxes sit rather than by remembering the grid.
+- **Go to #** jumps the queue to a photo whatever the filter says, and a
+  **Hand-split** filter lists regions drawn with G but not yet accepted.
 
-- **`split_merged_components`** cuts a component along bands of bed running
-  across it. Evidence is bed tone + flatness at a small window + reachable
-  from the scan border, not absence from the print mask (the mask has already
-  bridged the gutter, which is why they merged). `CLEANUP_GUTTER_STD_WINDOW_FRAC`
-  is 0.003 — a fifth of the mask's — because the window has to fit *inside*
-  a gutter.
-- **Relative size gate** `CLEANUP_SPLIT_REL_MIN=0.55`: a region counts if it is
-  large absolutely **or** comparable to the largest region. Eight equal prints
-  at 8.8 % of the scan now split eight ways; the absolute gate admitted none.
-- **Document veto** `CLEANUP_SPLIT_SKIP_LABELS=document,screenshot,back_of_print`,
-  read from the newest non-rejected `classification` suggestion via
-  `ScopeRow.ai_label`. #3839 is already labelled `document` at 0.98, so I took
-  the PM's option (b) and **skipped the text-density heuristic (a)** — it
-  would risk regressions across 3,400 scans to solve a case the classifier
-  already answers. Flagging that as a deliberate omission.
-- **W — keep whole.** `accept.keep_whole` marks the proposal `rejected` with
-  `reason='not_a_split'`, writes the audit row, and stops: no file written
-  anywhere, `photos` untouched. Works on any proposal, not just a split.
-- **G — manual region editing.** `regions.py` holds every rule and is free of
-  Qt and the database (no overlap beyond a 2 % touching tolerance, inside the
-  scan, above 0.5 % of it); `region_editor.py` is the dialog — drag to move,
-  corners to resize, drag on empty bed to add, `Del` to remove, plus the
-  rows × columns **grid helper** for #3817. Saving rewrites `split_regions`
-  with `edited_by='human'` and writes a `cleanup.split` audit row carrying
-  **both** the measured and the drawn regions. Transforms are built by the
-  analyser's own `transform_for`, so `accept_split` cannot tell an edited
-  region from a measured one — faces still map by containment, children still
-  get their own `region_key`.
-- **Split undo** already existed and was tested at module level; added the path
-  through the **Z** key, and extended the cross-restart recipe in `GC.md`
-  (gitignored, not committed) for edited regions and for W.
-- **Tests:** `test_cleanup_regions.py` (16), `test_cleanup_split_detect.py`
-  (18), `test_cleanup_split_edit.py` (11), plus 6 in `test_cleanup_ui.py`.
-  Two real fixtures cut from the archive — `scan_708_three_prints.jpg` and
-  `scan_3839_newspaper.jpg` — each with a test asserting it still reproduces
-  the original wrong answer, so the fix cannot be proved by a fixture that
-  stopped exhibiting the bug.
+### Fix-up 5b — no invented splits, G anywhere, queue filter (`43aee61`, `19e67ee`)
 
-**The archive sweep found three regressions that the four diagnosis photos
-and the whole test suite had missed.** All 3,446 live proposals were
-re-measured against the new detector, writing nothing. The headline was small
-— 14 region-count changes, 29 rect moves — but reading the 29 one by one
-showed the gutter cut was *fragmenting single prints*, and when the fragments
-failed the split gates no split was proposed, yet the crop still followed a
-fragment:
+- The gutter cut subdivides prints the mask already found and never
+  manufactures a split from one component. Every split George accepted started
+  from ≥ 2 native components; every wrong one from exactly 1.
+- **G works on any proposal**, not just a split — which 5b made necessary, and
+  which George used on #1398 to draw its 8 wallets by hand and accept them.
+- `manual_queue` hides photos that have come back with a live pending
+  proposal; `MANUAL_FIX_DIR` copies are derived and deletable (6 removed).
 
-| scan | was | would have become |
-|---|---|---|
-| #1790 | clean, no crop | crop removing **30 %** |
-| #1033 | clean, no crop | crop removing **27 %** — a single photo at 98 % of the frame |
-| #2251 | clean, no crop | crop removing **22 %** |
-| #3833 | a correct 4-way split | **split destroyed**, `print_too_small` |
+### Fix-up 5 — split diagnosis, region editing, undo (`a7f104b` … `c3090ca`)
 
-Fix-up 3's content guard caught none of them: a fragment's edges genuinely
-abut bed-toned bands, so it reported no unclear sides. Three corrections:
-
-1. **The cut decides the split and nothing else.** The crop follows the
-   *uncut* component unless a split is actually proposed.
-2. **Cutting may find a split; it may never destroy one.** If the cut pieces
-   fail the gates, the uncut components are reconsidered.
-3. **A component filling the scan is never cut** (`CLEANUP_SPLIT_MAX_FILL`,
-   0.85). Several prints on a bed always leave bed around them; a print at
-   98 % has none, so the bands inside it are picture.
-
-Three more tests pin these. The sweep was then re-run in full against the
-corrected detector — in 14 chunks of 250, each a fresh process, because a
-single hour-long run was killed for memory three times and never handed the
-space back:
-
-| | before the corrections | after |
-|---|---|---|
-| region count changed | 14 | **9** |
-| print rect moved > 8 px | 29 | **19** |
-| …crop moved with it | — | 17 |
-| ……already accepted (artefact) | — | 10 |
-| ……became a split (regions crop instead) | — | 7 |
-| **……a real crop change** | 4 destructive | **0** |
-
-The ten "artefacts" are accepted photos whose working file is already the
-cropped one, so re-measuring finds no bed left to remove — the accept having
-worked, not the detector changing its mind.
-
-**Newly a split (7):** #2171, #2651, #2716, #2717, #2718, #4071 by the gutter
-cut; **#3815 by the relative gate** — 8 components at 11.0–11.3 % each, all
-rectangular, all near-zero angle, every one failing the old 12 % gate. That is
-the #1398 shape found independently, and the best evidence the relative gate
-is right.
-
-**No longer a split (1):** #3839, the newspaper, which is the intended
-behaviour. 44 photos carry a veto label; only that one actually lost a split.
-
-`CLEANUP_SPLIT_GUTTERS` stays **on** by default on this evidence.
-
-**Outstanding.**
-
-- **#1398 and #3817 are not fixed by detection**, and I do not think they can
-  be. #1398's prints have pale calm backgrounds that any bed test reads as
-  bed; #3817's prints touch with no bed between them. The region editor and
-  its grid helper are the answer for both — as the PM anticipated for #3817.
-- The 9 changed proposals are **not** written back — the sweep writes nothing.
-  Re-analysing those photos (`run_cleanup --reanalyse`, or per batch) is what
-  would apply them, and that is your call, not something to do under you mid-
-  review.
-
-### Fix-up 4 — queue filter, deskew never grows the canvas (2026-09-30)
-
-Commit `5c78bfb`. **Done.**
-
-- `Show:` filter (All pending / Splits / Needs manual / Geometric-only), each
-  labelled with its size, persisted in QSettings under `cleanup/queue_filter`.
-  *Geometric-only* is `Proposal.is_geometric_only` written in SQL with a test
-  asserting the two agree.
-- `transform_for`'s deskew-only branch kept the whole rotated canvas, so
-  accepted files came out **larger** than the scan. Now clipped to a
-  source-sized window; the rule `out_w <= src_w and out_h <= src_h` holds for
-  everything that is not a split region.
-- **109 of 3,434** proposals were affected (median +2.1 % area, worst +47.4 %).
-  108 were pending and are fixed. **Photo #50 was already accepted** under the
-  old behaviour — its working copy is 3527×2382 from a 3510×2357 scan. Left
-  alone (it is internally consistent, boxes included); Undo + re-accept would
-  re-cut it. **Your call.**
-
-### Low-memory JPEG loader (2026-09-30)
-
-Commit `505cf3d`. **Done.**
-
-- `draft()` was never engaging: Pillow picks the scale as
-  `min(w // box_w, h // box_h)`, so a square box is governed by the **short**
-  edge and every 4:3 scan decoded in full. The box now matches the aspect.
-- My earlier claim that `draft()` fixed the memory kills was **wrong** — 18 of
-  the 27 largest scans are TIFF, where `draft` does nothing. What cost the
-  memory was two needless full-size copies (`exif_transpose` returning
-  `image.copy()`, and `convert("RGB")` on a 93.7 MP greyscale TIFF).
-- Measured peak working set: 93.7 MP greyscale TIFF **661 MB → 254 MB**;
-  33 MP greyscale TIFFs 321 → 163 MB; load time over the 27 largest scans
-  66 s → 8 s.
-- Verification, writing nothing: all 83 scans the change can touch plus a
-  random 60 of the remaining 3,375. **0 mismatches in the 60**; across the 83,
-  median change 0.000, max 0.260° and 2 px. **One** photo changes its op set
-  (#1696, a 0.44° deskew falls under the 0.3° threshold). I did **not** run
-  the whole-set `--reanalyse` the contingency called for — it would rewrite
-  3,458 rows to change one, right before your review. One command away.
+Diagnosed #708/#1398/#3817/#3839, then the sweep caught three regressions the
+four photos and the whole suite had missed (crops of 22–30 % on clean scans).
+Shipped the region editor, **W** (keep whole), the `document` veto, the
+relative size gate, and `--photo` for applying a sweep by id. Also fixed a
+real bug: `select_scope` selected the classification label and dropped it, so
+the veto could never fire in the job — only in the sweep, which passed it by
+hand.
 
 ### Earlier
 
-- Fix-up 3 — crop never removes picture content: commit `399e11f`.
-- Fix-up 2 — colour off by default, deskew from the print's edges: `9ab9fb1`.
-- Fix-up 1 — colour cast must show on the paper: `3feb13a`.
-- Phase 7 — scan cleanup: `62282d8`.
+- Low-memory JPEG loader (`505cf3d`): 93.7 MP scan 661 MB → 254 MB.
+- Fix-up 4 (`5c78bfb`): queue filter; deskew never grows the canvas (109
+  proposals affected, photo #50 accepted before the fix and left alone).
+- Fix-up 3 (`399e11f`): crop never removes picture content.
+- Fix-up 2 (`9ab9fb1`): tonal ops opt-in; deskew from the print's edges.
+- Fix-up 1 (`3feb13a`): colour cast needs highlight agreement.
+- Phase 7 (`62282d8`): scan cleanup.
+
+### Known and deliberately not done
+
+- **#3839** (newspaper) is `needs_manual: print_too_small` rather than
+  crop-only: the two clippings sit side by side, so a whole-scan crop would
+  frame one and discard the other. **W** is the right key for it.
+- **Photo #50** was accepted under fix-up 4's old behaviour and is 17 px larger
+  than its scan. Internally consistent, boxes included; Undo + re-accept would
+  re-cut it.
+- **#1398 and #3817 are not fixable by detection** — pale studio backgrounds
+  and touching prints respectively. The region editor is the answer, and
+  #1398 is already done.
