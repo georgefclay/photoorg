@@ -133,12 +133,17 @@ def select_scope(
     *,
     reanalyse: bool = False,
     batches: Sequence[str] | None = None,
+    photo_ids: Sequence[int] | None = None,
     limit: int | None = None,
 ) -> list[ScopeRow]:
     """Photos to analyse, in batch / sequence order.
 
     Without `reanalyse` a photo that already has a proposal in any state is
     skipped — the analyser is resumable and cheap to re-run.
+
+    `photo_ids` restricts the pass to a named list. A whole-archive sweep that
+    predicts a change on nine photos should be applied to those nine, not to
+    3,446, and certainly not by re-analysing a batch around them.
     """
     # The lateral join for the newest proposal has to sit inside the FROM
     # clause, so this spells the scope out rather than reusing SCOPE_SQL.
@@ -171,6 +176,7 @@ def select_scope(
                  select 1 from ingest_pairings ip
                   where ip.back_photo_id = p.id)
            {'and p.scan_batch = any(%s)' if batches else ''}
+           {'and p.id = any(%s)' if photo_ids else ''}
            {'' if reanalyse else 'and cp.status is null'}
          order by p.scan_batch nulls last, p.scan_sequence nulls last, p.id
          {'limit %s' if limit else ''}
@@ -178,6 +184,8 @@ def select_scope(
     args: list[Any] = []
     if batches:
         args.append(list(batches))
+    if photo_ids:
+        args.append([int(i) for i in photo_ids])
     if limit:
         args.append(limit)
 
@@ -191,6 +199,7 @@ def select_scope(
         scan_batch=r["scan_batch"], scan_sequence=r["scan_sequence"],
         source_filename=r["source_filename"],
         dpi=r["dpi"], has_back=bool(r["has_back"]),
+        ai_label=r["ai_label"],
         proposal_status=r["proposal_status"],
     ) for r in rows]
 

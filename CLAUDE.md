@@ -252,6 +252,17 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   is within one level of the direct arithmetic and rounds once instead of
   twice, so it is marginally *more* accurate. Every measurement is recorded in the
   **full-resolution display frame**, so nothing needs re-analysing to apply.
+  And (c) **any whole-archive pass runs as resumable chunks in fresh
+  processes, from the first attempt** — not as one long process. A 3,446-photo
+  sweep allocates and frees large arrays for an hour and the allocator never
+  hands the space back, so the run is killed for memory somewhere past the
+  halfway mark and nothing is saved. Chunks of ~250, each a new process
+  writing its own result file and skipping any file that already exists, turn
+  a kill into the loss of one chunk instead of the loss of an hour. This cost
+  three killed runs in fix-up 5 before it was done that way; the laptop has
+  under 2 GB free with the app, a browser and Postgres up, and the second
+  pytest process on the shared `photoorg_test` is what corrupts both runs, so
+  **tests and sweeps never run concurrently either**.
 - **All thresholds live in `desktop/.env`** (`CLEANUP_*`, documented in
   `.env.example`) so they retune without a code change. The crop inset
   **scales with DPI**: `CLEANUP_CROP_INSET_PX_AT_300` px at 300 DPI, so 16 px

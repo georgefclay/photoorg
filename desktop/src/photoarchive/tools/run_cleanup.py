@@ -31,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="restrict to this scan_batch (repeatable)")
     parser.add_argument("--reanalyse", action="store_true",
                         help="re-measure photos that already have a proposal")
+    parser.add_argument(
+        "--photo", dest="photos", action="append", default=[],
+        help="restrict to these photo ids (repeatable, or comma-separated). "
+             "Implies --reanalyse: a named photo is one you mean to re-measure.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--no-previews", action="store_true",
                         help="skip the ~2000 px preview render (faster; the "
@@ -39,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="write the run report when the pass finishes")
     parser.add_argument("--samples", type=int, default=report_mod.DEFAULT_SAMPLES)
     args = parser.parse_args(argv)
+    # --photo 1,2 and --photo 1 --photo 2 mean the same thing.
+    photo_ids = [int(v) for chunk in args.photos
+                 for v in str(chunk).replace(" ", "").split(",") if v]
 
     configure_logging()
     settings = load_config()
@@ -62,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         stats = job_mod.run_cleanup_analyse(
-            settings, reanalyse=args.reanalyse, batches=args.batches,
+            settings, reanalyse=args.reanalyse or bool(photo_ids),
+            batches=args.batches, photo_ids=photo_ids,
             limit=args.limit, progress_cb=progress,
             cancel_token=CancelToken(),
             write_previews=not args.no_previews,

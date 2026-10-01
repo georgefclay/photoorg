@@ -101,6 +101,7 @@ def run_cleanup_analyse(
     *,
     reanalyse: bool = False,
     batches: Sequence[str] | None = None,
+    photo_ids: Sequence[int] | None = None,
     limit: int | None = None,
     progress_cb: Callable[[dict], None] = lambda _: None,
     cancel_token: CancelToken | None = None,
@@ -121,6 +122,7 @@ def run_cleanup_analyse(
         job_run_id = db.start_job_run(
             conn, job_name="cleanup_analyse",
             params={"reanalyse": reanalyse, "batches": list(batches or []),
+                    "photo_ids": [int(i) for i in (photo_ids or [])],
                     "limit": limit, "guard": guard.to_params()},
         )
         db.audit(conn, actor="desktop", action="cleanup_analyse.start",
@@ -128,7 +130,7 @@ def run_cleanup_analyse(
                  new_value={"reanalyse": reanalyse,
                             "batches": list(batches or [])})
         rows = repo.select_scope(conn, reanalyse=reanalyse, batches=batches,
-                                 limit=limit)
+                                 photo_ids=photo_ids, limit=limit)
 
     stats.total = len(rows)
     progress_cb({"kind": "start", "total": stats.total})

@@ -306,3 +306,71 @@ def test_undo_of_an_edited_split_returns_everything(settings):
     parent = _photo(TEST_DATABASE_URL, pid)
     assert not parent["is_deleted"]
     assert Path(parent["working_path"]).exists()
+
+
+# --------------------------------------------------------------------------
+# The job path: a named list, and the label actually arriving
+# --------------------------------------------------------------------------
+
+def test_the_classification_label_reaches_the_analyser(settings):
+    """`select_scope` selected the label and then dropped it on the floor:
+    `ScopeRow` was built without it, so the document veto could not fire in
+    the job at all — only in a caller that passed the label by hand. The sweep
+    did exactly that, which is why it looked right."""
+    pid, _rects = _mk_two_print_photo(settings, sha="6" * 64)
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        conn.execute("""
+            insert into suggestions (photo_id, kind, source, status, payload)
+            values (%s, 'classification', 'ai', 'pending',
+                    '{"label": "document", "confidence": 0.98}'::jsonb)""",
+                     (pid,))
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        rows = repo.select_scope(conn, reanalyse=True, photo_ids=[pid])
+    assert len(rows) == 1
+    assert rows[0].ai_label == "document", (
+        "the label must survive the trip from the query to the row")
+
+    from photoarchive.modes.cleanup import job as job_mod
+    job_mod.run_cleanup_analyse(settings, reanalyse=True, photo_ids=[pid],
+                                write_previews=False)
+    with db.connection() as conn:
+        conn.autocommit = True
+        p = repo.load_pending_for_photo(conn, pid)
+    assert p is not None
+    assert not p.split_regions, "a document must not be split by the job either"
+    assert p.operations["split_vetoed_by_label"] == "document"
+
+
+def test_a_named_photo_list_restricts_the_pass(settings):
+    """Applying a sweep's nine findings means re-analysing nine photos, not a
+    batch around them."""
+    from photoarchive.modes.cleanup import job as job_mod
+
+    wanted, _rects = _mk_two_print_photo(settings, sha="7" * 64)
+    other = _mk_scan_photo(settings, sha="8" * 64, angle=3.0,
+                           scan_sequence=42, filename="IMG_other.jpg")
+    job_mod.run_cleanup_analyse(settings, write_previews=False)
+
+    _init_pool(settings)
+    with db.connection() as conn:
+        conn.autocommit = True
+        before = {r.photo_id: r.id
+                  for r in [repo.load_pending_for_photo(conn, wanted),
+                            repo.load_pending_for_photo(conn, other)]
+                  if r is not None}
+    assert set(before) == {wanted, other}
+
+    stats = job_mod.run_cleanup_analyse(settings, reanalyse=True,
+                                        photo_ids=[wanted],
+                                        write_previews=False)
+    assert stats.total == 1, "only the named photo may be re-measured"
+
+    with db.connection() as conn:
+        conn.autocommit = True
+        after_wanted = repo.load_pending_for_photo(conn, wanted)
+        after_other = repo.load_pending_for_photo(conn, other)
+    assert after_wanted.id != before[wanted], "the named photo was re-measured"
+    assert after_other.id == before[other], "the other photo was left alone"
