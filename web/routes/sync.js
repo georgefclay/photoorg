@@ -403,6 +403,11 @@ module.exports = function syncRoutes({ pool }) {
     `insert into person_name_variants (id, person_id, variant, kind, created_at)
      values ($1,$2,$3,$4,coalesce($5::timestamptz, now()))
      on conflict (id) do update set
+       -- person_id must be here: a desktop person merge re-parents the
+       -- variant onto the winner (modes/faces/merge.py) without changing
+       -- its id, so leaving it out left the web pointing the nickname at
+       -- the soft-deleted loser and person_search stopped finding it.
+       person_id = excluded.person_id,
        variant = excluded.variant, kind = excluded.kind
      where person_name_variants.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.person_id, r.variant, r.kind, r.created_at],
@@ -447,9 +452,13 @@ module.exports = function syncRoutes({ pool }) {
     {
       webOriginIds: true,
       // places.name is unique on lower(name): a same-named place created
-      // on the web wins; the desktop's duplicate is skipped.
+      // on the web wins; the desktop's duplicate is skipped. Restricted to
+      // web-origin rows deliberately — matched against *any* other row it
+      // also swallowed a legitimate desktop rename, which is the one thing
+      // this route must always carry across.
       skip: async (client, r) => (await client.query(
-        `select 1 from places where lower(name) = lower($1) and id <> $2`,
+        `select 1 from places
+          where lower(name) = lower($1) and id <> $2 and id >= ${WEB_ID_FLOOR}`,
         [r.name, Number(r.id)],
       )).rows.length > 0,
     },

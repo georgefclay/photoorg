@@ -930,6 +930,61 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   Pass `--all-files` to `run_push` (or uncheck the Sync-tab checkbox)
   when the archive is quiescent and we're doing the one-time full
   file push.
+- **Content changes always re-sync** (fix-up 2). A plain `update` to any
+  pushed row — a corrected album name, a re-worded `suggestions.payload`,
+  a re-parented name variant — must reach the VM on the next push with
+  nothing else to remember. Two things make that true, and both are load-
+  bearing:
+  1. **The metadata selectors are a full re-send, every push.** Only file
+     *bytes* are incremental (via `synced_file_version` and `need_files`).
+     Do not "optimise" a metadata selector with an `updated_at >
+     synced_at` filter: on `photos` it can never be true, because
+     `_mark_synced` writes `synced_at` with an ordinary `update` that
+     fires `set_updated_at` in the same statement — the same trap that
+     forced `tombstoned_at` to be its own column.
+  2. **Every column a `/sync/<table>` route INSERTs must also be assigned
+     in its `on conflict … do update set`.** A column left out of the SET
+     list is a column whose edits silently never leave the laptop:
+     `/sync/person_name_variants` omitted `person_id`, so a desktop person
+     merge (which re-parents the variant with an `update`, keeping its id)
+     left the web attributing the nickname to the soft-deleted loser and
+     `person_search` stopped finding it. `web/test/sync-resync.test.js`
+     holds both halves — a round-trip per table, plus a structural sweep
+     over `routes/sync.js` that fails naming any pushed-but-never-updated
+     column, which is what catches the *next* column added to a push.
+  Creation facts are the deliberate exception and stay out of the SET
+  list: `id`, `created_at`, `ingested_at`, `added_at`, `created_by`.
+  A guard that protects a *decision* must still let the *content* through
+  — the suggestions upsert refuses to re-open a web-resolved row's
+  `status` but always takes the new `payload`.
+- **One refused table costs only that table** (fix-up 2). The metadata
+  stages run in a fixed order, so a stage that raised used to abort every
+  stage after it: when the VM was a migration behind and
+  `/sync/photo_masters` answered 500 over Phase 7's `region` column,
+  `albums`, `suggestions` and `photo_groups` — further down the list —
+  never ran at all, and no number of pushes could carry a corrected album
+  name. `_push_meta_stage(…, stats=stats)` now records the refusal in
+  `PushStats.failed_stages` and carries on; `push()` raises
+  `PushStageError` (a `WebSyncError`, so existing handlers still catch it)
+  **at the very end**, after everything that could run has run, and
+  `run_push` prints the failed stages and exits 1. Only `WebSyncError` is
+  caught — a marshaller bug still crashes loudly. Omit `stats` for the old
+  all-or-nothing behaviour.
+- **Before concluding "sync dropped my edit", check which database the
+  edit landed in.** The laptop has three: `photoorg` (desktop,
+  authoritative, the only thing push reads), `photoorg_web` (the laptop's
+  local web server) and `photoorg_test`. An `update` run against
+  `photoorg_web` changes what the local web shows and is invisible to
+  push forever — the VM is only ever fed from `photoorg`. `select
+  current_database()` first.
+- **A typo that came from a master folder name is corrected in the
+  derived text only.** `photos.source_folder`, `photos.scan_batch` and
+  `photo_masters.master_path` are faithful records of what is on the
+  read-only master disk; `master_path` is also the key that makes
+  re-ingest a no-op. Correct `albums.name` and `suggestions.payload`;
+  leave the three master-derived columns disagreeing with them on
+  purpose. (`D:\Scanned Photos\Summer 1992 - Canaca` is still spelled
+  that way on disk, and search still matches both.)
 
 ## Web pages (Phase 10 onwards)
 - **Queries live in `web/services/`, never in routes or views.** Photos:

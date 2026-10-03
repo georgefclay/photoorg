@@ -1,4 +1,4 @@
-"""Headless push driver for Phase 9 verification.
+r"""Headless push driver for Phase 9 verification.
 
 Runs `push()` against the configured WEB_API_URL, prints per-stage
 progress, and reports totals. Reads settings via desktop `.env`.
@@ -6,6 +6,7 @@ progress, and reports totals. Reads settings via desktop `.env`.
 Usage:
   python -m photoarchive.tools.run_push          # push everything
   python -m photoarchive.tools.run_push --dry    # count target rows only
+  python -m photoarchive.tools.run_push --state-dir D:\PhotoArchive\sync-state
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 from photoarchive import db
 from photoarchive.config import load as load_settings
 from photoarchive.modes.sync.client import WebSyncClient
-from photoarchive.modes.sync.push import push, PushProgress
+from photoarchive.modes.sync.push import push, PushProgress, PushStageError
 
 
 def _humanb(n: float) -> str:
@@ -39,6 +40,14 @@ def main() -> int:
         help=(
             "Send file bytes for every non-private, non-junk photo "
             "(default: only photos in at least one live photo_groups row)."
+        ),
+    )
+    ap.add_argument(
+        "--state-dir",
+        default=None,
+        help=(
+            "Where the pull cursors (sync_state.json) live. Defaults to "
+            "<parent of WORKING_DIR>/sync-state, which is what the app uses."
         ),
     )
     args = ap.parse_args()
@@ -85,14 +94,28 @@ def main() -> int:
         print(f"SYNC_FACE_EMBEDDINGS={env_face}")
         print(f"files_only_for_grouped={files_only_for_grouped}")
         print("--- push begin ---")
-        stats = push(
-            client,
-            working_dir=Path(settings.WORKING_DIR),
-            thumbs_dir=Path(settings.THUMBS_DIR),
-            send_face_embeddings=env_face,
-            files_only_for_grouped=files_only_for_grouped,
-            progress=prog,
-        )
+        # push() pulls first, always (Phase 9 fix-up 1), so it needs the
+        # cursor file the app uses — otherwise a headless push would re-pull
+        # from zero every run.
+        state_dir = (Path(args.state_dir) if args.state_dir
+                     else Path(settings.WORKING_DIR).parent / "sync-state")
+        print(f"state_dir={state_dir}")
+        failed: dict[str, str] = {}
+        try:
+            stats = push(
+                client,
+                working_dir=Path(settings.WORKING_DIR),
+                thumbs_dir=Path(settings.THUMBS_DIR),
+                state_dir=state_dir,
+                send_face_embeddings=env_face,
+                files_only_for_grouped=files_only_for_grouped,
+                progress=prog,
+            )
+        except PushStageError as e:
+            # Every stage that could run has run; these are the ones the
+            # web refused (usually a column the VM has not migrated yet).
+            stats = e.stats
+            failed = stats.failed_stages
         elapsed = time.time() - started
         print("--- push done ---")
         print(f"photos upserted: {stats.photos_upserted}")
@@ -102,6 +125,11 @@ def main() -> int:
         print("per-table:")
         for k, v in sorted(stats.tables.items()):
             print(f"  {k}: {v}")
+        if failed:
+            print("FAILED STAGES (everything else still pushed):")
+            for k, v in sorted(failed.items()):
+                print(f"  {k}: {v}")
+            return 1
         return 0
     finally:
         db.close_pool()

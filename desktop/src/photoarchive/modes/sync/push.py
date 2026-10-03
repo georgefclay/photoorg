@@ -8,10 +8,19 @@ Order:
   → photo_groups
 
 The photo metadata call returns `need_files` — the file upload step only
-walks that list. Resumable via `photos.synced_at` and
-`photos.synced_file_version` on the laptop: the selector for the next
-run skips rows whose synced_file_version == file_version AND synced_at
-> photos.updated_at.
+walks that list, so the *bytes* are incremental (via
+`photos.synced_file_version`). The **metadata is not**: every selector
+here is a full re-send of every eligible row, every push, and that is
+deliberate — it is what makes a plain `update` to any pushed row's
+content (a corrected album name, a re-worded suggestion payload) arrive
+on the VM at the next push with nothing else to remember.
+
+Do not "optimise" these selectors with an `updated_at > synced_at`
+filter. It cannot work on `photos`: `_mark_synced` writes `synced_at`
+with an ordinary `update`, which fires the `set_updated_at` trigger and
+bumps `updated_at` in the same statement, so `synced_at > updated_at` is
+never true (the same trap that forced `tombstoned_at` to be its own
+column). Any such filter would either skip everything or skip the edits.
 
 Private and junk photos are excluded at the selector — except once, as
 tombstones: a photo the web already holds that has since been junked,
@@ -34,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -68,6 +78,15 @@ class PushStats:
     bytes_uploaded: int = 0
     tombstones_pushed: int = 0
     tables: dict[str, int] = field(default_factory=dict)
+    #: stage name -> error text, for stages the web refused. A stage that
+    #: fails no longer takes the rest of the push down with it (see
+    #: `_stage_guard`); the caller is told at the end instead.
+    failed_stages: dict[str, str] = field(default_factory=dict)
+
+    def report_failures(self) -> str:
+        if not self.failed_stages:
+            return ""
+        return "; ".join(f"{k}: {v}" for k, v in self.failed_stages.items())
 
 
 def _select_photos(conn, offset: int, limit: int) -> list[dict]:
@@ -400,12 +419,13 @@ def push(
 
         # -------- metadata tables -------------------------------------
         for stage, sql, marshaller in _META_STAGES:
-            n_pushed = _push_meta_stage(conn, client, stage, sql, marshaller, progress, should_stop)
-            stats.tables[stage] = n_pushed
+            stats.tables[stage] = _push_meta_stage(
+                conn, client, stage, sql, marshaller, progress, should_stop, stats=stats)
 
         # -------- faces (embeddings gated) ----------------------------
-        n_faces = _push_faces(conn, client, send_face_embeddings, progress, should_stop)
-        stats.tables["faces"] = n_faces
+        with _stage_guard(stats, "faces"):
+            stats.tables["faces"] = _push_faces(
+                conn, client, send_face_embeddings, progress, should_stop)
 
         # -------- photo_backs (metadata) + back files -----------------
         # The web answers each batch with `need_files`: backs whose image
@@ -433,6 +453,7 @@ def push(
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }, progress, should_stop,
             on_response=lambda resp: back_need.extend(resp.get("need_files") or []),
+            stats=stats,
         )
         stats.tables["photo_backs"] = n_backs
         stats.tables["back_files"] = _push_back_files(
@@ -459,7 +480,7 @@ def push(
                 "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
                 "resolution_note": r["resolution_note"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-            }, progress, should_stop,
+            }, progress, should_stop, stats=stats,
         )
 
         # -------- photo_groups (adds AND soft-removes) ----------------
@@ -478,16 +499,60 @@ def push(
                 "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None,
                 "deleted_by": r["deleted_by"],
                 "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
-            }, progress, should_stop,
+            }, progress, should_stop, stats=stats,
         )
 
+    # Loud at the end, never silent: every stage that could run has run,
+    # and the caller still learns which ones the web refused.
+    if stats.failed_stages:
+        raise PushStageError(stats)
     return stats
+
+
+@contextmanager
+def _stage_guard(stats: PushStats, stage: str):
+    """Let one table's failure cost only that table.
+
+    The stages run in a fixed order, so a stage that raises used to abort
+    every stage after it — which is how a schema the VM had not migrated
+    yet (`photo_masters.region`, Phase 7) silently stopped `albums` and
+    `suggestions` from ever re-syncing, two stages further down the list.
+    The error is recorded, the remaining stages still run, and `push()`
+    raises at the very end so nothing is swallowed.
+    """
+    try:
+        yield
+    except WebSyncError as e:
+        msg = " ".join(str(e).split())[:300]
+        log.error("push: stage %s failed, continuing with the rest: %s", stage, msg)
+        stats.failed_stages[stage] = msg
+
+
+class PushStageError(WebSyncError):
+    """One or more stages were refused by the web; every other stage ran.
+    `stats` carries what got through and `failed_stages` what did not."""
+
+    def __init__(self, stats: PushStats):
+        super().__init__(
+            "push finished with failed stages — " + stats.report_failures()
+        )
+        self.stats = stats
 
 
 def _push_meta_stage(
     conn, client: WebSyncClient, stage: str, sql: str, marshaller,
-    progress, should_stop, on_response=None,
+    progress, should_stop, on_response=None, stats: PushStats | None = None,
 ) -> int:
+    """Push one metadata table. With `stats`, a web-side refusal is recorded
+    against the stage and 0 is returned instead of propagating — one table's
+    failure must not cost every table after it (see `_stage_guard`)."""
+    if stats is not None:
+        with _stage_guard(stats, stage):
+            return _push_meta_stage(
+                conn, client, stage, sql, marshaller, progress, should_stop,
+                on_response=on_response, stats=None,
+            )
+        return 0
     with conn.cursor(row_factory=dict_row) as cur:
         # Stage queries may filter `id < %(web_id_floor)s` (web-origin rows stay put).
         cur.execute(sql, {"web_id_floor": WEB_ID_FLOOR})
