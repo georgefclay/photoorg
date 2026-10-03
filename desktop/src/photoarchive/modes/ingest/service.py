@@ -315,7 +315,14 @@ def _commit_normal(
                 conn,
                 sha256_hex=sha, phash=phash, dhash=dhash,
                 width=width, height=height,
-                orientation=exif.orientation,
+                # From `probe_image`, never from the exifread string. The
+                # string path silently returned None for every photo in the
+                # archive (exifread says "Rotated 90 CW"; the lookup expected
+                # exiftool's "Rotate 90 CW"), so `photos.orientation` was NULL
+                # on all 12,686 and the display-frame invariant went unchecked
+                # for 235 of them. `dims` is the same probe that produced
+                # `width`/`height` two lines up, so they cannot disagree.
+                orientation=dims.orientation,
                 master_width=dims.master_width, master_height=dims.master_height,
                 mime=mime, file_size=file_size,
                 is_scan=is_scan_flag,

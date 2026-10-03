@@ -680,7 +680,19 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   Pre-fix-up-6 rows are repaired by
   `python -m photoarchive.tools.repair_face_boxes`
   (backfills orientation, swaps dims for {5,6,7,8}, and rescales every
-  stored bbox by (H_raw/W_raw, W_raw/H_raw)).
+  stored bbox by (H_raw/W_raw, W_raw/H_raw) — a **scale**, not a rotation;
+  verified on real photos, a rotation puts the boxes off the faces).
+- **`photos.orientation` comes from `probe_image`, never from an EXIF string**
+  (fix-up 7). Ingest used to read it from exifread's human-readable tag and
+  match it against a lookup written in *exiftool's* vocabulary — exifread says
+  `Rotated 90 CW`, the table expected `Rotate 90 CW` — so the parse returned
+  None for **every photo ever ingested**: all 12,686 rows had `orientation`
+  NULL, 235 held raw dims where display dims belong, and 280 face boxes sat in
+  the wrong frame. `dims.orientation` is the same probe that yields
+  `width`/`height`, so the two cannot disagree. **A NULL orientation means
+  "never established", not "upright"** — `check_working_files` now has a
+  post-condition for it: live photos whose file carries an EXIF orientation of
+  2-8 while `photos.orientation` is NULL must be 0.
   `python -m photoarchive.tools.diagnose_face_box PHOTO_ID` prints
   everything relevant for one photo in one report.
 - **`unknown` / `ignore`** (fix-up 8). `faces.review_status` (migration

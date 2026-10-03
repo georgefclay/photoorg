@@ -147,6 +147,17 @@ George on #3817 (3 × 4 grid): the boxes drift left as you go right — the left
 
 Commit: `Phase 7 fix-up 6: grid helper frame, nudges, go-to`.
 
+## Phase 7 fix-up 7 — 235 photos with raw dims and NULL orientation (do this now, before Phase 13)
+
+Good catch; this is PROJECT-PLAN open item 13 finally explained. Approved, in this order:
+
+1. `repair_face_boxes` learns to key on the **file's EXIF orientation** when `photos.orientation` is NULL (read the header; never trust a NULL as "1"). Dry run over all 235 first: print id, raw dims, EXIF tag, box count, labelled count. Then the real run: backfill `orientation`, swap width/height, rescale every live bbox by (H_raw/W_raw, W_raw/H_raw), regenerate the 280 face crops, audit row per photo. `diagnose_face_box` on three labelled ones (pick Samara Clay's if she has another) pasted in the report.
+2. **Restore the two `cleanup_out_of_frame` boxes** (Samara's included): take the pre-accept bbox from the `cleanup.accept` audit row, map it raw→display with the same rescale, then through the accept's transform, un-soft-delete the row with the corrected bbox, regenerate the crop, audit `face.restore`. Confirm visually that both land on the faces.
+3. Make ingest's `probe_image` path the only way `photos.orientation` gets set and add a post-condition to `check_working_files`: "photos with EXIF orientation ∉ {1, NULL} and `photos.orientation` NULL" must be 0. Say how the 235 slipped past the Phase 6 fix-up 6 backfill.
+4. Push: the 235 photos' metadata and 280 face rows re-sync on the next push (bboxes changed → upsert; web crops are keyed by bbox hash so they regenerate). Verify one on the live site after George's next push.
+
+Commit: `Phase 7 fix-up 7: orientation backfill from EXIF, restore out-of-frame boxes`.
+
 **PM on the follow-up:** Part 1 rule accepted ("the cut subdivides found prints, never manufactures a split from one component"); the two-touching-prints cost is fine — G covers it. Part 2 accepted. The manual-fix copy deletion was correct and correctly reasoned (derived convenience copies, working file verified, re-creatable with R); add one line to CLAUDE.md making that explicit so nobody has to re-derive it. **Yes to the manual-queue filter change**: `manual_queue` skips photos with a live pending proposal; test; commit with the rest as `Phase 7 fix-up 5b: no invented splits, G on any scan, manual queue filter`.
 
 **PM on the fix-up 5 sweep:** good catch on the fragmenting — reading the 29 individually instead of the headline is exactly the discipline that matters here. Apply the 9: George is not reviewing right now, so re-analyse those 9 photos by id (`--reanalyse` restricted to the list), confirm the result matches the sweep's prediction for each (incl. #3833 still a 4-way split, #3839 crop-only), and report. Then George reviews splits (Show: Splits) with G for #3817 and W for anything wrong. Note the chunked-sweep lesson in CLAUDE.md's memory paragraph: any whole-archive pass runs as resumable chunks in fresh processes from the first attempt.

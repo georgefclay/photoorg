@@ -67,13 +67,24 @@ def _parse_orientation(s: str | None) -> int | None:
                 return n
         except ValueError:
             continue
+    # exifread's vocabulary, not exiftool's. The original table used
+    # exiftool's spellings ("Rotate 90 CW") against exifread's output
+    # ("Rotated 90 CW") and so returned None for every photo ever ingested.
+    # `photos.orientation` now comes from `probe_image` instead; this stays
+    # correct for anything that still reads `ExifData.orientation`.
     lookup = {
-        "Horizontal (normal)": 1, "Mirror horizontal": 2, "Rotate 180": 3,
-        "Mirror vertical": 4, "Mirror horizontal and rotate 270 CW": 5,
-        "Rotate 90 CW": 6, "Mirror horizontal and rotate 90 CW": 7,
-        "Rotate 270 CW": 8,
+        "Horizontal (normal)": 1,
+        "Mirrored horizontal": 2, "Mirror horizontal": 2,
+        "Rotated 180": 3, "Rotate 180": 3,
+        "Mirrored vertical": 4, "Mirror vertical": 4,
+        "Mirrored horizontal then rotated 90 CCW": 5,
+        "Mirror horizontal and rotate 270 CW": 5,
+        "Rotated 90 CW": 6, "Rotate 90 CW": 6,
+        "Mirrored horizontal then rotated 90 CW": 7,
+        "Mirror horizontal and rotate 90 CW": 7,
+        "Rotated 90 CCW": 8, "Rotate 270 CW": 8,
     }
-    return lookup.get(s)
+    return lookup.get(s.strip())
 
 
 def _parse_gps(tags) -> tuple[float | None, float | None]:

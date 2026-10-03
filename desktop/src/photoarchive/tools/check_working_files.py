@@ -62,6 +62,7 @@ from .. import db as dbmod
 from ..config import load as load_config
 from ..logging_setup import configure_logging
 from ..modes.ingest import paths as ingest_paths
+from ..modes.ingest.image_io import open_image, probe_image
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,9 @@ class CheckCounts:
     # post-condition: live rows still non-absolute after the run
     photos_still_bare: int = 0
     backs_still_bare: int = 0
+    # post-condition: a file that says it is rotated while the row says nothing
+    orientation_unknown: int = 0
+    orientation_unknown_ids: list[int] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -118,6 +122,8 @@ class CheckCounts:
             "deleted_pointer_repaired": self.deleted_pointer_repaired,
             "deleted_unresolved": self.deleted_unresolved,
             "photos_still_bare": self.photos_still_bare,
+            "orientation_unknown": self.orientation_unknown,
+            "orientation_unknown_ids": self.orientation_unknown_ids[:50],
             "backs_still_bare": self.backs_still_bare,
         }
 
@@ -197,6 +203,47 @@ def _load_back_rows() -> list[tuple]:
             order by id
             """
         ).fetchall()
+
+
+def _orientation_post_condition() -> tuple[int, list[int]]:
+    """Live photos whose file says it is rotated while the row says nothing.
+
+    `photos.width/height` are display dims and `faces.bbox` lives in that same
+    frame (Phase 6 fix-up 6). A file carrying an EXIF orientation of 2-8 while
+    `photos.orientation` is NULL means nobody ever established which frame the
+    row is in, and every face box on it is suspect. That was true of 235
+    photos and nothing noticed, because ingest read the orientation from an
+    exifread string it could not parse and wrote NULL for all 12,686.
+
+    Only photos whose `orientation` is already NULL are opened, and only their
+    headers, so this costs a few seconds rather than a full decode of the
+    archive.
+    """
+    offenders: list[int] = []
+    with dbmod.connection() as conn:
+        conn.autocommit = True
+        rows = conn.execute(
+            """
+            select id, working_path from photos
+            where not is_deleted and working_path is not null
+              and orientation is null
+            order by id
+            """
+        ).fetchall()
+    settings = load_config()
+    for photo_id, working_path in rows:
+        path = ingest_paths.resolve_working_path(settings.WORKING_DIR,
+                                                 working_path)
+        if path is None or not path.exists():
+            continue
+        try:
+            with open_image(path) as img:
+                tag = probe_image(img).orientation
+        except Exception:
+            continue
+        if tag is not None and tag != 1:
+            offenders.append(int(photo_id))
+    return len(offenders), offenders
 
 
 def _post_condition_counts() -> tuple[int, int]:
@@ -490,6 +537,8 @@ def check(*, dry_run: bool, limit: int | None) -> CheckCounts:
         _check_back(counts, settings, row, dry_run=dry_run)
 
     counts.photos_still_bare, counts.backs_still_bare = _post_condition_counts()
+    counts.orientation_unknown, counts.orientation_unknown_ids = (
+        _orientation_post_condition())
     return counts
 
 
@@ -518,6 +567,8 @@ def format_summary(counts: CheckCounts, *, dry_run: bool) -> str:
         "post-condition (must be 0 after a real run):",
         f"  live photos still bare:    {d['photos_still_bare']}",
         f"  backs still bare:          {d['backs_still_bare']}",
+        f"  orientation unknown:       {d['orientation_unknown']}"
+        + (f"  {d['orientation_unknown_ids']}" if d["orientation_unknown"] else ""),
     ]
     for label, ids in (("truly missing photo ids", d["truly_missing_ids"]),
                        ("missing back ids", d["backs_missing_ids"])):

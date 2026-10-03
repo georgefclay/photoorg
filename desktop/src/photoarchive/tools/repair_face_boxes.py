@@ -30,7 +30,7 @@ import argparse
 import json
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -45,6 +45,23 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class RepairRow:
+    """One photo that needs repairing, as the dry run reports it."""
+    photo_id: int
+    raw_w: int
+    raw_h: int
+    exif_tag: int | None
+    source: str
+    faces: int
+    labelled: int
+
+    def line(self) -> str:
+        return (f"  #{self.photo_id:<6} raw {self.raw_w}x{self.raw_h:<10} "
+                f"exif={self.exif_tag:<3} via {self.source:<7} "
+                f"boxes={self.faces:<3} labelled={self.labelled}")
+
+
+@dataclass
 class RepairCounts:
     photos_scanned: int = 0
     orientation_backfilled: int = 0
@@ -54,16 +71,23 @@ class RepairCounts:
     photos_missing_working_file: int = 0
     photos_missing_master_file: int = 0
     photos_unreadable: int = 0
+    rows: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return dict(self.__dict__)
+        d = {k: v for k, v in self.__dict__.items() if k != "rows"}
+        d["photos_needing_repair"] = len(self.rows)
+        return d
 
 
 def _load_dims_via(path: Path) -> tuple[int, int, int | None] | None:
-    """Return (raw_w, raw_h, orientation) or None if the file can't be read."""
+    """Return (raw_w, raw_h, orientation) or None if the file can't be read.
+
+    Header only: `probe_image` wants the size and one EXIF tag, and decoding
+    12,686 images to read them is what made a whole-archive run unaffordable
+    on this laptop.
+    """
     try:
         with open_image(path) as img:
-            img.load()
             dims = probe_image(img)
             return dims.master_width, dims.master_height, dims.orientation
     except Exception as e:
@@ -157,6 +181,15 @@ def repair(*, dry_run: bool, limit: int | None) -> RepairCounts:
                 """,
                 (photo_id,),
             ).fetchall()
+            _labelled = {
+                int(r[0]): bool(r[1]) for r in conn.execute(
+                    """
+                    select id, person_id is not null from faces
+                    where photo_id = %s and not is_deleted
+                    """,
+                    (photo_id,),
+                ).fetchall()
+            }
 
         face_fixups: list[tuple[int, dict, dict]] = []
         if needs_dim_swap and face_rows:
@@ -174,6 +207,15 @@ def repair(*, dry_run: bool, limit: int | None) -> RepairCounts:
                 }
                 face_fixups.append((int(fid), b, new_bbox))
 
+        if needs_dim_swap:
+            counts.rows.append(RepairRow(
+                photo_id=photo_id, raw_w=raw_w, raw_h=raw_h,
+                exif_tag=new_orientation, source=source or "?",
+                faces=len(face_rows),
+                labelled=sum(1 for _fid, _b in face_rows
+                             if _labelled.get(int(_fid))),
+            ))
+
         # Apply changes.
         if not dry_run:
             if (new_orientation != db_orientation) or (new_w, new_h) != (db_w, db_h):
@@ -188,6 +230,24 @@ def repair(*, dry_run: bool, limit: int | None) -> RepairCounts:
                         where id = %s
                         """,
                         (new_orientation, new_w, new_h, photo_id),
+                    )
+                    # Every state change leaves a row. The absence of one is
+                    # how nobody could tell this tool had never been run.
+                    dbmod.audit(
+                        conn, actor="desktop",
+                        action="photo.orientation_repaired",
+                        entity_type="photo", entity_id=photo_id,
+                        previous_value={"orientation": db_orientation,
+                                        "width": db_w, "height": db_h,
+                                        # Every box as it was, so this is
+                                        # reversible from the audit row alone.
+                                        "faces": [{"id": fid, "bbox": old_b}
+                                                  for fid, old_b, _new in
+                                                  face_fixups]},
+                        new_value={"orientation": new_orientation,
+                                   "width": new_w, "height": new_h,
+                                   "raw": [raw_w, raw_h], "source": source,
+                                   "faces_rescaled": len(face_fixups)},
                     )
             for fid, old_bbox, new_bbox in face_fixups:
                 with dbmod.connection() as conn:
@@ -244,6 +304,12 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         dbmod.close_pool()
 
+    if args.dry_run and counts.rows:
+        print(f"{len(counts.rows)} photos need repairing:")
+        for r in counts.rows:
+            print(r.line())
+        print(f"  total boxes {sum(r.faces for r in counts.rows)}, "
+              f"labelled {sum(r.labelled for r in counts.rows)}")
     print(json.dumps(counts.as_dict(), indent=2))
     return 0
 
