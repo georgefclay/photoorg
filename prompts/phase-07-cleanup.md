@@ -170,19 +170,63 @@ Commit: `Phase 7 fix-up 7: orientation backfill from EXIF, restore out-of-frame 
 
 Newest first. Everything below is committed and pushed to `main`.
 
-### Where it stands (2026-10-01)
+### Where it stands (2026-10-02)
 
 | | |
 |---|---|
-| pending | **1,026** — 964 geometric-only, 61 needs-manual, 1 split, 0 hand-split |
+| accepted | **991** — 964 of them one bulk accept of the geometric-only queue |
 | clean (nothing to do) | 2,391 |
-| accepted | 27, which have created **49 split children** |
+| pending | **62** — 61 needs-manual, 1 split, 0 hand-split |
 | manual | 15 rows, 10 of them showing (5b hides those that came back) |
 | rejected | 5 |
+| split children created | 49 |
 
-**Nothing is waiting on me.** The next move is George's: *Show: Geometric-only*
-is 964 bulk-acceptable crops and deskews, and the four Sears proof sheets are
-`Go to #` → **G** → 2 × 3 → *Lay out grid*.
+**George's next moves.** The four Sears proof sheets (#2651, #2716–#2718) want
+`Go to #` → **G** → 2 × 3 → *Lay out grid*. #3839 (newspaper) wants **W**.
+#1398 is already hand-split into its eight wallets and accepted.
+
+**Waiting on a push:** the 235 photos and 280 face rows repaired in fix-up 7
+re-sync on the next push, and verifying one face crop on the live site needs
+that push to happen.
+
+### The bulk accept (2026-10-02)
+
+964 of 964, zero failures, ~4 minutes. `sum(file_version)` +964, accepted +964,
+pending 1,026 → 62, disk +1 GB, every previous version kept in `_versions/`.
+`check_working_files --dry-run` clean afterwards. Run as resumable chunks in
+fresh processes, with a trial chunk of 25 verified before the rest.
+
+Two face boxes went out of frame, which is what led to fix-up 7.
+
+### Fix-up 7 — orientation backfill from EXIF (`650f9e9`)
+
+**`photos.orientation` was NULL on all 12,686 photos because of a parse bug,
+not because the archive has no rotated images.** Ingest read the orientation
+from exifread's human-readable tag and matched it against a lookup written in
+*exiftool's* vocabulary — exifread emits `Rotated 90 CW`, the table expected
+`Rotate 90 CW`. The repair tool's dim-swap condition was therefore unreachable
+and was never run. **This was PROJECT-PLAN open item 13.**
+
+- 235 photos held raw dims where display dims belong; 280 face boxes (95
+  labelled) sat in the wrong frame. Backfilled: 8,672 orientations set, 235
+  photos repaired, 280 crops regenerated, re-scan shows 0 disagreements.
+- The repair tool no longer decodes to read two numbers and a tag, and writes
+  an audit row per photo carrying **every box as it was**, so it is reversible
+  from the audit alone. The absence of such a row is how nobody could tell it
+  had never run.
+- Six photos had been accepted while their row held raw dims, so the accept
+  mapped their boxes from the wrong frame: two fell outside (soft-deleted and
+  flagged), four were misplaced by 85–343 px with nothing to notice. Which
+  mapping each needed was decided by rendering the candidates and **looking** —
+  #325 and #338 were already right; #330, #1462, #1910, #1920 needed the
+  rescale. All six fixed, both deletions restored, live faces back to 23,425.
+- Ingest now takes `orientation=dims.orientation` from `probe_image`, and
+  `check_working_files` has a post-condition (reads 0) for a file that says it
+  is rotated while the row says nothing. **A NULL orientation means "never
+  established", not "upright".**
+
+Worth keeping: the documented bbox rescale is a **scale**, not a rotation.
+Verified by drawing both on real photos — the scale lands on the faces.
 
 ### Fix-up 6 — grid frame, nudges, go-to (`ef77d06`)
 
