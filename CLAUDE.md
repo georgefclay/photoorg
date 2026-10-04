@@ -959,9 +959,10 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   `status` but always takes the new `payload`.
 - **One refused table costs only that table** (fix-up 2). The metadata
   stages run in a fixed order, so a stage that raised used to abort every
-  stage after it: when the VM was a migration behind and
-  `/sync/photo_masters` answered 500 over Phase 7's `region` column,
-  `albums`, `suggestions` and `photo_groups` — further down the list —
+  stage after it: when the VM was a migration behind, `/sync/photo_masters`
+  answered 500 — the VM still held the pre-Phase-7 **global unique** on
+  `master_path`, which a split child (several masters rows for one file)
+  violates — and `albums`, `suggestions` and `photo_groups`, further down,
   never ran at all, and no number of pushes could carry a corrected album
   name. `_push_meta_stage(…, stats=stats)` now records the refusal in
   `PushStats.failed_stages` and carries on; `push()` raises

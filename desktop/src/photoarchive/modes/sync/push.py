@@ -514,9 +514,11 @@ def _stage_guard(stats: PushStats, stage: str):
     """Let one table's failure cost only that table.
 
     The stages run in a fixed order, so a stage that raises used to abort
-    every stage after it — which is how a schema the VM had not migrated
-    yet (`photo_masters.region`, Phase 7) silently stopped `albums` and
-    `suggestions` from ever re-syncing, two stages further down the list.
+    every stage after it — which is how a VM that had not run Phase 7's
+    migration (it still held the old global unique on
+    `photo_masters.master_path`, which a split child violates) silently
+    stopped `albums` and `suggestions` from ever re-syncing, two stages
+    further down the list.
     The error is recorded, the remaining stages still run, and `push()`
     raises at the very end so nothing is swallowed.
     """
