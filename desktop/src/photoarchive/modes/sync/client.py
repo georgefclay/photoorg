@@ -7,6 +7,7 @@ Push and Pull workflows in `service.py` layer per-item state on top.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Iterable
@@ -117,6 +118,18 @@ class WebSyncClient:
             headers=self._hdr(), params=params, timeout=self._timeout,
         )
         return _decode(r, "pull/web_origin")
+
+    def pull_web_edits(self, cursors: dict[str, str] | None) -> dict:
+        """One page of the web's text edits. `cursors` is a per-table
+        composite keyset (`"<iso>|<id>"`), because a web bulk replace
+        stamps every row it changed with the same timestamp and a
+        timestamp-only cursor could never page past the tie."""
+        params = {"cursors": json.dumps(cursors)} if cursors else {}
+        r = self._session.get(
+            f"{self._base}/sync/pull/web_edits",
+            headers=self._hdr(), params=params, timeout=self._timeout,
+        )
+        return _decode(r, "pull/web_edits")
 
     def pull_contributions(self) -> dict:
         r = self._session.get(

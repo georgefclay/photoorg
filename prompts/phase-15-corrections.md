@@ -121,7 +121,154 @@ complete answer.
    in my message) or tell me to proceed and approve the prompts. Everything in
    §Verification/3 waits on it; nothing else in the phase does.
 
+8. **Comment bodies have no edit path at all** (found 2026-10-04). `comments`
+   is insert-only in `routes/api-contrib.js`; the only correction a moderator
+   has is hide/unhide. Under the new rule a comment is human-visible text a
+   person can see, so this is a day-one exception unless we close it.
+   **Recommend:** the author may edit their own comment and an admin may edit
+   any, both writing `comment.edit` with previous/new. It stays web-only —
+   bodies are web-authoritative and `GET /sync/pull/confirmed` deliberately
+   sends summaries, not bodies, so nothing changes on the laptop.
+   (Group names, the other item in the rule's list I had not checked, are
+   already done: `PATCH /api/admin/groups/:id` writes a `group.update` audit
+   row with previous/new. No work needed there. Back transcriptions already
+   re-sync — `/sync/photo_backs` assigns `transcribed_text` in its
+   `do update set`.)
+
+9. **Does find & replace run on the web's own text too, or only on the rows
+   the laptop owns?** The desktop tool as specced reaches albums, suggestions,
+   people, places, backs and notes — all desktop-owned. Comments, group names
+   and group descriptions exist only on the web.
+   **Recommend:** the desktop tool stays on desktop-owned text and the web's
+   admin find & replace stays on pending suggestions (as §Web/1 says), with
+   comments and group text corrected one at a time in their own editors. A
+   cross-tier find & replace over comment bodies would mean the desktop
+   reading web-authoritative text it must never push back, which is how the
+   `photo_groups` and `person_name_variants` bugs started.
+
 ---
 
 ## Answers to Claude Code's questions
-(added as they come)
+
+Findings A–C accepted; C changes the design and your fix for it is right. Yes to all seven, with the following specifics:
+
+1. **Yes.** No invented caption field. The editable surface is the pending `description` suggestion; `physical_ref_note` editable as itself. Leave `description_ai` alone.
+2. **The general pattern.** `edited_on_web_at` on `suggestions`, `people`, `person_name_variants`, `places`, `albums`; one rule, one test shape. Also add `edited_on_desktop_at` (set only by human edits on the desktop — Corrections, People editor, album editor — never by jobs or sync) so the comparison is human-edit vs human-edit, not human-edit vs "when a push touched it". Ties: web wins (it's the one a relative sees). Document the two columns in CLAUDE.md next to `tombstoned_at` as the third member of that family.
+3. **Yes** — read-only group, count shown, reason on screen.
+4. **Yes** — skip-and-list, undo reads the audit.
+5. **Yes** — migration for `album_photos` and `photo_places` soft-delete + `updated_at`, synced like `photo_groups`. Run it on the VM in the deploy step.
+6. **Yes** — `/sync/place_aliases` now; close that half of item 12.
+7. **Proceed with the deploy yourself; George approves the prompts.** Order: dump already taken → `git pull` → migrations (Phase 7 cleanup, this phase's) → restart → `/sync/status` → one full push with zero failed stages. Note in GC.md that `journalctl` is empty by design and `/var/log/photoorg.log` is the log.
+
+Questions 8 and 9 arrived after the seven above were answered. Answered 2026-10-08; GO still stands.
+
+8. **Yes** — the author may edit their own comment, an admin may edit any; both write `comment.edit` with previous/new. Web-only: bodies stay web-authoritative and `GET /sync/pull/confirmed` keeps sending summaries, so nothing changes on the laptop or in Phase 13's writer. Two specifics: (a) **moderators keep hide/unhide and do not get edit** — hiding is moderation, rewriting another person's words is an admin act; (b) **an edited comment says so** — add `comments.edited_at` (null until the first edit) and render "(edited)" next to the timestamp, so text never silently changes under a relative who already read it. Same visibility gate, CSRF carrier and per-user rate limit as every other contributor write; a non-visible photo is 404, never 403.
+
+9. **Yes** — each tier's find & replace stays on the text that tier owns. Desktop: albums, pending suggestions, people (all name fields + variants), places (+ aliases), back transcriptions, `physical_ref_note`. Web (admin): pending suggestions only. Comments and group name/description are corrected one at a time in their own editors. The desktop never reads web-authoritative text it must not push back — that is exactly how the `photo_groups` and `person_name_variants` faults began. One specific: the web bulk apply stamps `edited_on_web_at` on every row it changes (so answer 2's rule shields it from the next push) and writes one audit row per changed row plus the batch id, the same shape as the desktop, and its undo is answer 4's skip-and-list.
+
+Housekeeping: the "open item 12" cited in question 6 / answer 6 is PROJECT-PLAN §5 **item 11** (item 12 is the Phase 10 phone checklist, already done). The `place_aliases` half of item 11 is marked as Phase 15 in the plan; close it there in your step 4.
+
+GO.
+
+---
+
+## Progress
+
+### Built 2026-10-08
+
+**One migration**, `phase-15-corrections`:
+- `edited_on_desktop_at` / `edited_on_web_at` on `suggestions`, `people`,
+  `person_name_variants`, `places`, `albums`, plus
+  `sync_web_edit_wins(web, desktop)` — the LWW rule as one SQL function so the
+  five upserts that apply it cannot each spell it differently. Ties to the web.
+- Soft-delete (`is_deleted / deleted_at / deleted_by / updated_at` +
+  `set_updated_at`) on `album_photos` and `photo_places`, with
+  `refresh_photos_search_now` re-created so a removed album or place leaves the
+  search vector, and live partial indexes on both.
+- `person_name_variants.updated_at` (it had none) and `comments.edited_at`.
+- `down` round-trips. It **deletes** soft-deleted join rows rather than dropping
+  the column under them: without the flag the row reads as live again, which
+  would be a silent re-add of a photo somebody removed from an album.
+
+**Desktop** — `modes/corrections/`, registered between People and Sync:
+- `targets.py` declares every place human-visible text lives, one `Target` per
+  (table, field), pure of Qt and the database. Three row shapes: a plain
+  column, a jsonb path (`jsonb_set`, so the rest of a suggestion's payload
+  survives), and a composite key (`place_aliases`, where the text *is* the key).
+- `repo.py` — search, preview, apply under one `batch_id` with a
+  `correction.replace` row per change, and undo read back from the audit log.
+  `replace_text` is the single place a replacement is computed, so the preview
+  is literally the string that gets stored.
+- `albums.py` / `places.py` and a three-tab `ui.py`.
+- `faces/repo.py`'s person update and variant add now stamp
+  `edited_on_desktop_at` as well.
+
+**Sync** — push carries the human-edit stamp on all five tables and the
+soft-delete flags on both join tables; a new `place_aliases` stage sends every
+desktop place's whole alias set, alias-less places included (the empty set is
+how "the last alias was removed" travels). `pull_web_edits` brings the web's
+wording down before the push, paging on a composite `(edited_on_web_at, id)`
+cursor.
+
+**Web** — `services/corrections.js` and `/admin/corrections` (admin-only bulk
+find & replace, same preview/apply/undo shape); inline text edit on the
+suggestions queue; admin People editor (`PATCH /api/people/:id`, variant add /
+rename); comment edit for the author or an admin with an "(edited)" marker;
+`/sync/place_aliases`; `/sync/pull/web_edits`; the Phase 15 guards inside the
+five `/sync/*` upserts; and `is_deleted = false` added to every reader of
+`album_photos` / `photo_places` across `services/`.
+
+### Two bugs the tests found, both worth keeping in mind
+
+1. **An alias's text is part of its primary key**, so correcting it renames the
+   row — and the key recorded in the audit entry is stale by the time undo
+   reads it. Undo silently skipped every alias it should have restored until
+   `repo.key_after_write` existed. It is the only shape where the key moves, so
+   it has its own test.
+2. **`_apply` and `_undo` both re-run the search afterwards**, so a single
+   status label wiped the result of the action a moment after showing it. The
+   status line is now the Phase 7 two halves — decision on the left, which
+   persists; context on the right, which the search refreshes.
+
+### And one test that had to be taught to see through an interpolation
+
+`web/test/sync-resync.test.js`'s structural sweep reads `routes/sync.js`'s
+*source* to prove every pushed column is also assigned on conflict. The new
+guards reach the SQL through a `keepWebEdits()` call, so the sweep now expands
+it with the route's own exported helper and asserts nothing is left
+unexpanded. A sweep that cannot see through an interpolation is a blind spot,
+not a pass.
+
+### Tests
+
+Desktop +45: `test_corrections.py` (21 — all three shapes previewed, applied
+and audited; the read-only master group refused even when a caller ticks it;
+undo restoring, and skipping a row edited since), `test_corrections_sync.py`
+(15 — LWW both ways and the tie, web-origin rows left to `pull_web_origin`,
+paging past a shared timestamp, the new push selectors), `test_corrections_ui.py`
+(9 — the master group has no checkbox at all, group ticks cascade, apply/undo
+round-trips through the real panel, the decision half survives the search).
+
+Web +35 (`test/corrections.test.js`): literal-replacement semantics matching
+the desktop's, inline edit leaving the rest of the payload alone, resolved
+suggestions untouchable, bulk preview/apply/undo with skip-and-list, a push not
+clobbering a web edit *and* a later desktop edit winning, a desktop merge still
+re-parenting a variant the web renamed, the composite cursor, place-alias round
+trips including the empty set, join-table removals reaching the site and
+leaving search, and the comment-edit permission matrix (author yes, admin yes,
+moderator no, non-member 404).
+
+### Still open
+
+- **The VM deploy (step 1) has not run.** The auto-mode permission classifier
+  refuses remote writes (`[Remote Shell Writes]`) before George ever sees a
+  prompt, so answer 7's "proceed and I'll approve" cannot be honoured from
+  here. The runbook is in `GC.md`; §Verification/2 and /3 wait on it.
+- Album create / rename / re-order on the web stays deferred to Phase 12
+  (PROJECT-PLAN §5 item 11). Phase 15 carries a web *name* edit down to the
+  laptop, but nothing lets the web make an album, so the page stays read-only
+  and the desktop's Albums tab says so on screen.
+- `person_name_variants` has no soft-delete, so a variant *removed* on the
+  desktop still does not reach the web (a renamed one now does). Same class of
+  gap as `album_photos` before this phase; out of scope here because answer 5
+  named the two join tables only.

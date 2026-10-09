@@ -317,6 +317,21 @@ const CREATION_ONLY = new Set([
 // Composite-key tables: the conflict target columns are not updatable.
 const CONFLICT_KEYS = new Set(['photo_id', 'place_id', 'album_id', 'group_id']);
 
+// The Phase 15 LWW guards reach the SQL through a keepWebEdits() call
+// (written without the dollar-brace here so this file's own comments do
+// not trip the leftover-interpolation assert below), so the raw source
+// shows a template hole where nine column assignments belong. Expand
+// those with the route's own helper before parsing: a sweep reading the
+// unexpanded text would both cry wolf on every guarded column and lose
+// the ability to spot a real omission inside one.
+function expandInterpolations(src) {
+  const { keepWebEdits } = require('../routes/sync');
+  return src.replace(
+    /\$\{keepWebEdits\('(\w+)'\)\}/g,
+    (_all, table) => keepWebEdits(table),
+  );
+}
+
 function parseUpserts(src) {
   const out = [];
   const re = /insert into\s+(\w+)\s*\(([\s\S]*?)\)\s*values/gi;
@@ -343,8 +358,12 @@ function parseUpserts(src) {
 }
 
 test('every column a sync upsert inserts is also assigned on conflict', () => {
-  const src = fs.readFileSync(
-    path.join(__dirname, '..', 'routes', 'sync.js'), 'utf8');
+  const src = expandInterpolations(fs.readFileSync(
+    path.join(__dirname, '..', 'routes', 'sync.js'), 'utf8'));
+  // Nothing may be left unexpanded: an interpolation this sweep cannot see
+  // through is a blind spot, not a pass.
+  assert.ok(!/\$\{keep/.test(src),
+    'an unexpanded ${keep…} interpolation would hide columns from this sweep');
   const upserts = parseUpserts(src);
   assert.ok(upserts.length >= 10,
     `expected to parse the sync upserts, found ${upserts.length}`);

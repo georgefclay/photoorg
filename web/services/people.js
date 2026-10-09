@@ -156,7 +156,10 @@ async function getPerson(pool, id) {
   )).rows[0];
   if (!person) return null;
   const [variants, rels] = await Promise.all([
-    pool.query(`select variant, kind from person_name_variants where person_id = $1 order by lower(variant)`, [id]),
+    // `id` is needed by the Phase 15 admin editor: correcting a variant
+    // PATCHes it by id, so a list without ids is a list that cannot be
+    // edited.
+    pool.query(`select id, variant, kind from person_name_variants where person_id = $1 order by lower(variant)`, [id]),
     pool.query(
       `select r.id, r.person_a_id, r.person_b_id, r.type, r.confirmed,
               pa.display_name as a_name, pb.display_name as b_name
@@ -203,7 +206,7 @@ async function getPerson(pool, id) {
   return {
     ...person,
     id: me,
-    variants: variants.rows,
+    variants: variants.rows.map((v) => ({ ...v, id: Number(v.id) })),
     relationships: out,
     pending_relationship_suggestions: pendingRels.map((r) => ({ id: Number(r.id), ...r.payload })),
   };

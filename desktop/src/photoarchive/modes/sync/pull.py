@@ -394,6 +394,127 @@ def _write_web_face_crops(conn, crops, working_dir: Path, thumbs_dir: Path) -> i
     return written
 
 
+# ---------------------------------------------------------------------------
+# 2b. Web edits pull (Phase 15)
+# ---------------------------------------------------------------------------
+
+#: Per table: the text fields the web may edit, and the `where` that
+#: decides whether the web's edit wins. The comparison is
+#: `edited_on_web_at` vs `edited_on_desktop_at` — **never** `updated_at`,
+#: which on the web means "when a push last touched this row" because
+#: every /sync/* upsert sets it. Ties go to the web: it is the copy a
+#: relative is looking at, and a tie means the two edits are
+#: indistinguishable in time anyway.
+_WEB_EDIT_TABLES: dict[str, list[str]] = {
+    "albums": ["name", "description"],
+    "places": ["name", "latitude", "longitude", "notes"],
+    "people": [
+        "given_name", "middle_name", "surname", "maiden_name", "nickname",
+        "suffix", "birth_year", "death_year", "notes",
+    ],
+    "person_name_variants": ["variant", "kind"],
+    "suggestions": ["payload"],
+}
+
+
+def pull_web_edits(client: WebSyncClient, state_dir: Path) -> dict[str, int]:
+    """Bring the web's human text edits down to the laptop.
+
+    Phase 15's other half. The web can now correct a pending suggestion's
+    wording, a person's name and the rest of `_WEB_EDIT_TABLES`; those
+    rows were born on the laptop (ids below the floor), so without this
+    the next push would hand the old text straight back and the
+    correction would appear to un-happen.
+
+    Only rows the desktop owns travel here. Web-*born* rows (ids at or
+    above the floor) are already web-authoritative and come down through
+    `pull_web_origin`.
+    """
+    state = _load_state(state_dir)
+    cursors: dict[str, str] = dict(state.get("web_edits_cursors") or {})
+    counts = {t: 0 for t in _WEB_EDIT_TABLES}
+
+    # Page until every table is drained. The web caps a page at its
+    # META_BATCH, and one bulk replace there can touch thousands of
+    # pending suggestions, so a single request is not enough. The guard on
+    # `pages` is not expected to fire — it is there so a server that kept
+    # answering `has_more` could never spin this loop forever.
+    for _page in range(200):
+        data = client.pull_web_edits(cursors or None)
+        applied_this_page = _apply_web_edits(data, counts)
+        new_cursors = data.get("cursors") or {}
+        cursors = {k: v for k, v in new_cursors.items() if v}
+        state["web_edits_cursors"] = cursors
+        _save_state(state_dir, state)
+        if not any((data.get("has_more") or {}).values()):
+            break
+        if not applied_this_page and not any(data.get(t) for t in _WEB_EDIT_TABLES):
+            break
+    else:
+        log.warning("pull_web_edits: stopped after 200 pages; run the push again")
+
+    return counts
+
+
+def _apply_web_edits(data: dict, counts: dict[str, int]) -> int:
+    """Apply one page. Returns how many rows this page actually changed.
+
+    A row is updated only when the web's human edit is the newer one. The
+    laptop then stores the web's `edited_on_web_at` too, so the push that
+    follows sends an older `edited_on_desktop_at` and the web's guard
+    keeps its own text — the two tiers agree without either having to
+    remember anything else.
+    """
+    seen = 0
+    with db.connection() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                for table, fields in _WEB_EDIT_TABLES.items():
+                    for row in data.get(table, []) or []:
+                        rid = row.get("id")
+                        edited = row.get("edited_on_web_at")
+                        if not rid or is_web_origin(rid) or not edited:
+                            continue
+                        casts = {"payload": "%s::jsonb"}
+                        sets = ", ".join(
+                            f"{f} = {casts.get(f, '%s')}" for f in fields
+                        )
+                        values = [
+                            json.dumps(row.get(f)) if f == "payload" else row.get(f)
+                            for f in fields
+                        ]
+                        cur.execute(
+                            f"""
+                            update {table}
+                               set {sets}, edited_on_web_at = %s
+                             where id = %s
+                               and (edited_on_desktop_at is null
+                                    or edited_on_desktop_at <= %s)
+                            """,
+                            [*values, edited, rid, edited],
+                        )
+                        if cur.rowcount:
+                            counts[table] += 1
+                            seen += 1
+                            db.audit(
+                                conn, actor="web", action="correction.pull",
+                                entity_type=table, entity_id=rid,
+                                new_value={
+                                    "edited_on_web_at": edited,
+                                    **{f: row.get(f) for f in fields},
+                                },
+                            )
+            if seen:
+                db.audit(conn, actor="web", action="sync.pull.web_edits",
+                         entity_type="sync", entity_id=None, new_value=counts)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return seen
+
+
 def pull_confirmed(
     client: WebSyncClient,
     state_dir: Path,
@@ -404,6 +525,10 @@ def pull_confirmed(
     # Web-born rows first: a face.assign / photo.place.set / relationship
     # fact may point at a face, place or person that only exists on the web.
     pull_web_origin(client, state_dir, working_dir=working_dir, thumbs_dir=thumbs_dir)
+    # Then the web's human text edits to desktop-born rows (Phase 15), so
+    # the push that follows carries the web's wording up again instead of
+    # overwriting it with the laptop's older text.
+    pull_web_edits(client, state_dir)
 
     state = _load_state(state_dir)
     since = state.get("confirmed_cursor")

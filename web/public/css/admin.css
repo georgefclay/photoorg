@@ -181,3 +181,41 @@ table.data .num { text-align: right; font-variant-numeric: tabular-nums; }
   .rescan-thumb { width: 36px; height: 36px; }
   .tickbox { border-color: #000; width: 12px; height: 12px; }
 }
+
+/* ---- corrections (Phase 15) ------------------------------------------ */
+/* Find & replace over pending suggestions. The preview table is the whole
+   point of the screen, so it gets the room; it scrolls sideways on a phone
+   rather than letting the page do it. */
+.correction-fields {
+  display: flex; gap: var(--s3); flex-wrap: wrap; align-items: flex-end;
+  margin-bottom: var(--s3);
+}
+.correction-fields .field { flex: 1 1 14rem; min-width: 0; }
+.correction-fields .field.check { flex: 0 0 auto; }
+.correction-fields input[type="text"] {
+  width: 100%; font-size: 16px; padding: var(--s2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg);
+}
+[data-scope-note] { max-width: 62ch; }
+.correction-group { margin: var(--s4) 0; }
+.correction-group h3 { margin: 0 0 var(--s2); font-size: 1rem; }
+.correction-group .data-table { width: 100%; }
+.correction-group > .data-table { display: block; overflow-x: auto; }
+.correction-group td { vertical-align: top; overflow-wrap: anywhere; }
+.correction-batches { margin-top: var(--s5); }
+.correction-batches .data-table { width: 100%; }
+.correction-batches code { font-size: .85em; }
+
+/* Inline edit of one pending suggestion, on the queue. */
+.edit-text { margin: var(--s2) 0; }
+.edit-text textarea {
+  width: 100%; font: inherit; font-size: 16px; padding: var(--s2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg); resize: vertical;
+}
+
+@media (max-width: 480px) {
+  .correction-fields { gap: var(--s2); }
+  .correction-fields .field { flex: 1 1 100%; }
+}

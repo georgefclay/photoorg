@@ -52,6 +52,68 @@ const shortName = person.nickname || person.given_name || name;
     <div class="card person-notes"><h2 class="sr-only">Notes</h2><p><%= person.notes %></p></div>
   <% } %>
 
+  <%# Phase 15: a person's name is human-visible text, so an admin can
+      correct it here as well as on the laptop. Both sides stamp a
+      human-edit timestamp and the newer one wins, so neither tier's push
+      can quietly undo the other's correction. %>
+  <% if (canEditPerson) { %>
+  <section class="person-edit card" data-person-edit data-person-id="<%= person.id %>">
+    <h2 class="section-h">Correct these details</h2>
+    <button type="button" class="btn ghost small" data-js-only data-act="open-edit">Edit</button>
+    <form data-person-form hidden>
+      <div class="person-edit-grid">
+        <% [['given_name','Given name'],['middle_name','Middle name'],['surname','Surname'],
+            ['maiden_name','Maiden name'],['nickname','Nickname'],['suffix','Suffix']].forEach(function (f) { %>
+          <div class="field">
+            <label for="pe-<%= f[0] %>"><%= f[1] %></label>
+            <input type="text" id="pe-<%= f[0] %>" name="<%= f[0] %>" maxlength="200" value="<%= person[f[0]] || '' %>">
+          </div>
+        <% }) %>
+        <div class="field">
+          <label for="pe-birth_year">Born</label>
+          <input type="number" id="pe-birth_year" name="birth_year" min="1" max="3000" value="<%= person.birth_year == null ? '' : person.birth_year %>">
+        </div>
+        <div class="field">
+          <label for="pe-death_year">Died</label>
+          <input type="number" id="pe-death_year" name="death_year" min="1" max="3000" value="<%= person.death_year == null ? '' : person.death_year %>">
+        </div>
+      </div>
+      <div class="field">
+        <label for="pe-notes">Notes</label>
+        <textarea id="pe-notes" name="notes" rows="3" maxlength="4000"><%= person.notes || '' %></textarea>
+      </div>
+      <p class="notice error" role="alert" data-form-error hidden></p>
+      <div class="actions">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn ghost" type="button" data-act="cancel-edit">Cancel</button>
+        <span class="status muted" role="status"></span>
+      </div>
+    </form>
+
+    <h3 class="rel-title">Also known as</h3>
+    <ul class="variant-list" data-variant-list>
+      <% (person.variants || []).forEach(function (v) { %>
+      <li data-variant-id="<%= v.id %>">
+        <span data-variant-text><%= v.variant %></span>
+        <span class="muted small-text">(<%= String(v.kind).replace(/_/g, ' ') %>)</span>
+        <button type="button" class="btn ghost small" data-js-only data-act="edit-variant">Rename</button>
+      </li>
+      <% }) %>
+    </ul>
+    <form class="variant-add" data-variant-add data-js-only>
+      <label class="sr-only" for="pe-variant">New name variant</label>
+      <input type="text" id="pe-variant" name="variant" maxlength="200" placeholder="Another spelling or nickname">
+      <label class="sr-only" for="pe-variant-kind">Kind</label>
+      <select id="pe-variant-kind" name="kind">
+        <option value="nickname">nickname</option>
+        <option value="alternate_spelling">alternate spelling</option>
+        <option value="misspelling">misspelling</option>
+      </select>
+      <button class="btn secondary" type="submit">Add</button>
+    </form>
+  </section>
+  <% } %>
+
   <section id="family" aria-labelledby="family-h">
     <h2 id="family-h">Family</h2>
     <% if (!groups.length) { %>

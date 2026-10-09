@@ -103,6 +103,10 @@ module.exports = function peoplePageRoutes({ pool }) {
         ...relForm,
       },
       lifeSpan: pp.lifeSpan(person),
+      // Phase 15: admins get an inline editor for the name fields, years,
+      // notes and variants. Contributors never create or rename people -
+      // a new name travels inside a `person` suggestion.
+      canEditPerson: req.user.role === 'admin',
     });
   }
 

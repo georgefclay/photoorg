@@ -12,6 +12,7 @@ The rule that governs the whole schema:
 - Deletes are soft: `is_deleted` and `deleted_at` on every entity that carries them; quarantined files sit at `quarantine_path`.
 - All parent/child FKs are `RESTRICT`; rows are soft-deleted, never removed. `SET NULL` is used only on user references (`*_by`, actor `user_id`) so a suspended user's contributions retain a null attribution.
 - Every state change writes an `audit_log` row with `previous_value` and `new_value` (JSONB), never in image metadata.
+- **Every human-visible text is editable in a UI** (Phase 15). The audit row above is what makes that safe, and the two columns below are what make the correction survive a round trip between the tiers.
 
 ## Id ranges (Phase 9 fix-up 1)
 
@@ -23,6 +24,38 @@ Migration `phase-9-fixup-1-web-origin-ids` is gated on
 `PHOTOORG_DB_ROLE=web` and is a recorded no-op otherwise. `users`,
 `groups`, `comments`, `likes`, `contributions` are web-only tables and
 need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
+
+## Human-edit timestamps (Phase 15)
+
+`edited_on_desktop_at` and `edited_on_web_at` (both `timestamptz`, null
+until a human edits the row) sit on the five tables the web can edit:
+`suggestions`, `people`, `person_name_variants`, `places`, `albums`.
+
+They exist because **`updated_at` cannot mean what a cross-tier
+last-writer-wins needs it to mean.** Every `/sync/*` upsert sets
+`updated_at = now()`, so on the web that column records *when a push last
+touched this row*, never *when a human edited it*; a comparison over it
+would find the web newer than the laptop for every row after every push.
+This is the same trap that forced `photos.tombstoned_at` to be its own
+column, and these two are the third and fourth members of that family.
+
+The rules:
+- They are written **only** by a human edit in a UI — the desktop's
+  Corrections / People / album / place editors, and the web's admin
+  editors. Never by a job, an upsert, a sweep or a migration.
+- The LWW itself is one SQL function, `sync_web_edit_wins(web, desktop)`:
+  the web has an edit and the desktop's is no newer. **Ties go to the
+  web** — it is the copy a relative is looking at.
+- `web/routes/sync.js`'s `WEB_EDITABLE` lists the guarded columns per
+  table; it is the same list the desktop's `pull_web_edits` applies and
+  `/sync/pull/web_edits` returns.
+- Only *wording* is guarded. `is_deleted` (a decision) and
+  `person_name_variants.person_id` (which person owns the name, re-parented
+  by a desktop merge) stay desktop-authoritative in every direction.
+
+`comments.edited_at` is separate and simpler: null until the first edit,
+non-null renders "(edited)" on the photo page. Comment bodies are
+web-authoritative and never travel to the laptop.
 
 ## Tables
 
@@ -49,7 +82,7 @@ need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
 ### People, names, relationships
 
 - **`people`** — one row per person. `given_name`, `middle_name`, `surname`, `maiden_name`, `nickname`, `suffix` (Jr./II/III…, Phase 6 fix-up 4), `birth_year`, `death_year`, `notes`, `is_deleted`. `display_name` is trigger-maintained from the parts: e.g. `Margaret "Peggy" Clay (née Schmidt)`, `George Clay Jr.`, `John "Jack" Smith III`.
-- **`person_name_variants`** — hand-curated aliases per person (nickname / misspelling / alternate_spelling). Unique `(person_id, lower(variant))`; GIN trigram index on `variant` for fuzzy match.
+- **`person_name_variants`** — hand-curated aliases per person (nickname / misspelling / alternate_spelling). Unique `(person_id, lower(variant))`; GIN trigram index on `variant` for fuzzy match. Phase 15 added `updated_at` (+ `set_updated_at`) and the human-edit pair; a variant's *text* is now correctable on either tier, but there is still no soft-delete, so a variant **removed** on the desktop does not reach the web.
 - **`relationships`** — pairwise, typed `parent|spouse|sibling`. Check `person_a_id <> person_b_id`; unique on `(person_a_id, person_b_id, type)`. Grandparent / cousin are derived by traversal at query time, never stored.
 - **`nickname_dictionary`** — canonical→variant pairs shared across everyone (Rick→Richard, Peggy→Margaret, …). Populated from `seed/nicknames.csv` (Apache-2.0 list from carltonnorthern/nicknames). Phase 11 search joins against this; it is NOT per-person data.
 
@@ -59,10 +92,10 @@ need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
 
 ### Places and albums
 
-- **`places`** — `name` unique on `lower(name)`, optional `latitude`/`longitude`, `notes`, `is_deleted`.
-- **`photo_places`** — PK `(photo_id, place_id)`, `confirmed` bool. Confirmed by admin promotion of a place suggestion.
-- **`albums`** — `name`, `description`, `created_by`, `source` (`manual|import`), `is_deleted`. Named scan folders become `source='import'` albums at ingest.
-- **`album_photos`** — PK `(album_id, photo_id)`, `position` for ordering.
+- **`places`** — `name` unique on `lower(name)`, optional `latitude`/`longitude`, `notes`, `is_deleted`. Plus the Phase 15 human-edit pair.
+- **`photo_places`** — PK `(photo_id, place_id)`, `confirmed` bool. Confirmed by admin promotion of a place suggestion. **Soft-delete since Phase 15** (`is_deleted / deleted_at / deleted_by / updated_at` + `set_updated_at`, live partial index): it was insert-or-update-only and the push only upserts, so a desktop "take this photo off this place" never reached the VM. Syncs by LWW on `updated_at`, like `photo_groups`. Every reader filters `is_deleted = false`, including the search vector.
+- **`albums`** — `name`, `description`, `created_by`, `source` (`manual|import`), `is_deleted`. Named scan folders become `source='import'` albums at ingest. Plus the Phase 15 human-edit pair. Desktop-authoritative: the web cannot create, rename or re-order albums yet (PROJECT-PLAN §5 item 11), though a web *name* edit would be carried down by `/sync/pull/web_edits` if one existed.
+- **`album_photos`** — PK `(album_id, photo_id)`, `position` for ordering. **Soft-delete since Phase 15**, same shape and same reason as `photo_places` above.
 
 ### Users, access, sessions
 
@@ -73,7 +106,7 @@ need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
 
 ### Contributions
 
-- **`comments`** — per-photo threaded remarks. `is_hidden` + `hidden_by` + `hidden_at` for moderation. Hidden comments are excluded from the search vector.
+- **`comments`** — per-photo threaded remarks. `is_hidden` + `hidden_by` + `hidden_at` for moderation. Hidden comments are excluded from the search vector. `edited_at` (Phase 15) is null until the first edit and drives the "(edited)" marker: the author may edit their own body and an admin any, both audited as `comment.edit`; moderators keep hide/unhide only. Web-only — bodies never travel to the laptop, which is why `/sync/pull/confirmed` sends comment *summaries*.
 - **`likes`** — PK `(user_id, photo_id)`.
 - **`suggestions`** — the queue of pending facts (see rule above). `kind` enum; `payload` JSONB with a shape per kind (see below); `source` (`human|ai|import`); `model` for AI provenance; `confidence` real; resolution fields for the admin who promotes or rejects it. `photo_id` is nullable — relationship suggestions have no photo. This is soft — app code enforces payload shape; there is no check constraint.
 
@@ -242,7 +275,7 @@ recreates them); there is one search path now.
 
 - **`photo_search`** — `photo_id` PK (cascades with the photo), `tsv`, `names`, `updated_at`. `tsv` is `to_tsvector('english', unaccent(...))` with weights: **A** `photos.description_ai` + the names of people tagged on the photo; **B** back-of-print transcriptions; **C** non-hidden comments, album names, place names, the newest pending `description` suggestion (text + tags), pending `person`/`place` suggestion names, pending `date` evidence; **D** `source_folder`, `source_filename`, `physical_ref_note` and the scan locator. `names` is the tagged people's display names, `' | '`-joined (it backs the result card's "why" line). GIN on `tsv`, GIN trigram on `names`.
 - **`person_search`** — `(person_id, token, kind)` PK, plus `phonetic`. One row per string a person can be called, normalised by `search_token()` (lower-cased, unaccented, punctuation to spaces). `kind` is `exact` (the `people` name columns), `variant` (`person_name_variants`, the whole string **and** each word) or `nickname` (`nickname_dictionary`, **both** directions — a Margaret gets peggy/peg/meg, a Peggy gets margaret). `phonetic` is `dmetaphone(token)` for single-word tokens; the constraint also allows a hand-added `phonetic` row. Indexes: btree on `token`, GIN trigram on `token`, btree on `phonetic`.
-- **`place_aliases`** — `(place_id, alias)` PK (composite on purpose: no bigserial, so the desktop/web id-range rule does not apply), `kind`, `created_at`, plus a case-insensitive unique index and a trigram index. **No sync route yet** — like album edits, pulling these back to the desktop is an open item for Phase 12.
+- **`place_aliases`** — `(place_id, alias)` PK (composite on purpose: no bigserial, so the desktop/web id-range rule does not apply), `kind`, `created_at`, plus a case-insensitive unique index and a trigram index. **`/sync/place_aliases` ships in Phase 15** and is desktop-authoritative: the text *is* the key, so there is no soft-delete to carry a removal, and the push therefore sends each place's whole alias set — an alias-less place included, since the empty set is the only way "the last alias was removed" can travel. The web has no alias editor.
 - **Helpers**: `search_token(text)`, `search_text(text)`, `photo_date_range(date, precision)` → `daterange` (a decade-precision photo covers its decade, which is how a year search finds it and a decade search finds a year-precision photo), `suggestion_date_range(jsonb)`, `search_suggestion_text(kind, payload)` (deliberately ignores `classification` — the model's reasoning sentence would swamp every other layer).
 - **Maintenance**: `refresh_photo_search(id)` / `refresh_photos_search(ids)` and `refresh_person_search(id)` / `refresh_people_search(ids)`; full rebuild `rebuild_search()` (`rebuild_photo_search()` + `rebuild_person_search()`). Triggers are statement-level with transition tables on `photos`, `photo_backs`, `comments`, `faces`, `suggestions`, `album_photos`, `photo_places`, `albums`, `places`, `people`, `person_name_variants`; an update trigger cannot carry a column list alongside transition tables, so each update function compares the old and new transition tables itself (a sync push that only bumps `file_version`, or a jobs run that only writes embeddings, refreshes nothing).
 - **Bulk-write escape hatch**: measured cost of the triggers is ~4.8 s per 10 000 rows (5 000 faces + 5 000 suggestions over 5 000 photos in one transaction: 0.27 s → 5.07 s). A session doing a big batch may `set local photoarchive.search_defer = on`, which queues photo / person ids into `photo_search_dirty` / `person_search_dirty` instead; `select sweep_search()` afterwards drains them. **Off by default** — nothing sets it today, and if you do set it, sweeping is not optional.

@@ -1,0 +1,78 @@
+<% page.title = 'Corrections'; page.nav = 'admin'; page.css.push('/css/admin.css'); page.js.push('/js/corrections.js') %>
+<%- include('_head', {
+  title: 'Corrections',
+  sub: 'Find and replace across pending suggestions. Every change is audited row by row, and the whole batch can be undone.',
+}) %>
+
+<form class="correction-form" data-correction-form>
+  <div class="correction-fields">
+    <div class="field">
+      <label for="q">Find</label>
+      <input type="text" id="q" name="q" autocomplete="off" required maxlength="500">
+    </div>
+    <div class="field">
+      <label for="replace">Replace with</label>
+      <input type="text" id="replace" name="replace" autocomplete="off" maxlength="500">
+    </div>
+    <div class="field check">
+      <label><input type="checkbox" name="match_case" checked> Match case</label>
+    </div>
+    <div class="field">
+      <button class="btn" type="submit">Preview</button>
+    </div>
+  </div>
+  <p class="notice error" role="alert" data-form-error hidden></p>
+</form>
+
+<p class="muted" data-scope-note>
+  This searches the text of <strong>pending</strong> suggestions only — descriptions,
+  back-of-print transcriptions and date evidence. Album names, people, places,
+  place aliases and physical-reference notes are corrected in the desktop app's
+  Corrections tool, which owns them. A suggestion that has already been accepted
+  or rejected is left alone: its text is what the decision was made on.
+</p>
+
+<section class="correction-preview" data-preview hidden aria-live="polite">
+  <h2 class="section-h">Preview <span class="muted small-text" data-preview-count></span></h2>
+  <div data-groups></div>
+  <div class="actions">
+    <button type="button" class="btn" data-act="apply">Apply</button>
+    <span class="status muted" role="status" data-apply-status></span>
+  </div>
+</section>
+
+<section class="correction-batches">
+  <h2 class="section-h">Recent corrections</h2>
+  <% if (!batches.length) { %>
+    <p class="muted">None yet.</p>
+  <% } else { %>
+  <table class="data-table">
+    <thead>
+      <tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">Rows</th><th scope="col">By</th><th scope="col"></th></tr>
+    </thead>
+    <tbody>
+      <% batches.forEach(function (b) { %>
+      <tr data-batch="<%= b.batch_id %>">
+        <td><time datetime="<%= new Date(b.created_at).toISOString() %>"><%= fmt.relTime(b.created_at) %></time></td>
+        <td><code><%= b.search %></code> &rarr; <code><%= b.replace %></code></td>
+        <td><%= b.changed.toLocaleString('en-US') %></td>
+        <td><%= b.actor %></td>
+        <td>
+          <% if (b.undone) { %>
+            <span class="muted small-text">undone</span>
+          <% } else { %>
+            <button type="button" class="btn ghost small" data-js-only data-act="undo">Undo</button>
+          <% } %>
+          <span class="status muted" role="status"></span>
+        </td>
+      </tr>
+      <% }) %>
+    </tbody>
+  </table>
+  <p class="muted small-text">
+    Undo restores only the rows that still hold what the correction wrote.
+    Anything edited since is left alone and listed by id, so an undo can never
+    overwrite newer work.
+  </p>
+  <% } %>
+</section>

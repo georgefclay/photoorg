@@ -195,7 +195,7 @@ function termHitsSql(term, params) {
     parts.push(`
       select pp.photo_id, ${ix}, 'place_${kind}', ${score}, pp.place_id::text
         from photo_places pp
-       where pp.place_id = any(${idsP})`);
+       where pp.place_id = any(${idsP}) and pp.is_deleted = false`);
     parts.push(`
       select s.photo_id, ${ix}, 'place_${kind}_suggested', ${score - SUGGESTED_PENALTY},
              s.payload->>'place_id'
@@ -390,10 +390,10 @@ async function explainTexts(pool, ids) {
               order by s.id desc limit 1) as pending_desc,
             (select string_agg(a.name, ' / ') from album_photos ap
                join albums a on a.id = ap.album_id and a.is_deleted = false
-              where ap.photo_id = p.id) as album_text,
+              where ap.photo_id = p.id and ap.is_deleted = false) as album_text,
             (select string_agg(pc.name, ' / ') from photo_places php
                join places pc on pc.id = php.place_id and pc.is_deleted = false
-              where php.photo_id = p.id) as place_text,
+              where php.photo_id = p.id and php.is_deleted = false) as place_text,
             (select string_agg(s.payload->>'evidence', ' / ') from suggestions s
               where s.photo_id = p.id and s.status = 'pending' and s.kind = 'date') as evidence_text
        from photos p
@@ -603,7 +603,7 @@ async function autocompleteSearch(pool, user, q, scope) {
        cross join lateral (
          select count(*)::int as n
            from photo_places pp join photos ph on ph.id = pp.photo_id
-          where pp.place_id = pl.id and ${photoWhere}
+          where pp.place_id = pl.id and pp.is_deleted = false and ${photoWhere}
        ) cnt
       where pl.is_deleted = false and cnt.n > 0
         and (search_token(pl.name) = (select tok from tok)

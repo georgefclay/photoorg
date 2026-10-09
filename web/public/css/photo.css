@@ -167,3 +167,14 @@
 .photo-about .wrap { overflow-wrap: anywhere; }
 
 @media (prefers-reduced-motion: reduce) { .pending-list li.fresh, .comment.fresh { animation: none; } }
+
+/* ---- comment editing (Phase 15) -------------------------------------- */
+/* Editing swaps the paragraph for a textarea in place, so the comment
+   keeps its position in the thread while being corrected. */
+.comment-actions { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
+.comment-edit-field {
+  width: 100%; margin-top: var(--s2); font: inherit; font-size: 16px;
+  padding: var(--s2); border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg); resize: vertical;
+}
+.comment-actions:empty { display: none; }

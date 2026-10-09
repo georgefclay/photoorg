@@ -616,8 +616,8 @@ def add_name_variant(
         return None
     row = conn.execute(
         """
-        insert into person_name_variants (person_id, variant, kind)
-        values (%s, %s, %s)
+        insert into person_name_variants (person_id, variant, kind, edited_on_desktop_at)
+        values (%s, %s, %s, now())
         on conflict do nothing
         returning id
         """,
@@ -846,7 +846,14 @@ def update_person(conn: psycopg.Connection, person_id: int, **fields) -> None:
     if not cols:
         return
     vals.append(person_id)
-    conn.execute(f"update people set {', '.join(cols)} where id = %s", vals)
+    # `edited_on_desktop_at` marks this as a *human* edit in a UI, which is
+    # what the Phase 15 cross-tier LWW compares (never `updated_at` — every
+    # /sync/* upsert sets that, so on the web it means "when a push last
+    # touched this row"). Ties go to the web.
+    conn.execute(
+        f"update people set {', '.join(cols)}, edited_on_desktop_at = now() where id = %s",
+        vals,
+    )
     dbmod.audit(
         conn, actor="desktop", action="person.update",
         entity_type="person", entity_id=person_id,

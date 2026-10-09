@@ -34,6 +34,14 @@ PHASE6_TABLES = (
     "job_runs",
     "job_items",
     "ingest_failures",
+    # Phase 15 Corrections sweeps these too, and a stale album or place
+    # left behind by an earlier test would show up in its find & replace
+    # counts.
+    "album_photos",
+    "albums",
+    "photo_places",
+    "place_aliases",
+    "places",
 )
 
 

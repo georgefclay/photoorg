@@ -6,6 +6,7 @@
 //
 //   /admin                    dashboard            admin + moderators (scoped)
 //   /admin/suggestions        suggestions queue    admin
+//   /admin/corrections        bulk find & replace  admin
 //   /admin/disputes           disputed face tags   admin
 //   /admin/contributions      upload review        admin + moderators (scoped)
 //   /admin/groups             groups list          admin + moderators (their groups)
@@ -18,6 +19,7 @@
 const express = require('express');
 const { requireUser, requireAdmin } = require('../middleware/require-user');
 const svc = require('../services/admin');
+const corrections = require('../services/corrections');
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -75,6 +77,18 @@ module.exports = function adminPageRoutes({ pool }) {
         nextUrl: nextCursor ? `/admin/suggestions${qs({ source, kind, cursor: nextCursor })}` : null,
         firstUrl: `/admin/suggestions${qs({ source, kind })}`,
         link: (over) => `/admin/suggestions${qs({ source, kind, ...over })}`,
+      });
+    } catch (err) { next(err); }
+  });
+
+  // ---- corrections ----------------------------------------------------
+  // Phase 15. Bulk find & replace across pending suggestions, with the
+  // same preview / apply / undo shape as the desktop's Corrections tool.
+  // Admin only: a moderator hides a comment, an admin rewrites text.
+  router.get('/corrections', requireAdmin, async (req, res, next) => {
+    try {
+      res.render('admin/corrections', {
+        batches: await corrections.listBatches(pool),
       });
     } catch (err) { next(err); }
   });

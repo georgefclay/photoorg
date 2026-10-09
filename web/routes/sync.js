@@ -31,10 +31,13 @@
 //   POST /sync/photo_backs             batch upsert (metadata + transcription)
 //   POST /sync/suggestions             batch upsert (AI + import)
 //
+//   POST /sync/place_aliases           per-place alias set, replaced wholesale
+//
 //   POST /sync/photo_groups            batch upsert (soft-delete rows sync as-is)
 //   GET  /sync/pull/groups             groups + memberships + photo_groups since cursor
 //   GET  /sync/pull/confirmed          accepted-suggestion facts + updates since cursor
 //   GET  /sync/pull/web_origin         web-born people/places/relationships/faces since cursor
+//   GET  /sync/pull/web_edits          web *text edits* to desktop-born rows since cursor
 //   GET  /sync/pull/contributions      status=approved, pulled=false
 //   GET  /sync/pull/contributions/:id/files/:file_id
 //   POST /sync/pull/contributions/:id/pulled
@@ -42,6 +45,23 @@
 //
 // Batch cap: 500 rows per metadata batch (200 for /sync/photos to keep
 // the "which need files" hop responsive).
+//
+// Phase 15 — the cross-tier last-writer-wins on human-visible text.
+// `updated_at` cannot carry it: every upsert below sets `updated_at =
+// now()`, so on the web that column means "when a push last touched this
+// row", not "when a human edited it" (the same trap that forced
+// `tombstoned_at` to be its own column). So the five editable tables
+// carry `edited_on_desktop_at` / `edited_on_web_at`, written only by a
+// human edit in a UI, and the rule lives in one SQL function —
+// `sync_web_edit_wins(web, desktop)`. `WEB_EDITABLE` below lists, per
+// table, exactly which columns it guards; it is the same list the
+// desktop's `pull_web_edits` applies, and `/sync/pull/web_edits` sends
+// those columns back down. A guarded column still travels in every
+// direction — it is only the *older* human edit that loses.
+//
+// `album_photos` and `photo_places` also gained the soft-delete shape
+// `photo_groups` has had since Phase 9, so a desktop removal finally
+// reaches the site instead of leaving the photo on display there.
 
 const express = require('express');
 const multer = require('multer');
@@ -60,6 +80,34 @@ const PHOTO_BATCH = 200;
 const META_BATCH  = 500;
 
 function toArr(x) { return Array.isArray(x) ? x : []; }
+
+// Phase 15: the columns a human can edit on the web, per table. One list,
+// used three ways — the `do update set` guards below, the desktop's
+// `pull_web_edits` applier, and `/sync/pull/web_edits`'s select — so the
+// three cannot drift into disagreeing about what "the text" is.
+const WEB_EDITABLE = {
+  albums:               ['name', 'description'],
+  places:               ['name', 'latitude', 'longitude', 'notes'],
+  people:               ['given_name', 'middle_name', 'surname', 'maiden_name',
+                         'nickname', 'suffix', 'birth_year', 'death_year', 'notes'],
+  person_name_variants: ['variant', 'kind'],
+  suggestions:          ['payload'],
+};
+
+// `col = <stored> when the web's edit is the newer human one, else <incoming>`.
+// Spelled once rather than nine times in the people upsert.
+function keepWebEdit(table, col) {
+  return `${col} = case when sync_web_edit_wins(${table}.edited_on_web_at, excluded.edited_on_desktop_at)
+                        then ${table}.${col} else excluded.${col} end`;
+}
+
+function keepWebEdits(table) {
+  return WEB_EDITABLE[table].map((c) => keepWebEdit(table, c)).join(',\n       ');
+}
+
+// Both are attached to `module.exports` at the foot of this file, for
+// `test/sync-resync.test.js` — see the note there.
+
 function bad(res, msg, code = 400, extra) { return res.status(code).json({ error: msg, ...(extra || {}) }); }
 
 // 400 when a desktop batch carries an id in the web-origin range.
@@ -373,44 +421,49 @@ module.exports = function syncRoutes({ pool }) {
     },
   ));
 
+  // The nine name/bio columns are guarded: an admin may now edit a
+  // desktop-born person on the web, and the next push must not hand the
+  // old name straight back. `is_deleted` is NOT guarded — a soft-delete
+  // on the laptop is a decision, not a wording, and stays
+  // desktop-authoritative.
   router.post('/people', batchUpsert('people',
     `insert into people (id, given_name, middle_name, surname, maiden_name, nickname, suffix,
-                         birth_year, death_year, notes, is_deleted, updated_at, created_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),coalesce($12::timestamptz, now()))
+                         birth_year, death_year, notes, is_deleted,
+                         edited_on_desktop_at, updated_at, created_at)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),coalesce($13::timestamptz, now()))
      on conflict (id) do update set
-       given_name = excluded.given_name,
-       middle_name = excluded.middle_name,
-       surname = excluded.surname,
-       maiden_name = excluded.maiden_name,
-       nickname = excluded.nickname,
-       suffix = excluded.suffix,
-       birth_year = excluded.birth_year,
-       death_year = excluded.death_year,
-       notes = excluded.notes,
+       ${keepWebEdits('people')},
        is_deleted = excluded.is_deleted,
+       edited_on_desktop_at = excluded.edited_on_desktop_at,
        updated_at = now()
      where people.id < ${WEB_ID_FLOOR}`,
     (r) => {
       const id = Number(r.id);
       if (!id) return null;
       return [id, r.given_name, r.middle_name, r.surname, r.maiden_name, r.nickname, r.suffix,
-              r.birth_year, r.death_year, r.notes, !!r.is_deleted, r.created_at];
+              r.birth_year, r.death_year, r.notes, !!r.is_deleted,
+              r.edited_on_desktop_at || null, r.created_at];
     },
     { webOriginIds: true },
   ));
 
   router.post('/person_name_variants', batchUpsert('person_name_variants',
-    `insert into person_name_variants (id, person_id, variant, kind, created_at)
-     values ($1,$2,$3,$4,coalesce($5::timestamptz, now()))
+    `insert into person_name_variants (id, person_id, variant, kind,
+                                       edited_on_desktop_at, created_at)
+     values ($1,$2,$3,$4,$5,coalesce($6::timestamptz, now()))
      on conflict (id) do update set
        -- person_id must be here: a desktop person merge re-parents the
        -- variant onto the winner (modes/faces/merge.py) without changing
        -- its id, so leaving it out left the web pointing the nickname at
        -- the soft-deleted loser and person_search stopped finding it.
+       -- It is deliberately NOT guarded by the Phase 15 LWW: a merge is a
+       -- desktop decision about which person owns the name, not a wording.
        person_id = excluded.person_id,
-       variant = excluded.variant, kind = excluded.kind
+       ${keepWebEdits('person_name_variants')},
+       edited_on_desktop_at = excluded.edited_on_desktop_at
      where person_name_variants.id < ${WEB_ID_FLOOR}`,
-    (r) => [Number(r.id), r.person_id, r.variant, r.kind, r.created_at],
+    (r) => [Number(r.id), r.person_id, r.variant, r.kind,
+            r.edited_on_desktop_at || null, r.created_at],
     { webOriginIds: true },
   ));
 
@@ -438,17 +491,17 @@ module.exports = function syncRoutes({ pool }) {
   ));
 
   router.post('/places', batchUpsert('places',
-    `insert into places (id, name, latitude, longitude, notes, is_deleted, updated_at, created_at)
-     values ($1,$2,$3,$4,$5,$6, now(), coalesce($7::timestamptz, now()))
+    `insert into places (id, name, latitude, longitude, notes, is_deleted,
+                         edited_on_desktop_at, updated_at, created_at)
+     values ($1,$2,$3,$4,$5,$6,$7, now(), coalesce($8::timestamptz, now()))
      on conflict (id) do update set
-       name = excluded.name,
-       latitude = excluded.latitude,
-       longitude = excluded.longitude,
-       notes = excluded.notes,
+       ${keepWebEdits('places')},
        is_deleted = excluded.is_deleted,
+       edited_on_desktop_at = excluded.edited_on_desktop_at,
        updated_at = now()
      where places.id < ${WEB_ID_FLOOR}`,
-    (r) => [Number(r.id), r.name, r.latitude, r.longitude, r.notes, !!r.is_deleted, r.created_at],
+    (r) => [Number(r.id), r.name, r.latitude, r.longitude, r.notes, !!r.is_deleted,
+            r.edited_on_desktop_at || null, r.created_at],
     {
       webOriginIds: true,
       // places.name is unique on lower(name): a same-named place created
@@ -464,33 +517,119 @@ module.exports = function syncRoutes({ pool }) {
     },
   ));
 
+  // Phase 15 gave `photo_places` and `album_photos` the soft-delete shape
+  // `photo_groups` has had since Phase 9. Before that both tables were
+  // insert-or-update-only and the push only upserts, so a desktop
+  // "take this photo out of the album / off this place" never reached the
+  // web and the site went on showing it. LWW by `updated_at`, exactly as
+  // /sync/photo_groups does it: strictly older incoming is rejected,
+  // equal or newer wins.
   router.post('/photo_places', batchUpsert('photo_places',
-    `insert into photo_places (photo_id, place_id, confirmed)
-     values ($1, $2, $3)
-     on conflict (photo_id, place_id) do update set confirmed = excluded.confirmed`,
-    (r) => [Number(r.photo_id), Number(r.place_id), !!r.confirmed],
+    `insert into photo_places (photo_id, place_id, confirmed, is_deleted, deleted_at, updated_at)
+     values ($1, $2, $3, $4, $5, now())
+     on conflict (photo_id, place_id) do update set
+       confirmed = excluded.confirmed,
+       is_deleted = excluded.is_deleted,
+       deleted_at = excluded.deleted_at,
+       updated_at = now()
+     where photo_places.updated_at <= coalesce($6::timestamptz, photo_places.updated_at)`,
+    (r) => [Number(r.photo_id), Number(r.place_id), !!r.confirmed,
+            !!r.is_deleted, r.deleted_at || null, r.updated_at || null],
   ));
 
   router.post('/albums', batchUpsert('albums',
-    `insert into albums (id, name, description, source, created_by, is_deleted, updated_at, created_at)
-     values ($1,$2,$3,$4,$5,$6,now(),coalesce($7::timestamptz, now()))
+    `insert into albums (id, name, description, source, created_by, is_deleted,
+                         edited_on_desktop_at, updated_at, created_at)
+     values ($1,$2,$3,$4,$5,$6,$7,now(),coalesce($8::timestamptz, now()))
      on conflict (id) do update set
-       name = excluded.name,
-       description = excluded.description,
+       ${keepWebEdits('albums')},
        source = excluded.source,
        is_deleted = excluded.is_deleted,
+       edited_on_desktop_at = excluded.edited_on_desktop_at,
        updated_at = now()
      where albums.id < ${WEB_ID_FLOOR}`,
-    (r) => [Number(r.id), r.name, r.description, r.source || 'import', r.created_by, !!r.is_deleted, r.created_at],
+    (r) => [Number(r.id), r.name, r.description, r.source || 'import', r.created_by,
+            !!r.is_deleted, r.edited_on_desktop_at || null, r.created_at],
     { webOriginIds: true },
   ));
 
   router.post('/album_photos', batchUpsert('album_photos',
-    `insert into album_photos (album_id, photo_id, position)
-     values ($1, $2, $3)
-     on conflict (album_id, photo_id) do update set position = excluded.position`,
-    (r) => [Number(r.album_id), Number(r.photo_id), r.position],
+    `insert into album_photos (album_id, photo_id, position, is_deleted, deleted_at, updated_at)
+     values ($1, $2, $3, $4, $5, now())
+     on conflict (album_id, photo_id) do update set
+       position = excluded.position,
+       is_deleted = excluded.is_deleted,
+       deleted_at = excluded.deleted_at,
+       updated_at = now()
+     where album_photos.updated_at <= coalesce($6::timestamptz, album_photos.updated_at)`,
+    (r) => [Number(r.album_id), Number(r.photo_id), r.position,
+            !!r.is_deleted, r.deleted_at || null, r.updated_at || null],
   ));
+
+  // `place_aliases` keys on (place_id, alias) and has no soft-delete — the
+  // text *is* the key, so there is nothing to flag. The desktop therefore
+  // sends each place's whole alias set and this route replaces it, which
+  // is how both a correction and a removal travel. Desktop-authoritative:
+  // the web has no alias editor, so nothing here can lose a web edit.
+  // (Phase 15 answer 6 — closes the place_aliases half of PROJECT-PLAN
+  // section 5 item 11.)
+  router.post('/place_aliases', async (req, res, next) => {
+    const rows = toArr(req.body && req.body.items);
+    if (rows.length > META_BATCH) return bad(res, `too many items (max ${META_BATCH})`);
+    if (rows.length === 0) return res.json({ upserted: 0 });
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      let places = 0;
+      let aliases = 0;
+      let removed = 0;
+      for (const r of rows) {
+        const placeId = Number(r.place_id);
+        if (!placeId) continue;
+        // Only places the desktop owns, and only ones the web holds: a
+        // place that has not been pushed yet has nothing to alias.
+        if (placeId >= WEB_ID_FLOOR) continue;
+        const exists = (await client.query(
+          'select 1 from places where id = $1', [placeId],
+        )).rows.length > 0;
+        if (!exists) continue;
+
+        const incoming = toArr(r.aliases)
+          .map((a) => ({ alias: String(a.alias || '').trim(), kind: a.kind || 'alias', created_at: a.created_at || null }))
+          .filter((a) => a.alias);
+
+        // An empty incoming set removes every alias — `alias <> all('{}')`
+        // is vacuously true — which is exactly right: "this place now has
+        // no aliases" is the one state a soft-delete column would have
+        // represented.
+        const del = await client.query(
+          `delete from place_aliases
+            where place_id = $1 and alias <> all($2::text[])`,
+          [placeId, incoming.map((a) => a.alias)],
+        );
+        removed += del.rowCount;
+        for (const a of incoming) {
+          await client.query(
+            `insert into place_aliases (place_id, alias, kind, created_at)
+             values ($1, $2, $3, coalesce($4::timestamptz, now()))
+             on conflict (place_id, alias) do update set kind = excluded.kind`,
+            [placeId, a.alias, a.kind, a.created_at],
+          );
+          aliases += 1;
+        }
+        places += 1;
+      }
+      await auditDesktop(client, 'sync.place_aliases.upsert', 'place_aliases', null,
+        { places, aliases, removed });
+      await client.query('commit');
+      res.json({ upserted: places, aliases, removed });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
 
   // /sync/faces — the desktop is authoritative for the face row itself
   // (bbox / person_id / disputed / review_status / is_deleted / embedding).
@@ -613,16 +752,24 @@ module.exports = function syncRoutes({ pool }) {
     },
   ));
 
+  // `payload` is guarded by the Phase 15 LWW: an admin may re-word a
+  // pending suggestion on the web before accepting it, and a push of the
+  // laptop's still-original text must not undo that. The guard protects
+  // the *wording* only — the status machinery below is unchanged, and the
+  // two are independent (a web re-word followed by a desktop accept still
+  // accepts, carrying the web's text).
   router.post('/suggestions', batchUpsert('suggestions',
     `insert into suggestions
        (id, photo_id, user_id, kind, payload, confidence, status, source, model,
-        resolved_by, resolved_at, resolution_note, updated_at, created_at)
-     values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12, now(), coalesce($13::timestamptz, now()))
+        resolved_by, resolved_at, resolution_note, edited_on_desktop_at,
+        updated_at, created_at)
+     values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13, now(), coalesce($14::timestamptz, now()))
      on conflict (id) do update set
        photo_id = excluded.photo_id,
        user_id = excluded.user_id,
        kind = excluded.kind,
-       payload = excluded.payload,
+       ${keepWebEdits('suggestions')},
+       edited_on_desktop_at = excluded.edited_on_desktop_at,
        confidence = excluded.confidence,
        source = excluded.source,
        model = excluded.model,
@@ -640,7 +787,8 @@ module.exports = function syncRoutes({ pool }) {
      where suggestions.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.photo_id, r.user_id, r.kind, r.payload,
             r.confidence, r.status || 'pending', r.source || 'ai',
-            r.model, r.resolved_by, r.resolved_at, r.resolution_note, r.created_at],
+            r.model, r.resolved_by, r.resolved_at, r.resolution_note,
+            r.edited_on_desktop_at || null, r.created_at],
     { webOriginIds: true },
   ));
 
@@ -783,6 +931,64 @@ module.exports = function syncRoutes({ pool }) {
         comments_summary: commentSummary,
         likes_counts: likeCounts,
       });
+    } catch (err) { next(err); }
+  });
+
+  // /sync/pull/web_edits?since=<ts>
+  //   Phase 15's other half. The web can now correct human-visible text on
+  //   rows the *laptop* owns (ids < floor): a pending suggestion's wording,
+  //   a person's name, an album title. Without this the next push would
+  //   hand the old text straight back — the guards in the upserts above
+  //   stop the clobber, but only this makes the laptop agree.
+  //
+  //   Paged on `edited_on_web_at`, not `updated_at`: `updated_at` moves on
+  //   every push, so a cursor over it would re-send every row forever and
+  //   still miss nothing useful. Web-born rows are left out — they travel
+  //   as whole rows through /pull/web_origin, where the web is
+  //   authoritative outright rather than by timestamp.
+  //
+  //   The cursor is **composite** (`<iso>|<id>`), per table, and that is
+  //   load-bearing rather than tidiness: the web's bulk find & replace
+  //   stamps every row it changes inside one transaction, so a thousand
+  //   rows share one `edited_on_web_at` to the microsecond. A
+  //   timestamp-only cursor with a page limit would hand back the same
+  //   first page forever — `edited_on_web_at > since` can never get past a
+  //   tie. `(edited_on_web_at, id)` always advances. `has_more` tells the
+  //   desktop to come straight back for the next page.
+  router.get('/pull/web_edits', async (req, res, next) => {
+    try {
+      const asked = req.query.cursors;
+      let given = {};
+      if (asked) {
+        try {
+          given = typeof asked === 'string' ? JSON.parse(asked) : asked;
+        } catch { return bad(res, 'bad cursors'); }
+        if (!given || typeof given !== 'object') return bad(res, 'bad cursors');
+      }
+      const out = { cursors: {}, has_more: {} };
+      for (const [table, cols] of Object.entries(WEB_EDITABLE)) {
+        const [rawTs, rawId] = String(given[table] || '').split('|');
+        const ts = rawTs ? new Date(rawTs) : new Date(0);
+        if (isNaN(ts.getTime())) return bad(res, `bad cursor for ${table}`);
+        const afterId = Number(rawId) || 0;
+        const { rows } = await pool.query(
+          `select id, ${cols.join(', ')}, edited_on_web_at
+             from ${table}
+            where id < $1
+              and edited_on_web_at is not null
+              and (edited_on_web_at, id) > ($2::timestamptz, $3::bigint)
+            order by edited_on_web_at, id
+            limit ${META_BATCH}`,
+          [WEB_ID_FLOOR, ts, afterId],
+        );
+        out[table] = rows;
+        out.has_more[table] = rows.length === META_BATCH;
+        const last = rows[rows.length - 1];
+        out.cursors[table] = last
+          ? `${new Date(last.edited_on_web_at).toISOString()}|${last.id}`
+          : (given[table] || null);
+      }
+      res.json(out);
     } catch (err) { next(err); }
   });
 
@@ -967,3 +1173,12 @@ module.exports = function syncRoutes({ pool }) {
 
   return router;
 };
+
+// `test/sync-resync.test.js`'s structural sweep reads this file's *source*
+// to prove every pushed column is also assigned on conflict. The Phase 15
+// guards reach the SQL through a keepWebEdits() interpolation, so the
+// sweep needs these to expand it into the real column list before it
+// parses. Without them it would report nine false positives today and,
+// much worse, stop being able to see a genuine omission inside one.
+module.exports.WEB_EDITABLE = WEB_EDITABLE;
+module.exports.keepWebEdits = keepWebEdits;

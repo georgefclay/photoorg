@@ -198,6 +198,115 @@
     });
   }
 
+  // ---- admin person editor (Phase 15) --------------------------------------
+  // Names are human-visible text, so an admin corrects them here rather
+  // than by hand in SQL. The save PATCHes only the fields on the form, and
+  // the server stamps `edited_on_web_at` so the laptop's next push keeps
+  // this wording instead of handing the old one back.
+  const pe = document.querySelector('[data-person-edit]');
+  if (pe) {
+    const personId = pe.dataset.personId;
+    const form = pe.querySelector('[data-person-form]');
+    const openBtn = pe.querySelector('[data-act="open-edit"]');
+    const cancelBtn = pe.querySelector('[data-act="cancel-edit"]');
+    const errorEl = form.querySelector('[data-form-error]');
+    const statusEl = form.querySelector('.status');
+
+    function setError(msg) {
+      errorEl.textContent = msg || '';
+      errorEl.hidden = !msg;
+    }
+
+    openBtn.addEventListener('click', () => {
+      form.hidden = false;
+      openBtn.hidden = true;
+      form.querySelector('input').focus();
+    });
+    cancelBtn.addEventListener('click', () => {
+      form.reset();
+      setError('');
+      statusEl.textContent = '';
+      form.hidden = true;
+      openBtn.hidden = false;
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      setError('');
+      const body = {};
+      for (const el of form.elements) {
+        if (!el.name) continue;
+        body[el.name] = el.value;
+      }
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      statusEl.textContent = 'Saving…';
+      try {
+        const r = await CD.api(`/api/people/${personId}`, { method: 'PATCH', body });
+        statusEl.textContent = r.changed ? 'Saved' : 'No change';
+        if (r.changed) {
+          CD.toast('Details saved.');
+          // The page's headings and facts list are server-rendered from
+          // the same row; reload rather than keep a second renderer in
+          // step with the first.
+          window.setTimeout(() => window.location.reload(), 700);
+        }
+      } catch (err) {
+        setError(err.message || 'That did not save.');
+        statusEl.textContent = '';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    const addForm = pe.querySelector('[data-variant-add]');
+    if (addForm) {
+      addForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const variant = addForm.elements.variant.value.trim();
+        if (!variant) return;
+        const btn = addForm.querySelector('[type="submit"]');
+        btn.disabled = true;
+        try {
+          await CD.api(`/api/people/${personId}/variants`, {
+            method: 'POST',
+            body: { variant, kind: addForm.elements.kind.value },
+          });
+          window.location.reload();
+        } catch (err) {
+          CD.toast(err.message || 'That variant did not save.', 'error');
+          btn.disabled = false;
+        }
+      });
+    }
+
+    const variantList = pe.querySelector('[data-variant-list]');
+    if (variantList) {
+      variantList.addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-act="edit-variant"]');
+        if (!btn) return;
+        const li = btn.closest('[data-variant-id]');
+        const textEl = li.querySelector('[data-variant-text]');
+        const next = window.prompt('Correct this name variant:', textEl.textContent);
+        if (next == null) return;
+        const variant = next.trim();
+        if (!variant || variant === textEl.textContent) return;
+        btn.disabled = true;
+        try {
+          await CD.api(`/api/people/${personId}/variants/${li.dataset.variantId}`, {
+            method: 'PATCH', body: { variant },
+          });
+          textEl.textContent = variant;
+          CD.toast('Variant corrected.');
+        } catch (err) {
+          CD.toast(err.message || 'That did not save.', 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
+  }
+
   // ---- /albums — a cover whose file isn't on the server yet -----------------
   function coverFailed(img) {
     const cover = img.closest('.album-cover');

@@ -7,6 +7,10 @@
 // scopes itself to the groups they moderate.
 
 const { userModeratorGroupIds } = require('../middleware/visibility');
+// One declaration of which jsonb path holds a suggestion's words, shared
+// with the corrections service so the queue's inline edit and the bulk
+// find & replace cannot disagree about where the text is.
+const { TEXT_PATHS } = require('./corrections');
 
 const SUGGESTION_KINDS = ['date', 'person', 'place', 'relationship', 'description', 'transcription', 'classification'];
 const SUGGESTION_SOURCES = ['human', 'ai', 'import'];
@@ -157,6 +161,7 @@ async function listSuggestions(pool, { source = 'human', kind = null, cursor = n
   params.push(limit);
   const { rows } = await pool.query(
     `select s.id, s.photo_id, s.kind, s.payload, s.confidence, s.source, s.model, s.created_at,
+            s.edited_on_web_at,
             u.display_name as user_name, u.email as user_email,
             p.id as p_id, to_char(p.capture_date, 'YYYY-MM-DD') as p_date, p.capture_date_precision as p_precision,
             p.capture_date_confirmed as p_confirmed, p.description_ai as p_description,
@@ -215,7 +220,8 @@ async function listSuggestions(pool, { source = 'human', kind = null, cursor = n
     const pr = await pool.query(
       `select pp.photo_id, string_agg(pl.name, ', ' order by pl.name) as names
          from photo_places pp join places pl on pl.id = pp.place_id
-        where pp.photo_id = any($1::bigint[]) and pp.confirmed = true and pl.is_deleted = false
+        where pp.photo_id = any($1::bigint[]) and pp.confirmed = true
+          and pp.is_deleted = false and pl.is_deleted = false
         group by pp.photo_id`, [[...placePhotoIds]],
     );
     for (const x of pr.rows) photoPlaces.set(Number(x.photo_id), x.names);
@@ -243,6 +249,13 @@ async function listSuggestions(pool, { source = 'human', kind = null, cursor = n
       evidence: null,
       crop_url: null,
       links: [],
+      // Phase 15: the exact words, and where in the payload they live, so
+      // the queue can offer an inline edit before the accept. Null for the
+      // kinds whose payload is ids and labels rather than prose — there is
+      // nothing to re-word on a `person` or `classification` suggestion.
+      text_path: TEXT_PATHS[r.kind] || null,
+      editable_text: TEXT_PATHS[r.kind] ? (pl[TEXT_PATHS[r.kind]] ?? '') : null,
+      edited_on_web: !!r.edited_on_web_at,
     };
     switch (r.kind) {
       case 'date':
@@ -489,7 +502,8 @@ function bulkFilterClauses(b, params) {
   const albumId = toInt(b.album_id);
   if (albumId != null) {
     params.push(albumId);
-    clauses.push(`exists (select 1 from album_photos ap where ap.photo_id = p.id and ap.album_id = $${params.length})`);
+    clauses.push(`exists (select 1 from album_photos ap where ap.photo_id = p.id
+                            and ap.album_id = $${params.length} and ap.is_deleted = false)`);
   }
   if (b.scan_batch) { params.push(String(b.scan_batch)); clauses.push(`p.scan_batch = $${params.length}`); }
   const personId = toInt(b.person_id);

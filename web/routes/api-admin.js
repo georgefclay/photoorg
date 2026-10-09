@@ -11,12 +11,18 @@
 //   GET  /admin/rescan                         (printable page; routes/pages-admin.js)
 //   GET  /api/admin/unfiled                    (paginated list of unfiled photos)
 //   GET  /api/admin/counts                     (dashboard counts, JSON)
+//   PATCH /api/admin/suggestions/:id           edit one pending suggestion's text
+//   GET  /api/admin/corrections/search         preview a bulk find & replace
+//   POST /api/admin/corrections/apply          apply it, audited per row
+//   GET  /api/admin/corrections/batches        recent correction batches
+//   POST /api/admin/corrections/undo           undo one batch
 
 const express = require('express');
 const { requireAdmin } = require('../middleware/require-user');
 const { audit } = require('../services/audit');
 const { parseListQuery } = require('../services/pagination');
 const adminSvc = require('../services/admin');
+const corrections = require('../services/corrections');
 
 function toInt(v) { const n = parseInt(v, 10); return Number.isInteger(n) ? n : null; }
 
@@ -223,7 +229,13 @@ module.exports = function apiAdminRoutes({ pool }) {
         await client.query(
           `insert into photo_places (photo_id, place_id, confirmed)
            values ($1, $2, true)
-           on conflict (photo_id, place_id) do update set confirmed = true`,
+           on conflict (photo_id, place_id) do update set
+             confirmed = true,
+             -- Re-tagging a place that was removed brings the row back
+             -- rather than leaving an accepted suggestion pointing at a
+             -- soft-deleted membership nothing would display.
+             is_deleted = false, deleted_at = null, deleted_by = null,
+             updated_at = now()`,
           [sug.photo_id, placeId],
         );
         await audit(client, {
@@ -352,6 +364,116 @@ module.exports = function apiAdminRoutes({ pool }) {
       });
       await client.query('commit');
       res.json({ ok: true });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
+
+  // -----------------------------------------------------------------
+  //  Phase 15 — corrections (admin only)
+  //
+  //  PATCH /api/admin/suggestions/:id     edit one pending suggestion's text
+  //  GET   /api/admin/corrections/search  preview a bulk find & replace
+  //  POST  /api/admin/corrections/apply   apply it (one batch, audited per row)
+  //  GET   /api/admin/corrections/batches recent batches, newest first
+  //  POST  /api/admin/corrections/undo    undo one batch (skip-and-list)
+  //
+  //  Scope is pending suggestions only — each tier corrects the text it
+  //  owns. The rows were born on the laptop, so every write stamps
+  //  `edited_on_web_at` and the guard in /sync/suggestions is what stops
+  //  the next push handing the old wording back.
+  // -----------------------------------------------------------------
+  router.patch('/suggestions/:id(\\d+)', async (req, res, next) => {
+    const id = Number(req.params.id);
+    const text = req.body && req.body.text;
+    if (typeof text !== 'string') return res.status(400).json({ error: 'text required' });
+    if (text.length > 20000) return res.status(400).json({ error: 'text too long' });
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const out = await corrections.editOne(client, {
+        id, text, actor: req.user.email, userId: req.user.id,
+      });
+      if (!out.ok) {
+        await client.query('rollback');
+        if (out.reason === 'not_found') return res.status(404).json({ error: 'not found' });
+        if (out.reason === 'resolved') {
+          // The text a decision was made on is not rewritten; the fact
+          // column the accept wrote is corrected on its own screen.
+          return res.status(409).json({ error: 'already resolved' });
+        }
+        return res.status(400).json({ error: 'this kind of suggestion has no editable text' });
+      }
+      await client.query('commit');
+      res.json({ ok: true, changed: out.changed });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
+
+  router.get('/corrections/search', async (req, res, next) => {
+    try {
+      const needle = String(req.query.q || '');
+      const replacement = String(req.query.replace || '');
+      const matchCase = req.query.match_case !== 'false';
+      if (!needle) return res.json({ groups: [], total: 0 });
+      const groups = await corrections.search(pool, needle, replacement, { matchCase });
+      res.json({
+        groups,
+        total: groups.reduce((n, g) => n + g.count, 0),
+      });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/corrections/apply', async (req, res, next) => {
+    const b = req.body || {};
+    const needle = String(b.q || '');
+    const replacement = String(b.replace || '');
+    const matchCase = b.match_case !== false;
+    const rows = Array.isArray(b.rows) ? b.rows : [];
+    if (!needle) return res.status(400).json({ error: 'q required' });
+    if (!rows.length) return res.status(400).json({ error: 'no rows selected' });
+    if (rows.length > 5000) return res.status(400).json({ error: 'too many rows (max 5000)' });
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const out = await corrections.applyCorrection(client, {
+        needle, replacement, matchCase, rows,
+        actor: req.user.email, userId: req.user.id,
+      });
+      await client.query('commit');
+      res.json({ ok: true, batch_id: out.batchId, changed: out.changed, skipped: out.skipped });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
+
+  router.get('/corrections/batches', async (req, res, next) => {
+    try {
+      res.json({ items: await corrections.listBatches(pool) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/corrections/undo', async (req, res, next) => {
+    const batchId = String((req.body && req.body.batch_id) || '');
+    if (!/^[0-9a-f]{8,64}$/.test(batchId)) return res.status(400).json({ error: 'batch_id required' });
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const out = await corrections.undoBatch(client, batchId, {
+        actor: req.user.email, userId: req.user.id,
+      });
+      await client.query('commit');
+      res.json({ ok: true, restored: out.restored, skipped: out.skipped });
     } catch (err) {
       await client.query('rollback').catch(() => {});
       next(err);

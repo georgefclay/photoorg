@@ -58,6 +58,60 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   accept/reject of a desktop-pushed suggestion is mirrored onto the
   laptop's copy, and the web's suggestion upsert never re-opens a
   resolved suggestion.
+- **Every human-visible text is editable in a UI** (Phase 15). People make
+  mistakes: a folder named "Canaca" instead of "Canada" became an album
+  name and 139 pending description suggestions, and correcting it took
+  hand-written SQL that landed in the wrong database and cost an evening.
+  So album names and descriptions, pending suggestion text, person names
+  and variants, place names / notes / aliases, back transcriptions,
+  `physical_ref_note`, group names and comment bodies are **all editable
+  from the app that owns them**, each edit writes an audit row with
+  previous and new values, and the correction reaches every copy with no
+  further step. **If a field has no edit path, that is a bug.** Nothing in
+  this archive is corrected with SQL again. The desktop's Corrections mode
+  (find & replace + Albums + Places editors) and the web's
+  `/admin/corrections` are where it happens; each tier sweeps only the
+  text it owns (answer 9), because a desktop tool reading
+  web-authoritative text it must never push back is how the
+  `photo_groups` and `person_name_variants` faults began.
+- **`edited_on_desktop_at` / `edited_on_web_at` are the third and fourth
+  members of the `tombstoned_at` family** — columns that exist because
+  `updated_at` cannot carry their meaning. Every `/sync/*` upsert sets
+  `updated_at = now()`, so on the web it means *"when a push last touched
+  this row"*, never *"when a human edited it"*; a cross-tier
+  last-writer-wins reading it would find the web newer than the laptop for
+  every row after every push, edited or not. These two are written **only
+  by a human edit in a UI** (desktop Corrections / People / album / place
+  editors; web admin editors) and never by a job, an upsert or a sweep, so
+  the comparison is human-edit vs human-edit. They live on `suggestions`,
+  `people`, `person_name_variants`, `places` and `albums`. The rule is one
+  SQL function, `sync_web_edit_wins(web, desktop)` — the web has an edit
+  and the desktop's is no newer — and **ties go to the web**, the copy a
+  relative is looking at. `routes/sync.js`'s `WEB_EDITABLE` names the
+  guarded columns per table and is the same list the desktop's
+  `pull_web_edits` applies and `/sync/pull/web_edits` returns. Only the
+  *wording* is guarded: `is_deleted` (a decision) and
+  `person_name_variants.person_id` (which person owns the name, re-parented
+  by a desktop merge) stay desktop-authoritative, or Phase 9 fix-up 2's bug
+  comes back.
+- **A removal from a join table is a soft-delete, or it never leaves the
+  laptop.** `album_photos` and `photo_places` were insert-or-update-only
+  and the push only upserts, so "take this photo out of the album" never
+  reached the VM and the site went on showing it there. Both now carry
+  `is_deleted / deleted_at / deleted_by / updated_at` with a
+  `set_updated_at` trigger and sync by LWW on `updated_at`, exactly as
+  `photo_groups` has since Phase 9. **Every reader must filter
+  `is_deleted = false`** — the photo page, the album page, the browse
+  filters, `attentionCounts`, and the two lateral joins inside
+  `refresh_photos_search_now`.
+- **A typo that came from a master folder name is corrected in the derived
+  text only.** `photos.source_folder`, `photos.scan_batch` and
+  `photo_masters.master_path` are faithful records of the read-only master
+  disk (and `master_path` is the key that makes re-ingest a no-op), so the
+  Corrections tool lists them as a **read-only group with a count and no
+  checkbox**, with the reason on screen: the typo's full extent stays
+  visible instead of looking like rows the tool missed, and
+  `apply_correction` refuses them even if a caller ticks one.
 
 ## Database
 - Local DB `photoorg`, role `photo_user`. Test DB `photoorg_test` (separate,
@@ -979,13 +1033,12 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   push forever — the VM is only ever fed from `photoorg`. `select
   current_database()` first.
 - **A typo that came from a master folder name is corrected in the
-  derived text only.** `photos.source_folder`, `photos.scan_batch` and
-  `photo_masters.master_path` are faithful records of what is on the
-  read-only master disk; `master_path` is also the key that makes
-  re-ingest a no-op. Correct `albums.name` and `suggestions.payload`;
-  leave the three master-derived columns disagreeing with them on
-  purpose. (`D:\Scanned Photos\Summer 1992 - Canaca` is still spelled
-  that way on disk, and search still matches both.)
+  derived text only** — the rule is in Inviolable; the practical note is
+  that `D:\Scanned Photos\Summer 1992 - Canaca` is still spelled that way
+  on disk, 159 photos still mirror it, and search matches both spellings.
+  Correct `albums.name` and `suggestions.payload`; leave
+  `photos.source_folder`, `photos.scan_batch` and
+  `photo_masters.master_path` disagreeing with them on purpose.
 
 ## Web pages (Phase 10 onwards)
 - **Queries live in `web/services/`, never in routes or views.** Photos:
@@ -1096,6 +1149,114 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   queries (> 300 ms) log `[search] slow …` with the parsed form.
 - **`place_aliases` has no sync route yet** — like album edits, pulling it
   back to the desktop is an open item for Phase 12.
+
+## Corrections (Phase 15)
+
+The rule itself is in Inviolable. This is how it is built.
+
+### Desktop — Corrections mode (sidebar, between People and Sync)
+- **`targets.py` is the list of every place human-visible text lives**, one
+  `Target` per (table, field), and it is pure: no Qt, no database, no I/O.
+  A new editable field is a new entry there and nothing else. Three row
+  shapes, because three tables genuinely differ: `COLUMN` (a text column on
+  a table with a bigint `id`), `JSON` (`suggestions.payload`, where the
+  words sit at a path inside a document that must survive the edit — the
+  write is a `jsonb_set`, never a replacement of the whole payload), and
+  `ALIAS` (`place_aliases` keys on `(place_id, alias)`, so **the text is
+  the key**).
+- **The alias shape is the one that bites.** Correcting an alias renames
+  the row, so the key in the audit entry is stale by the time undo reads
+  it: `repo.key_after_write` is what lets undo find the row under its new
+  name. Without it undo silently skipped every alias it should have
+  restored. A rename that would collide with an alias the place already
+  holds (the unique is case-insensitive) is **refused and listed**, never
+  allowed to raise — one duplicate must not abort a whole correction, and
+  an upsert that dropped the row on conflict would lose the alias
+  outright.
+- **The preview is the string that will be stored.** `repo.replace_text` is
+  the single place a replacement is computed and both the preview and the
+  apply call it, so no SQL-side `replace()` can differ from what was on
+  screen. Case-insensitive matching goes through `re.sub` with an escaped
+  needle **and a lambda replacement**, so a backslash or a group reference
+  in George's replacement text lands verbatim instead of being
+  interpreted.
+- **Scope:** only `pending` suggestions. A resolved one's text is what a
+  decision was made on, and rewriting it would falsify the decision; the
+  fact column the accept wrote is corrected on its own screen.
+- **Apply is one transaction, one `batch_id`, one `correction.replace`
+  audit row per changed row** (carrying previous and new) plus a
+  `correction.batch` summary. Every row is re-read first: one that changed
+  since the search is **skipped and listed**.
+- **Undo reads the audit log, not session state**, so it survives a
+  restart — and it restores only rows whose current value still equals
+  what the correction wrote. Anything edited since is skipped and listed
+  by id (answer 4): an undo that overwrote newer work would be a second
+  mistake with no third chance. `correction.undo` per row,
+  `correction.undo.batch` for the batch, which is what marks it undone in
+  the picker.
+- **The status line has two halves** (the Phase 7 rule, and this screen
+  broke it on the first attempt): the left is the last **decision** and
+  persists, the right is context. `_apply` and `_undo` both re-run the
+  search afterwards, so a single label wiped the result of the action a
+  moment after showing it.
+- **Albums and Places tabs** are the direct-edit paths that were missing:
+  rename, re-describe, soft-delete/restore, drag-reorder, soft-remove a
+  photo; place name / notes / coordinates / aliases. A place rename that
+  collides becomes a sentence on screen, not a traceback. `set_coords`
+  distinguishes "clear the coordinates" from "leave them alone" — both
+  arrive as `None`. Albums stay desktop-authoritative and the tab says so;
+  the web's album pull-back is still open (PROJECT-PLAN §5 item 11).
+
+### Web — `/admin/corrections` and the inline edits
+- **Admin only.** A moderator hides a comment; rewriting someone's words
+  is an admin act.
+- **`services/corrections.js` mirrors the desktop's shape** — search,
+  preview, apply under one batch, undo with skip-and-list — over pending
+  suggestions, and `TEXT_PATHS` (shared with `services/admin.js`) is the
+  one declaration of which jsonb path holds a kind's words, so the queue's
+  inline edit and the bulk tool cannot disagree.
+- **The suggestions queue edits text in place** (`PATCH
+  /api/admin/suggestions/:id`, audit `suggestion.edit`), independent of the
+  decision: save and leave it pending, or save then accept and the accept
+  writes the corrected text.
+- **Admin people editor** (`PATCH /api/people/:id`, variants add/rename).
+  It touches only the fields the request carries, so a PATCH correcting one
+  surname cannot blank the notes, and it refuses to leave a person with no
+  name at all.
+- **Comments are editable by their author and by an admin** (`PATCH
+  /api/comments/:id`, audit `comment.edit`) and **an edited comment says
+  so**: `comments.edited_at` is null until the first edit and the page
+  renders "(edited)". Text a relative has already read must never change
+  silently. Web-only — bodies stay web-authoritative and
+  `/sync/pull/confirmed` keeps sending summaries, not bodies.
+- **`/sync/pull/web_edits` carries the web's text back down**, and its
+  cursor is **composite** (`<iso>|<id>`), per table. That is load-bearing:
+  a bulk replace stamps every row it changed inside one transaction, so a
+  thousand rows share one `edited_on_web_at` to the microsecond and a
+  timestamp-only cursor with a page limit would hand back the same first
+  page forever. The desktop pages until no table reports `has_more`.
+- **`/sync/place_aliases` replaces a place's whole alias set.** There is no
+  soft-delete to carry a removal — the text is the key — so the desktop
+  sends the complete set per place, *including an empty one*: selecting
+  only places that still have aliases would strand the one case that
+  matters (the last alias removed) on the laptop forever. Closes the
+  `place_aliases` half of PROJECT-PLAN §5 item 11.
+
+### Audit namespace
+`correction.replace`, `correction.batch`, `correction.undo`,
+`correction.undo.batch`, `correction.pull`, `sync.pull.web_edits`,
+`suggestion.edit`, `comment.edit`, `album.update`, `album.delete`,
+`album.restore`, `album.photo.add`, `album.photo.remove`, `album.reorder`,
+`place.update`, `place.alias.add`, `place.alias.remove`,
+`person.variant.edit`, `sync.place_aliases.upsert`.
+
+### A trap worth naming
+`web/test/sync-resync.test.js`'s structural sweep reads `routes/sync.js`'s
+**source** to prove every pushed column is also assigned on conflict. The
+Phase 15 guards reach the SQL through a `keepWebEdits()` interpolation, so
+the sweep now expands it with the route's own exported helper before
+parsing, and asserts nothing is left unexpanded. A sweep that cannot see
+through an interpolation is a blind spot, not a pass.
 
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB

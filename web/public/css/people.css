@@ -106,3 +106,28 @@
 .result .why li + li { margin-top: 2px; }
 .result .why-person { color: var(--accent-strong); }
 .result .why-date { color: var(--fg); }
+
+/* ---- admin person editor (Phase 15) ---------------------------------- */
+/* Correcting a name is an admin act, so this block only renders for them.
+   Two columns on a desktop, one on a phone; inputs at 16px so iOS does
+   not zoom when they are focused. */
+.person-edit { margin-top: var(--s4); }
+.person-edit-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+.person-edit .field label { display: block; font-weight: 600; margin-bottom: var(--s1); }
+.person-edit input, .person-edit textarea, .person-edit select {
+  width: 100%; font: inherit; font-size: 16px; padding: var(--s2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg);
+}
+.person-edit textarea { resize: vertical; }
+.variant-list { list-style: none; margin: 0 0 var(--s3); padding: 0; display: grid; gap: var(--s2); }
+.variant-list li { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.variant-add { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
+.variant-add input { flex: 1 1 12rem; min-width: 0; }
+
+@media (max-width: 560px) {
+  .person-edit-grid { grid-template-columns: minmax(0, 1fr); }
+}

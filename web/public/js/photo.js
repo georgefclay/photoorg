@@ -267,6 +267,71 @@
     });
   }
 
+  // Edit a comment in place (Phase 15). The paragraph swaps for a
+  // textarea; Save PATCHes and stamps "(edited)" so the change is never
+  // silent, Cancel puts the original text straight back. Progressive, like
+  // every other write on this page: with JS off the comment is simply not
+  // editable, and nothing else breaks.
+  if (list) {
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-comment-edit]');
+      if (!btn || btn.dataset.editing) return;
+      const li = btn.closest('[data-comment-id]');
+      const bodyEl = li.querySelector('[data-comment-body]');
+      const original = bodyEl.textContent;
+
+      const ta = document.createElement('textarea');
+      ta.className = 'comment-edit-field';
+      ta.rows = 3;
+      ta.maxLength = 4000;
+      ta.value = original;
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'btn small';
+      save.textContent = 'Save';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn ghost small';
+      cancel.textContent = 'Cancel';
+      actions.append(save, cancel);
+
+      bodyEl.hidden = true;
+      btn.dataset.editing = '1';
+      btn.hidden = true;
+      bodyEl.after(ta, actions);
+      ta.focus();
+
+      function finish() {
+        ta.remove();
+        actions.remove();
+        bodyEl.hidden = false;
+        btn.hidden = false;
+        delete btn.dataset.editing;
+      }
+
+      cancel.addEventListener('click', finish);
+      save.addEventListener('click', async () => {
+        const body = ta.value.trim();
+        if (!body) { CD.toast('Write something first.', 'error'); ta.focus(); return; }
+        if (body === original) { finish(); return; }
+        save.disabled = true;
+        try {
+          await CD.api(btn.dataset.url, { method: 'PATCH', body: { body } });
+          bodyEl.textContent = body;
+          const mark = li.querySelector('[data-comment-edited]');
+          if (mark) mark.hidden = false;
+          finish();
+          CD.toast('Comment updated.');
+        } catch (err) {
+          CD.toast(errorText(err), 'error');
+          save.disabled = false;
+        }
+      });
+    });
+  }
+
   if (list) {
     list.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-comment-toggle]');

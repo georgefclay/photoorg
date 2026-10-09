@@ -63,6 +63,13 @@ PHOTO_BATCH = 200
 META_BATCH = 500
 
 
+def _iso(value) -> str | None:
+    """Timestamp to ISO, or None. Phase 15 added enough nullable
+    timestamp columns to the selectors that spelling the conditional out
+    at each one stopped being readable."""
+    return value.isoformat() if value else None
+
+
 @dataclass
 class PushProgress:
     stage: str
@@ -465,7 +472,8 @@ def push(
             """
             select s.id, s.photo_id, s.user_id, s.kind, s.payload::text as payload_text,
                    s.confidence, s.status, s.source, s.model,
-                   s.resolved_by, s.resolved_at, s.resolution_note, s.created_at
+                   s.resolved_by, s.resolved_at, s.resolution_note, s.created_at,
+                   s.edited_on_desktop_at
               from suggestions s
              left join photos p on p.id = s.photo_id
              where s.source in ('ai', 'import')
@@ -480,6 +488,11 @@ def push(
                 "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
                 "resolution_note": r["resolution_note"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                # Phase 15: the web may now re-word a pending suggestion
+                # before accepting it. The route compares this against its
+                # own `edited_on_web_at` and keeps the newer human edit, so
+                # a push can no longer hand the old text back.
+                "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
             }, progress, should_stop, stats=stats,
         )
 
@@ -699,7 +712,8 @@ _META_STAGES = [
         "people",
         """
         select id, given_name, middle_name, surname, maiden_name, nickname, suffix,
-               birth_year, death_year, notes, is_deleted, created_at
+               birth_year, death_year, notes, is_deleted, created_at,
+               edited_on_desktop_at
           from people
          where id < %(web_id_floor)s
         """,
@@ -710,12 +724,13 @@ _META_STAGES = [
             "birth_year": r["birth_year"], "death_year": r["death_year"],
             "notes": r["notes"], "is_deleted": r["is_deleted"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
         },
     ),
     (
         "person_name_variants",
         """
-        select id, person_id, variant, kind, created_at
+        select id, person_id, variant, kind, created_at, edited_on_desktop_at
           from person_name_variants
          where id < %(web_id_floor)s
         """,
@@ -723,6 +738,7 @@ _META_STAGES = [
             "id": r["id"], "person_id": r["person_id"], "variant": r["variant"],
             "kind": r["kind"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
         },
     ),
     (
@@ -741,7 +757,8 @@ _META_STAGES = [
     (
         "places",
         """
-        select id, name, latitude, longitude, notes, is_deleted, created_at
+        select id, name, latitude, longitude, notes, is_deleted, created_at,
+               edited_on_desktop_at
           from places
          where id < %(web_id_floor)s
         """,
@@ -749,22 +766,29 @@ _META_STAGES = [
             "id": r["id"], "name": r["name"], "latitude": r["latitude"],
             "longitude": r["longitude"], "notes": r["notes"], "is_deleted": r["is_deleted"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
         },
     ),
     (
         "photo_places",
         """
-        select pp.photo_id, pp.place_id, pp.confirmed
+        select pp.photo_id, pp.place_id, pp.confirmed,
+               pp.is_deleted, pp.deleted_at, pp.updated_at
           from photo_places pp
           join photos p on p.id = pp.photo_id
          where p.is_private = false and p.triage_status <> 'junk'
         """,
-        lambda r: {"photo_id": r["photo_id"], "place_id": r["place_id"], "confirmed": r["confirmed"]},
+        lambda r: {
+            "photo_id": r["photo_id"], "place_id": r["place_id"], "confirmed": r["confirmed"],
+            "is_deleted": r["is_deleted"], "deleted_at": _iso(r["deleted_at"]),
+            "updated_at": _iso(r["updated_at"]),
+        },
     ),
     (
         "albums",
         """
-        select id, name, description, source, created_by, is_deleted, created_at
+        select id, name, description, source, created_by, is_deleted, created_at,
+               edited_on_desktop_at
           from albums
          where id < %(web_id_floor)s
         """,
@@ -772,16 +796,51 @@ _META_STAGES = [
             "id": r["id"], "name": r["name"], "description": r["description"],
             "source": r["source"], "created_by": r["created_by"], "is_deleted": r["is_deleted"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
         },
     ),
     (
         "album_photos",
         """
-        select ap.album_id, ap.photo_id, ap.position
+        select ap.album_id, ap.photo_id, ap.position,
+               ap.is_deleted, ap.deleted_at, ap.updated_at
           from album_photos ap
           join photos p on p.id = ap.photo_id
          where p.is_private = false and p.triage_status <> 'junk'
         """,
-        lambda r: {"album_id": r["album_id"], "photo_id": r["photo_id"], "position": r["position"]},
+        lambda r: {
+            "album_id": r["album_id"], "photo_id": r["photo_id"], "position": r["position"],
+            "is_deleted": r["is_deleted"], "deleted_at": _iso(r["deleted_at"]),
+            "updated_at": _iso(r["updated_at"]),
+        },
+    ),
+    (
+        # Phase 15: aliases used to stop at the laptop (PROJECT-PLAN sec 5
+        # item 11), so a corrected alias never reached the site's search.
+        # `place_aliases` keys on (place_id, alias) and has no soft-delete:
+        # the text *is* the key, so there is nothing to flag. Hence the
+        # route takes a place's whole alias set and replaces it, which is
+        # also how a removal travels. Every desktop place is sent, alias or
+        # not -- selecting only places that *have* aliases would mean the
+        # one case a soft-delete would have covered (the last alias
+        # removed) never reaching the web at all.
+        # Desktop-authoritative: the web has no alias editor, so there is
+        # no web-born alias to protect.
+        "place_aliases",
+        """
+        select pl.id as place_id,
+               coalesce(
+                 jsonb_agg(jsonb_build_object(
+                   'alias', pa.alias, 'kind', pa.kind,
+                   'created_at', pa.created_at
+                 ) order by pa.alias) filter (where pa.alias is not null),
+                 '[]'::jsonb
+               ) as aliases
+          from places pl
+          left join place_aliases pa on pa.place_id = pl.id
+         where pl.id < %(web_id_floor)s
+         group by pl.id
+        """,
+        lambda r: {"place_id": r["place_id"], "aliases": r["aliases"]},
     ),
 ]

@@ -17,7 +17,7 @@ async function listAlbums(pool, user, scope) {
                 (array_agg(ph.id order by ap.position asc nulls last, ph.id desc)
                   filter (where ph.synced_file_version is not null))[1] as cover_id
            from album_photos ap join photos ph on ph.id = ap.photo_id
-          where ap.album_id = a.id and ${where}
+          where ap.album_id = a.id and ap.is_deleted = false and ${where}
        ) st
       where a.is_deleted = false
       order by lower(a.name)`,

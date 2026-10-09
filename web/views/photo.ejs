@@ -315,13 +315,21 @@ function faceState(f) {
               <span class="avatar" aria-hidden="true"><%= fmt.initials({ display_name: c.author_display_name }) %></span>
               <strong><%= c.author_display_name %></strong>
               <time class="muted small-text" datetime="<%= new Date(c.created_at).toISOString() %>"><%= fmt.relTime(c.created_at) %></time>
+              <span class="muted small-text" data-comment-edited <%= c.edited_at ? '' : 'hidden' %>
+                title="<%= c.edited_at ? new Date(c.edited_at).toISOString() : '' %>">(edited)</span>
             </div>
-            <p class="comment-body"><%= c.body %></p>
+            <p class="comment-body" data-comment-body><%= c.body %></p>
             <p class="hidden-note" data-hidden-note <%= c.is_hidden ? '' : 'hidden' %>>Hidden. Only moderators can see this.</p>
-            <% if (photo.can_moderate) { %>
-              <button type="button" class="btn ghost small" data-js-only data-comment-toggle
-                data-hidden="<%= c.is_hidden ? '1' : '' %>"><%= c.is_hidden ? 'Unhide' : 'Hide' %></button>
-            <% } %>
+            <div class="comment-actions">
+              <% if (c.can_edit) { %>
+                <button type="button" class="btn ghost small" data-js-only data-comment-edit
+                  data-url="/api/comments/<%= c.id %>">Edit</button>
+              <% } %>
+              <% if (photo.can_moderate) { %>
+                <button type="button" class="btn ghost small" data-js-only data-comment-toggle
+                  data-hidden="<%= c.is_hidden ? '1' : '' %>"><%= c.is_hidden ? 'Unhide' : 'Hide' %></button>
+              <% } %>
+            </div>
           </li>
           <% }) %>
         </ol>

@@ -3,7 +3,7 @@
 Owner: George Clay. PM: Claude (this Cowork chat). Coding: Claude Code on the Windows laptop and on the Mac mini.
 Spec: `photo-archive-build-prompts.md` (the 12 build prompts). This file records what changed after looking at the real data, the decisions made, and the phase plan. Phase prompts are written one at a time from this file when each phase starts.
 
-Last updated: 2026-09-14
+Last updated: 2026-10-08
 
 ---
 
@@ -27,6 +27,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 **Progress (2026-09-15):** Phase 9 closed. The phone-on-LAN upload test could not connect and was **deferred to the live domain** — it is now verification step 2/4 of Phase 14. **Phase order changed: 14 (deploy) runs next, before 10 (pages)**, so every remaining phase is tested on a phone against `https://cyberdinosaurs.com`. Prompt: `prompts/phase-14-deploy.md`. **Phase 14 deploys the site with metadata + one test group's files only.** The full 28 GB file push is deferred until the mini's classify/describe/date jobs finish and Phase 7 (cleanup) has replaced the working copies it will replace — otherwise most files would be pushed twice. VM disk (30 GB, 19 free) is enough for the test set; grow to 80 GB before the full push.
 
 **Progress (2026-09-27):** **Phase 7 (scan cleanup) built and green — not yet run on real scans.** Desktop pytest 291/291 (+1 skipped), web 151/151, one new migration `phase-7-cleanup` (up and down both exercised). New `desktop/src/photoarchive/modes/cleanup/` (analyse / geometry / ops / render / repo / accept / split / job / report / remote / ui), two CLI entry points (`run_cleanup`, `cleanup_report`), and 6 new test files (geometry, analyse, accept, split, report, ui, remote) plus tombstone tests on both sides. Scope measured against the live DB: **4 095** scans in scope (3 947 JPEG / 148 TIFF, up to 93.7 MP), 3 666 with faces, 4 187 labelled faces on scans, 54 batches, 639 back-shaped scans excluded, `orientation` NULL on every in-scope scan (so display frame == raw frame). **Verification steps 2–4 are blocked on the `D:` drive being attached** — masters, `WORKING_DIR` and `CLEANUP_DIR` all live there and only `C:` is mounted; batches 00001–00005 (~380 photos, not the ~250 the prompt guessed) are the first run once it is back. Three real bugs found by the tests on the way: a black scanner bed masking in as one whole-scan print (HSV saturation on near-black noise), a live `QThread` dropped when a preview render was replaced, and a preview landing wiping the last decision off the status bar.
+
+**Progress (2026-10-08):** **Phase 15 (corrections) in Claude Code with GO.** The last commit on `main` is the 2026-10-04 groundwork (prompt, findings A–C, the corrected diagnosis of the `photo_masters` 500 — no Corrections code yet). Answers 1–7 were given 2026-10-04; Code's later questions 8 (comments have no edit path) and 9 (find & replace scope) were answered 2026-10-08 in `prompts/phase-15-corrections.md` — author/admin comment edit with an "(edited)" marker, web-only; each tier's find & replace stays on the text it owns. The VM deploy (Phase 7 + Phase 15 migrations, current web code) is still step 1 of the phase and has not happened. After Phase 15: **Phase 13** (prompt written) → **Phase 12** (prompt not yet written) → George's group bulk-assignment (item 6), which performs the full file push implicitly.
 
 **Progress (2026-10-03):** Phase 9 fix-up 2 landed (1bdc016): the Canaca correction had been run against `photoorg_web`, not `photoorg`; while verifying, Code found and fixed three real sync faults (a never-updated `person_id` column, one failed stage aborting all later stages, a broken `run_push` entry point). The VM is a migration behind (`phase-7-cleanup`) and its journal has been silent since Sep 17 — both to be fixed in the deploy step of Phase 15. **George's ruling: a typo must never again need SQL to fix. Full stop until it's fixed.** New **Phase 15 — Corrections** (`prompts/phase-15-corrections.md`): find & replace with preview/undo on the desktop, albums editor, inline suggestion editing on the web with LWW both ways, people name edits both ways, and the VM deploy. Phase 15 now precedes Phase 13.
 
@@ -75,7 +77,8 @@ Consequences of the survey:
 | Mobile-first web | Every page is designed for a phone first (thumb-reachable actions, large tap targets, one column), then widens for desktop. Upload, tagging, dating, and liking must be comfortable one-handed. |
 | Backs | Ingest runs a "looks like a back" heuristic (mostly blank, handwriting-like ink, low colour) and proposes pairing with the previous file in scan order. Every proposed pair is reviewed before commit. |
 | Ops notes | `GC.md` in the repo root, gitignored, same convention as every other site. Own DB role, own secrets. Nothing copied from CraftTags. |
-| Deletes | Never. Quarantine + soft-delete flag everywhere. |
+| Deletes | Never. Quarantine + soft-delete flag everywhere. Phase 15 extended this to the join tables: removing a photo from an album or a place is a soft-delete, both so it is restorable and so the removal can reach the VM at all. |
+| Corrections | **Every human-visible text is editable in the UI that owns it** (Phase 15, after a folder typo cost an evening of hand SQL). Each edit writes an audit row with previous and new values and reaches every copy through the normal sync with no further step. A field with no edit path is a bug. Each tier corrects only the text it owns: the desktop sweeps albums, pending suggestions, people and variants, places and aliases, back transcriptions and `physical_ref_note`; the web's admin tool covers pending suggestions, and comments and group text are edited one at a time. Master-derived columns (`source_folder`, `scan_batch`, `master_path`) are shown with their count and no edit path — they mirror a read-only disk on purpose. Cross-tier conflicts are settled by `edited_on_desktop_at` vs `edited_on_web_at` (human edits only, never `updated_at`, which every push bumps), ties to the web. |
 
 Carried over from CraftTags lessons (go into every web prompt): compute expiries in SQL with `NOW() + INTERVAL`; token links land on a POST-confirm page, never act on GET; `app.set('trust proxy', 1)`; register specific routes before wildcards; watch fail2ban when smoke-testing.
 
@@ -92,7 +95,9 @@ Hand-off loop per phase: I write the prompt → George runs it in Claude Code �
 
 ## 4. Phases
 
-Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14**. Phases 5 (Mac) can run in parallel with 2–4 (Windows).
+Order as planned: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14**. Phases 5 (Mac) can run in parallel with 2–4 (Windows).
+
+**Actual order** (from the progress log): 0 → 1 → 2 → 3 → 4 → 5 → 6 → 8 → 9 → **14 → 10 → 11** (deploy pulled forward so every page was tested on a phone against the live site) → **7** → 9 fix-up 2 → **15 → 13 → 12** → group bulk-assignment (§5 item 6; the full file push happens implicitly as the last group is assigned).
 
 ### Phase 0 — Setup (George + Claude Code, Windows)
 - Create GitHub repo; monorepo skeleton; `.gitignore` covering `.env`, `GC.md`, working directories.
@@ -357,6 +362,75 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 - Accept when: site answers over HTTPS, desktop sync to the VM succeeds, backup cron has produced one file.
 - **Done 2026-09-16.** `https://cyberdinosaurs.com` live, TLS OK, admin bootstrapped, full email round-trip via Postmark. Root FS 30→80 GB. Systemd + Caddy + logrotate + sudoers + cron all installed (templates in `ops/vm/`). Metadata for the full keep set + files for one test group (Clay Family / Album 6) pushed and idempotent (second push 0 files). `/sync/status` matches the laptop.
 
+### Phase 15 — Corrections (Claude Code, Windows) — new 2026-10-03, **built 2026-10-08**
+- **Why:** a master folder named `Canaca` became an album name and 139 pending description suggestions; fixing it took hand SQL that landed in the wrong database and cost an evening. George's ruling, now a CLAUDE.md Inviolable: **every human-visible text is editable in the UI that owns it, with an audit row carrying previous/new, and the correction reaches every copy through sync with no further step.** A field with no edit path is a bug.
+- **Desktop:** a Corrections sidebar entry — find & replace across albums, pending suggestions, people (all name fields + variants), places (+ aliases), back transcriptions and `physical_ref_note`, grouped by where the text lives, with Preview, Apply (one `correction.replace` audit row per changed row + a batch id) and a session-independent **Undo this correction** that reads the audit; an albums editor (rename, soft-delete, reorder, remove a photo); direct edits on the screens that lacked them (album name, suggestion text in the preview's Suggestions block, place editor).
+- **Web:** inline edit of a pending suggestion's text before accepting (`suggestion.edit`); admin bulk find & replace over pending suggestions with the same preview/apply/undo shape; an admin People editor; comment edit by the author or an admin (`comment.edit`, "(edited)" marker, web-only). Album rename on the web stays deferred unless it falls out of the LWW work.
+- **Deploy is step 1** (open item 17): the VM gets `phase-7-cleanup` and this phase's migrations plus the current web code; `/sync/status` → `id_floor.ok`; one full push with zero failed stages.
+- **Decisions taken in the prompt's Answers (2026-10-04; 8–9 on 2026-10-08):**
+  - **`updated_at` cannot carry LWW on the web** — every `/sync/*` upsert sets it, so on the VM it means "when a push last touched this row". New column pair **`edited_on_web_at` / `edited_on_desktop_at`** on `suggestions`, `people`, `person_name_variants`, `places`, `albums`, set only by human edits (Corrections, People editor, album editor, web editors), never by jobs or sync — the third member of the `tombstoned_at` family, documented beside it in CLAUDE.md. The push never overwrites a field whose row the web edited later than the desktop's human edit; the pull brings the web's text down; **ties go to the web** (it is the copy a relative sees).
+  - **No invented caption field.** A photo's words are its pending `description` suggestion; `physical_ref_note` is editable as itself; `description_ai` is untouched.
+  - **Master-derived columns are shown, not edited.** `photos.source_folder`, `photos.scan_batch`, `photo_masters.master_path` appear in find & replace as a read-only group ("mirrors the master disk") with a count and no checkbox.
+  - **Undo never clobbers newer work.** It restores only rows whose current value still equals what the correction wrote; anything edited since is skipped and listed by id.
+  - **`album_photos` and `photo_places` gain soft-delete + `updated_at`** so removals sync like `photo_groups`; **`/sync/place_aliases`** is added (closes the `place_aliases` half of item 11).
+  - **Find & replace stays within each tier's own text** — desktop on desktop-owned rows, web bulk on pending suggestions only; comments and group text are edited one at a time. The desktop never holds web-authoritative text it must not push.
+  - **Comments:** author edits own, admin edits any, moderators keep hide/unhide only; `comments.edited_at` drives the "(edited)" marker.
+  - **Code runs the VM deploy itself** with George approving each prompt. `journalctl -u photoorg` is empty by design — the unit appends to `/var/log/photoorg.log` — noted in GC.md.
+- **Accept when:** pytest + npm test green; a harmless desktop correction pushes, shows on the site, undoes, pushes and shows again, audit rows reported; deploy done and one full push with zero failed stages pasted; CLAUDE.md carries the rule; commit `Phase 15: corrections`.
+- **Built 2026-10-08.** One migration (`phase-15-corrections`): the
+  `edited_on_desktop_at` / `edited_on_web_at` pair on the five editable
+  tables, the `sync_web_edit_wins(web, desktop)` function that is the only
+  statement of the LWW rule, soft-delete + `updated_at` + trigger on
+  `album_photos` and `photo_places` (with `refresh_photos_search_now`
+  re-created so a removed album or place leaves the search vector),
+  `person_name_variants.updated_at`, and `comments.edited_at`. `down`
+  round-trips; it deletes soft-deleted join rows rather than dropping the
+  column, because resurrecting a membership somebody removed would be a
+  silent re-add.
+  - **Desktop:** `modes/corrections/` — `targets.py` (pure: every place
+    text lives, three row shapes), `repo.py` (search / preview / apply /
+    audit-driven undo), `albums.py`, `places.py`, `ui.py` (three tabs).
+    Registered between People and Sync. `faces/repo.py`'s person edit and
+    variant add now stamp `edited_on_desktop_at` too.
+  - **Sync:** push sends the human-edit stamp on all five tables, the
+    soft-delete flags on both join tables, and a new `place_aliases`
+    stage that sends **every** desktop place's whole alias set — an
+    alias-less place included, since "the last alias was removed" is the
+    one state a soft-delete column would otherwise have carried.
+    `pull_web_edits` brings the web's wording down before the push, paging
+    on a composite `(edited_on_web_at, id)` cursor.
+  - **Web:** `services/corrections.js` + `/admin/corrections` (admin-only
+    bulk find & replace, same preview/apply/undo shape), inline text edit
+    on the suggestions queue, admin People editor (`PATCH /api/people/:id`
+    plus variant add/rename), comment edit for the author or an admin with
+    an "(edited)" marker, `/sync/place_aliases`, `/sync/pull/web_edits`,
+    and the Phase 15 guards inside the five `/sync/*` upserts. Every reader
+    of `album_photos` / `photo_places` across `services/` now filters
+    `is_deleted = false`.
+  - **Two bugs the tests caught, both worth remembering.** (a) An alias's
+    text is part of its primary key, so correcting it renames the row and
+    the audit entry's key is stale — undo silently skipped every alias it
+    should have restored until `repo.key_after_write` existed. (b) `_apply`
+    and `_undo` both re-run the search afterwards, so a single status label
+    wiped the result of the action a moment after showing it; the status
+    line is now the Phase 7 two halves, decision on the left and context
+    on the right.
+  - **One test had to be taught to see through an interpolation.**
+    `sync-resync.test.js`'s structural sweep reads `routes/sync.js`'s
+    source; the new guards reach the SQL through a `keepWebEdits()` call,
+    so the sweep expands it with the route's own exported helper and
+    asserts nothing is left unexpanded. A sweep that cannot see through an
+    interpolation is a blind spot, not a pass.
+  - **Tests:** desktop +45 (`test_corrections.py` 21,
+    `test_corrections_sync.py` 15, `test_corrections_ui.py` 9), web +35
+    (`test/corrections.test.js`), covering preview/apply/undo per shape,
+    the read-only master group having no checkbox, LWW in both directions
+    and the tie, a push after a web edit not clobbering it, a desktop
+    merge still re-parenting a variant the web renamed, the composite
+    cursor paging past a shared timestamp, place-alias round trips
+    including the empty set, join-table removals reaching the site, and
+    the comment edit permission matrix.
+
 ## 5. Open items for George
 - **Candidate fix-up 12 — shared VLM inbox on the mini.** classify, describe and estimate_date all upload the same 1024-px JPEGs to three per-job inboxes (3 × ~2.5 GB, ~40 min each). One shared inbox with per-job result files, swept only when all three results are collected, would make it one upload. Do it before the next model / prompt-version rerun; not while a queue is running. (2026-09-16)
 
@@ -370,7 +444,7 @@ Order: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 �
 8. UptimeRobot monitor on `https://cyberdinosaurs.com/healthz` — no hurry.
 9. Off-site backup of the VM's nightly pg_dump (S3) — no hurry.
 10. Refresh the fail2ban whitelist IP in GC.md if the ISP changes it.
-11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only) — Phase 12. `place_aliases` (Phase 11) needs the same treatment: no sync route yet.
+11. Album editing on the web needs album changes pulled back to the desktop (Phase 10 shipped albums read-only) — **still deferred to Phase 12.** Phase 15's LWW carries a *web* edit of an album's name down to the laptop, but nothing yet lets the web create or re-order albums, so the page stays read-only and the desktop's Corrections > Albums tab says so on screen. ~~`place_aliases` (Phase 11) needs the same treatment: no sync route yet~~ — **closed 2026-10-08:** `/sync/place_aliases` ships in Phase 15 and replaces a place's whole alias set, so corrections and removals both travel.
 15. **Backs are out of scope for Phase 7 cleanup** (639 back-shaped scans excluded, same rule Dedupe uses). Deskew/crop for backs needs its own pass — the transcription is already captured, so this is cosmetic; schedule after Phase 12.
 16. Cleanup's cross-restart undo is manual (from `WORKING_DIR/_versions/` + the `cleanup.accept` audit row); the recipe is in `GC.md`. A UI for it only if George ever wants one.
 12. ~~Phase 10 phone checklist~~ — done 2026-09-17.
@@ -385,8 +459,12 @@ one. Same root cause, different mechanism. Everything else now pushes past it
 (fix-up 2), but masters metadata, split children and tombstones cannot reach
 the site until Phase 7's migration and the current web code are deployed.
 A pre-deploy dump exists (`~/backups/photoorg-2026-10-04.dump.gz`, 08:12).
-**George must run the deploy** — remote writes are refused for Claude Code
-(see GC.md "Remote writes are blocked"). The companion "why is the journal
+~~**George must run the deploy** — remote writes are refused for Claude Code
+(see GC.md "Remote writes are blocked").~~ **Phase 15 answer 7 (2026-10-04):
+Code runs the runbook itself and George approves each prompt** — dump (taken)
+→ `git pull` → migrations (Phase 7 cleanup + Phase 15) → restart →
+`/sync/status` → one full push with zero failed stages. It is step 1 of
+Phase 15 and has not happened yet. The companion "why is the journal
 silent" question is **answered and closed**: the unit logs to
 `/var/log/photoorg.log`, so `journalctl` never had the app's output.
 14. Search name strip shows phonetic-only people for ordinary words ("Christmas" → Christina). Harmless (score 50, never displaces hits); if it annoys anyone, hide phonetic-only people from the strip when the same term produced full-text hits. Phase 11 fix-up when convenient.

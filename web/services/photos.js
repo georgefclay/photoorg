@@ -76,11 +76,13 @@ function filtersSql(f, params, a = 'p') {
   }
   if (f.place_id != null) {
     params.push(f.place_id);
-    c.push(`exists (select 1 from photo_places pp where pp.photo_id = ${a}.id and pp.place_id = $${params.length})`);
+    c.push(`exists (select 1 from photo_places pp where pp.photo_id = ${a}.id
+                      and pp.place_id = $${params.length} and pp.is_deleted = false)`);
   }
   if (f.album_id != null) {
     params.push(f.album_id);
-    c.push(`exists (select 1 from album_photos ap where ap.photo_id = ${a}.id and ap.album_id = $${params.length})`);
+    c.push(`exists (select 1 from album_photos ap where ap.photo_id = ${a}.id
+                      and ap.album_id = $${params.length} and ap.is_deleted = false)`);
   }
   if (f.has_no_date) c.push(`${a}.capture_date_confirmed = false`);
   if (f.has_untagged_faces) {
@@ -150,7 +152,8 @@ async function listPhotos(pool, user, {
   if (sortKey === 'position') {
     params.push(filters.album_id);
     albumPos = `, (select ap.position from album_photos ap
-                   where ap.album_id = $${params.length} and ap.photo_id = p.id) as album_position`;
+                   where ap.album_id = $${params.length} and ap.photo_id = p.id
+                     and ap.is_deleted = false) as album_position`;
   }
   const c = typeof cursor === 'string' || cursor == null ? decodeCursor(cursor) : cursor;
   const outer = [];
@@ -244,7 +247,8 @@ async function photoNeighbours(pool, user, photoId, from, scope) {
     if (key.sort === 'position') {
       params.push(key.filters.album_id);
       albumPos = `, (select ap.position from album_photos ap
-                     where ap.album_id = $${params.length} and ap.photo_id = p.id) as album_position`;
+                     where ap.album_id = $${params.length} and ap.photo_id = p.id
+                       and ap.is_deleted = false) as album_position`;
     }
     params.push(photoId);
     const { rows } = await pool.query(
@@ -297,14 +301,15 @@ async function getPhotoDetail(pool, user, id) {
         where f.photo_id = $1 and f.is_deleted = false and coalesce(f.review_status, 'pending') <> 'ignore'
         order by f.id`, [id]),
     pool.query(
-      `select c.id, c.body, c.created_at, c.is_hidden, u.display_name, u.email, u.id as user_id
+      `select c.id, c.body, c.created_at, c.edited_at, c.is_hidden,
+              u.display_name, u.email, u.id as user_id
          from comments c left join users u on u.id = c.user_id
         where c.photo_id = $1
         order by c.created_at asc, c.id asc`, [id]),
     pool.query(
       `select pl.id, pl.name, pl.latitude, pl.longitude, pp.confirmed
          from photo_places pp join places pl on pl.id = pp.place_id
-        where pp.photo_id = $1 and pl.is_deleted = false
+        where pp.photo_id = $1 and pp.is_deleted = false and pl.is_deleted = false
         order by pl.name`, [id]),
     pool.query(
       `select count(*)::int as n, coalesce(bool_or(user_id = $2), false) as me
@@ -320,7 +325,8 @@ async function getPhotoDetail(pool, user, id) {
         order by s.id desc`, [id]),
     pool.query(
       `select a.id, a.name from album_photos ap join albums a on a.id = ap.album_id
-        where ap.photo_id = $1 and a.is_deleted = false order by a.name`, [id]),
+        where ap.photo_id = $1 and ap.is_deleted = false and a.is_deleted = false
+        order by a.name`, [id]),
     pool.query(
       `select g.id, g.name,
               coalesce(gm.role = 'moderator' and gm.is_deleted = false, false) as i_moderate
@@ -375,9 +381,16 @@ async function getPhotoDetail(pool, user, id) {
         id: Number(c.id),
         body: c.body,
         created_at: c.created_at,
+        // Non-null once edited: the view renders "(edited)" so text never
+        // changes silently under a relative who already read it.
+        edited_at: c.edited_at,
         is_hidden: c.is_hidden,
         author_display_name: c.display_name || (c.email ? c.email.replace(/@.*/, '') : 'someone'),
         user_id: c.user_id != null ? Number(c.user_id) : null,
+        // The author may edit their own; an admin may edit any. Moderators
+        // keep hide/unhide and do not get edit (Phase 15 answer 8a).
+        can_edit: user.role === 'admin'
+                  || (c.user_id != null && Number(c.user_id) === Number(user.id)),
       })),
     places: places.rows.map((p) => ({ ...p, id: Number(p.id) })),
     likes: { count: likes.rows[0].n, me: likes.rows[0].me },

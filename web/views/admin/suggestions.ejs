@@ -53,9 +53,26 @@
             <button type="button" class="btn secondary" data-act="cancel">Keep current</button>
           </div>
         </div>
+        <% if (s.text_path) { %>
+          <%# Phase 15: correct the wording here rather than in SQL. Saving
+              is independent of the decision - edit and leave it pending, or
+              edit then accept, and the accept writes the corrected text. %>
+          <div class="edit-text" data-edit-text hidden>
+            <label class="sr-only" for="sug-text-<%= s.id %>">Suggestion text</label>
+            <textarea id="sug-text-<%= s.id %>" rows="3" maxlength="20000" data-edit-field><%= s.editable_text %></textarea>
+            <div class="actions">
+              <button type="button" class="btn small" data-act="save-text">Save text</button>
+              <button type="button" class="btn ghost small" data-act="cancel-text">Cancel</button>
+            </div>
+          </div>
+        <% } %>
         <div class="actions review-actions">
           <button type="button" class="btn" data-act="accept"><%- include('../partials/icon', { name: 'check' }) %>Accept</button>
           <button type="button" class="btn secondary" data-act="reject">Reject</button>
+          <% if (s.text_path) { %>
+            <button type="button" class="btn ghost" data-act="edit-text">Edit text</button>
+          <% } %>
+          <% if (s.edited_on_web) { %><span class="chip small-chip" title="This wording was corrected here, and the next desktop push will not overwrite it.">edited here</span><% } %>
           <span class="status muted" role="status"></span>
         </div>
       </div>

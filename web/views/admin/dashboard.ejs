@@ -44,6 +44,7 @@ if (isAdmin) review.push(stat('/admin/access', d.access, 'Access requests', d.ac
 
 <h2 class="section-title">Records</h2>
 <ul class="list">
+  <li><a class="list-link" href="/admin/corrections"><%- include('../partials/icon', { name: 'edit' }) %><span>Corrections</span><span class="meta">find &amp; replace across pending suggestions</span></a></li>
   <li><a class="list-link" href="/admin/rescan"><%- include('../partials/icon', { name: 'refresh' }) %><span>Rescan list</span><span class="meta"><%= d.rescan ? fmt.plural(d.rescan, 'photo') : 'empty' %></span></a></li>
   <li><a class="list-link" href="/admin/report"><%- include('../partials/icon', { name: 'calendar' }) %><span>Monthly report</span><span class="meta">who did what</span></a></li>
   <li><a class="list-link" href="/admin/audit"><%- include('../partials/icon', { name: 'flag' }) %><span>Audit log</span><span class="meta"><%= d.auditLast ? 'last ' + fmt.relTime(d.auditLast) : 'no entries yet' %></span></a></li>

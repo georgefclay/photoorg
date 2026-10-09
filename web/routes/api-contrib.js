@@ -273,6 +273,70 @@ module.exports = function apiContribRoutes({ pool }) {
     }
   });
 
+  // Edit a comment body (Phase 15 answer 8). The author may edit their
+  // own; an admin may edit any. **Moderators deliberately do not get
+  // this**: hiding is moderation, rewriting another person's words is an
+  // admin act.
+  //
+  // An edited comment says so — `comments.edited_at` goes non-null and the
+  // photo page renders "(edited)" next to the timestamp. Text a relative
+  // has already read must never change silently underneath them.
+  //
+  // Web-only, and that is the whole design: comment bodies are
+  // web-authoritative and `/sync/pull/confirmed` sends summaries, not
+  // bodies, so nothing about this reaches the laptop.
+  router.patch('/comments/:id(\\d+)', contribLimit, async (req, res, next) => {
+    const id = Number(req.params.id);
+    const body = String((req.body && req.body.body) || '').trim();
+    if (!body) return res.status(400).json({ error: 'empty comment' });
+    if (body.length > 4000) return res.status(400).json({ error: 'comment too long (max 4000 chars)' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const row = (await client.query(
+        `select id, photo_id, user_id, body from comments where id = $1 for update`, [id],
+      )).rows[0];
+      if (!row) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
+      // Visibility first, and a non-member gets 404 rather than 403 — we
+      // never confirm that a photo they cannot open exists.
+      if (!(await assertPhotoVisible(pool, req.user, Number(row.photo_id)))) {
+        await client.query('rollback');
+        return res.status(404).json({ error: 'not found' });
+      }
+      const isAuthor = Number(row.user_id) === Number(req.user.id);
+      if (!isAuthor && req.user.role !== 'admin') {
+        await client.query('rollback');
+        return res.status(403).json({ error: 'forbidden' });
+      }
+      if (row.body === body) {
+        await client.query('rollback');
+        return res.json({ ok: true, changed: false });
+      }
+
+      await client.query(
+        `update comments set body = $1, edited_at = now() where id = $2`, [body, id],
+      );
+      await audit(client, {
+        actor: req.user.email, action: 'comment.edit',
+        entityType: 'comment', entityId: id, userId: req.user.id,
+        previousValue: { body: row.body },
+        newValue: {
+          body,
+          photo_id: Number(row.photo_id),
+          as_admin: !isAuthor,
+        },
+      });
+      await client.query('commit');
+      res.json({ ok: true, changed: true });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
+
   // Hide/unhide: admin OR moderator of a group the photo is in.
   router.post('/comments/:id(\\d+)/hide', async (req, res, next) => {
     const id = Number(req.params.id);

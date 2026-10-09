@@ -39,6 +39,45 @@
         setStatus(card, '');
         return;
       }
+
+      // Phase 15: correct the wording in place. Independent of the
+      // decision — save and leave it pending, or save then accept and the
+      // accept writes the corrected text.
+      const editor = card.querySelector('[data-edit-text]');
+      if (act === 'edit-text' || act === 'cancel-text' || act === 'save-text') {
+        if (!editor) return;
+        const field = editor.querySelector('[data-edit-field]');
+        if (act === 'edit-text') {
+          editor.hidden = false;
+          field.focus();
+          return;
+        }
+        if (act === 'cancel-text') {
+          editor.hidden = true;
+          field.value = field.defaultValue;
+          setStatus(card, '');
+          return;
+        }
+        busy(buttons, true);
+        setStatus(card, 'Saving text…');
+        try {
+          await CD.api(`/api/admin/suggestions/${id}`, {
+            method: 'PATCH', body: { text: field.value },
+          });
+          field.defaultValue = field.value;
+          const proposed = card.querySelector('.proposed');
+          if (proposed) proposed.textContent = field.value;
+          card.dataset.proposed = field.value;
+          editor.hidden = true;
+          setStatus(card, 'Text saved', 'ok');
+          CD.toast('Suggestion text saved.');
+        } catch (err) {
+          setStatus(card, err.message || 'Something went wrong', 'error');
+        } finally {
+          busy(buttons, false);
+        }
+        return;
+      }
       const force = act === 'force';
       const url = `/api/admin/suggestions/${id}/${act === 'reject' ? 'reject' : 'accept'}`;
       busy(buttons, true);
