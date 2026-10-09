@@ -97,6 +97,7 @@ const shortName = person.nickname || person.given_name || name;
         <span data-variant-text><%= v.variant %></span>
         <span class="muted small-text">(<%= String(v.kind).replace(/_/g, ' ') %>)</span>
         <button type="button" class="btn ghost small" data-js-only data-act="edit-variant">Rename</button>
+        <button type="button" class="btn ghost small" data-js-only data-act="remove-variant">Remove</button>
       </li>
       <% }) %>
     </ul>

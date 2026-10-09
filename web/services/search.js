@@ -104,7 +104,7 @@ async function resolveTerms(pool, terms) {
            select a.place_id, 'alias', a.alias, 2
              from place_aliases a
              join places p3 on p3.id = a.place_id and p3.is_deleted = false
-            where search_token(a.alias) = n.tok
+            where search_token(a.alias) = n.tok and a.is_deleted = false
            union all
            select p4.id, 'phonetic', p4.name, 0
              from places p4
@@ -609,7 +609,7 @@ async function autocompleteSearch(pool, user, q, scope) {
         and (search_token(pl.name) = (select tok from tok)
              or lower(pl.name) like $${prefixIdx}
              or exists (select 1 from place_aliases a
-                         where a.place_id = pl.id
+                         where a.place_id = pl.id and a.is_deleted = false
                            and (search_token(a.alias) = (select tok from tok)
                                 or lower(a.alias) like $${prefixIdx})))
       order by rank desc, n desc, name

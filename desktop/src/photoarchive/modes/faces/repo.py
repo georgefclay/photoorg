@@ -367,7 +367,8 @@ def search_people(
                    when lower(coalesce(p.suffix, '')) like %s then 1
                    when exists (
                      select 1 from person_name_variants v
-                     where v.person_id = p.id and lower(v.variant) like %s
+                     where v.person_id = p.id and v.is_deleted = false
+                       and lower(v.variant) like %s
                    ) then 2
                    when similarity(coalesce(p.display_name, ''), %s) > 0.15 then 1
                    else 0
@@ -590,12 +591,16 @@ def create_person(
 
 
 def list_name_variants(conn: psycopg.Connection, person_id: int) -> list[tuple[int, str, str]]:
-    """(variant_id, variant, kind) — a person's hand-curated aliases."""
+    """(variant_id, variant, kind) — a person's live hand-curated aliases.
+
+    Soft-deleted since Phase 15 fix-up 1: the row stays so the removal can
+    reach the web, which a hard delete never could (the push only upserts).
+    """
     rows = conn.execute(
         """
         select id, variant, kind::text
         from person_name_variants
-        where person_id = %s
+        where person_id = %s and is_deleted = false
         order by lower(variant)
         """,
         (person_id,),
@@ -610,10 +615,47 @@ def add_name_variant(
     variant: str,
     kind: str = "nickname",
 ) -> int | None:
-    """Case-insensitively unique per person; returns the new id or None
-    if the variant already exists on this person."""
-    if not variant.strip():
+    """Case-insensitively unique per person; returns the id, or None if the
+    variant is already live on this person.
+
+    **Re-adding a removed variant brings it back rather than failing on the
+    key.** The row still exists — removal is a soft-delete since fix-up 1 —
+    so a plain insert would hit `person_name_variants_uq` and the name
+    would be un-re-addable. Flip the flag instead; the id, and therefore
+    the web's copy of the row, is the same one.
+    """
+    variant = variant.strip()
+    if not variant:
         return None
+    row = conn.execute(
+        """
+        select id, is_deleted from person_name_variants
+        where person_id = %s and lower(variant) = lower(%s)
+        """,
+        (person_id, variant),
+    ).fetchone()
+    if row is not None:
+        if not row[1]:
+            return None  # already live
+        variant_id = int(row[0])
+        conn.execute(
+            """
+            update person_name_variants
+               set variant = %s, kind = %s, is_deleted = false, deleted_at = null,
+                   deleted_by = null, edited_on_desktop_at = now()
+             where id = %s
+            """,
+            (variant, kind, variant_id),
+        )
+        dbmod.audit(
+            conn, actor="desktop", action="person.variant.add",
+            entity_type="person", entity_id=person_id,
+            previous_value={"variant": variant, "variant_id": variant_id, "is_deleted": True},
+            new_value={"variant": variant, "kind": kind, "variant_id": variant_id,
+                       "restored": True},
+        )
+        return variant_id
+
     row = conn.execute(
         """
         insert into person_name_variants (person_id, variant, kind, edited_on_desktop_at)
@@ -621,7 +663,7 @@ def add_name_variant(
         on conflict do nothing
         returning id
         """,
-        (person_id, variant.strip(), kind),
+        (person_id, variant, kind),
     ).fetchone()
     if row is None:
         return None
@@ -629,23 +671,41 @@ def add_name_variant(
     dbmod.audit(
         conn, actor="desktop", action="person.variant.add",
         entity_type="person", entity_id=person_id,
-        new_value={"variant": variant.strip(), "kind": kind, "variant_id": variant_id},
+        new_value={"variant": variant, "kind": kind, "variant_id": variant_id},
     )
     return variant_id
 
 
 def remove_name_variant(conn: psycopg.Connection, variant_id: int) -> None:
+    """Soft-delete (fix-up 1). A hard delete could never reach the web —
+    the push only upserts — so a nickname removed here went on showing on
+    the site forever. The flag travels, and `edited_on_desktop_at` marks it
+    as a human decision so `sync_web_edit_wins` settles a removal the same
+    way it settles a rename.
+    """
     row = conn.execute(
-        "select person_id, variant, kind from person_name_variants where id = %s",
+        """
+        select person_id, variant, kind::text, is_deleted
+        from person_name_variants where id = %s
+        """,
         (variant_id,),
     ).fetchone()
-    if row is None:
+    if row is None or row[3]:
         return
-    conn.execute("delete from person_name_variants where id = %s", (variant_id,))
+    conn.execute(
+        """
+        update person_name_variants
+           set is_deleted = true, deleted_at = now(), edited_on_desktop_at = now()
+         where id = %s
+        """,
+        (variant_id,),
+    )
     dbmod.audit(
-        conn, actor="desktop", action="person.variant.remove",
+        conn, actor="desktop", action="person.variant_remove",
         entity_type="person", entity_id=int(row[0]),
-        previous_value={"variant": row[1], "kind": row[2], "variant_id": variant_id},
+        previous_value={"variant": row[1], "kind": row[2], "variant_id": variant_id,
+                        "is_deleted": False},
+        new_value={"variant": row[1], "variant_id": variant_id, "is_deleted": True},
     )
 
 

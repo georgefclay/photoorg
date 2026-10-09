@@ -486,24 +486,34 @@ test('place aliases sync, and a removal travels as an empty set', async () => {
   assert.equal(res.status, 200);
   assert.equal(res.body.aliases, 2);
   let { rows } = await pool.query(
-    'select alias from place_aliases where place_id = 400 order by alias');
+    `select alias from place_aliases
+      where place_id = 400 and is_deleted = false order by alias`);
   assert.deepEqual(rows.map((r) => r.alias), ['Banff AB', 'Banff Springs']);
 
-  // A correction on the laptop: one alias re-spelled, one removed.
+  // A correction on the laptop: one alias re-spelled, one removed. Since
+  // fix-up 1 the absent ones are **flagged, not deleted**, so the live
+  // set is what changes. (`corrections-fixup1.test.js` covers the flag and
+  // the restore in their own right.)
   res = await push('/sync/place_aliases', {
     items: [{ place_id: 400, aliases: [{ alias: 'Banff Springs Hotel', kind: 'alias' }] }],
   });
   assert.equal(res.status, 200);
   assert.equal(res.body.removed, 2);
-  ({ rows } = await pool.query('select alias from place_aliases where place_id = 400'));
+  ({ rows } = await pool.query(
+    `select alias from place_aliases
+      where place_id = 400 and is_deleted = false order by alias`));
   assert.deepEqual(rows.map((r) => r.alias), ['Banff Springs Hotel']);
 
-  // The last alias removed: the empty set has to clear the table, which
-  // is the state a soft-delete column would otherwise have carried.
+  // The last alias removed: the empty set has to leave no live alias,
+  // which is the state the push sends alias-less places to express.
   res = await push('/sync/place_aliases', { items: [{ place_id: 400, aliases: [] }] });
   assert.equal(res.status, 200);
-  ({ rows } = await pool.query('select alias from place_aliases where place_id = 400'));
+  ({ rows } = await pool.query(
+    'select alias from place_aliases where place_id = 400 and is_deleted = false'));
   assert.equal(rows.length, 0);
+  // And every row is still there, restorable.
+  ({ rows } = await pool.query('select alias from place_aliases where place_id = 400'));
+  assert.equal(rows.length, 3, 'no real deletes, ever');
 });
 
 test('place aliases for an unknown or web-origin place are ignored, not an error', async () => {

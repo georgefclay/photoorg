@@ -633,10 +633,12 @@ def test_place_update_and_aliases(phase6):
         assert places_repo.remove_alias(conn, ids["place"], "Canuckia")
         conn.commit()
         assert "Canuckia" not in dict(places_repo.list_aliases(conn, ids["place"]))
+        # Fix-up 1 renamed the removal action and made it a soft-delete;
+        # `test_corrections_fixup1.py` covers the flag itself.
         assert conn.execute(
             """
             select count(*) from audit_log
-             where action in ('place.alias.add', 'place.alias.remove')
+             where action in ('place.alias.add', 'place.alias_remove')
                and entity_id = %s
             """,
             (ids["place"],),

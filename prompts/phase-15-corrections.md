@@ -272,3 +272,125 @@ moderator no, non-member 404).
   desktop still does not reach the web (a renamed one now does). Same class of
   gap as `album_photos` before this phase; out of scope here because answer 5
   named the two join tables only.
+
+---
+
+## Phase 15 fix-up 1 — the last real deletes, the `down` precedent, and the deploy
+
+PM review of 2b59e6d (2026-10-08). The build is accepted as far as it goes: tests green; the desktop round trip on real data is clean (audit #78009–#78012, 139 suggestions untouched by choice); the guard reads correctly in `routes/sync.js` (`edited_on_web_at` is never in a push's insert list, so the web's stamp cannot regress; the `albums` upsert is still floor-guarded); the migration is additive and safe for the VM; and teaching the structural sweep to see through `keepWebEdits()` was the right instinct. Not pushing against the laptop web was the right call too. Three things before the phase closes, then the deploy and the two verification items that wait on it.
+
+### 1. `person_name_variants` gets soft-delete — the gap you flagged is the rule's gap
+A nickname removed on the desktop that keeps showing on the web is exactly the fault the Inviolable names, so it does not wait for another phase. Migration `phase-15-fixup-1`: `is_deleted / deleted_at / deleted_by` on `person_name_variants` (it has `updated_at` since Phase 15). Desktop "remove variant" (People sidebar and Corrections) becomes a soft-delete with a `person.variant_remove` audit row carrying the previous value; `/sync/person_name_variants` pushes and assigns the flag; the web People editor's variant removal does the same and stamps `edited_on_web_at`; add `is_deleted` to `WEB_EDITABLE.person_name_variants` so the same `sync_web_edit_wins` rule decides a removal exactly as it decides a rename. Every reader filters `is_deleted = false`, `person_search` included (re-create the Phase 11 function the way Phase 15 did for `photo_search`). A merge moves live variants only. Re-adding a removed variant flips the flag back — the key still exists — and that gets a test.
+
+### 2. `place_aliases` — same treatment, not an exception
+`/sync/place_aliases` does a real `delete`, and I assume the desktop's alias removal does too. "No real deletes, ever" has no exception for text that is its own key. Add `is_deleted / deleted_at / deleted_by / updated_at` (+ `set_updated_at`) to `place_aliases`; the desktop removal soft-deletes with a `place.alias_remove` audit row carrying the previous value; the sync route keeps its replace-the-whole-set semantics but writes them as `update … set is_deleted = true where place_id = $1 and alias <> all($2)` plus an upsert that sets `is_deleted = false` for each incoming alias; readers (the search place layer, autocomplete, the place editor) filter the flag. The empty incoming set still means "no live aliases". A Corrections rename of an alias keeps renaming the row in place (the audit has previous/new; `key_after_write` stays) — on the web that arrives as old-flagged, new-live. If you see a reason this is wrong rather than merely more work, say so under Answers and stop.
+
+### 3. Phase 15's `down` aborts, it does not delete
+`delete from ${t} where is_deleted` in `down` is a real delete. The precedent is `photo-back-orphan`'s `down`: abort with a clear message naming the counts when any soft-deleted rows exist, and say what the operator should do instead. Amend `down` in place; `up` stays byte-for-byte identical, because the laptop's `photoorg`, `photoorg_web` and the test DBs have already applied it and the VM must apply the same thing. Fix-up 1's own migration follows the same rule.
+
+### 4. Two checks, no code unless they fail
+- Re-adding a photo to an album it was removed from (and to a place) flips `is_deleted` back rather than failing on the key — on the desktop and through `/sync/album_photos` / `/sync/photo_places`.
+- The soft-delete UPDATE on `album_photos` / `photo_places` fires the Phase 11 search refresh on the **laptop** too (the web test proves the web side only). If the Phase 11 trigger on either table covers only insert/delete, add update to it in the fix-up migration.
+
+### 5. Deploy — George's hand, one window
+The auto-mode classifier cannot be argued with, so George runs it. Commit and push fix-up 1 **first**, so the VM takes `phase-7-cleanup`, `phase-15-corrections` and `phase-15-fixup-1` in one window. Give George the one-liner again with the runbook's dump line prepended (it is in `GC.md`; the 2026-10-04 dump is five days old) — in your message, never in this file. When it returns `ok`, verify read-only from the laptop: `select name, run_on from pgmigrations order by run_on desc limit 4` shows the three; `/sync/status` → `id_floor.ok` and the VM's own identity; `/var/log/photoorg.log` clean since the restart; the caddy access log shows no 4xx burst from the new pages (the fail2ban rule).
+
+### 6. Then finish Phase 15's verification on the site
+- One full push with **zero failed stages**, pasted. This is the first push past `photo_masters` since Sep 17 — masters metadata, split children and tombstones should all flow; report the counts per stage.
+- The prompt's step 2, second half: album 6 `(TEST)` → push → shown on the site → undo → push → shown restored.
+- One variant removal → push → gone from the person page and from search → re-add → push → back. Report the audit rows for both.
+
+### 7. Docs, commit
+`CLAUDE.md` Inviolable: "No real deletes" now names `person_name_variants` and `place_aliases` as soft-delete tables, and states the migration-`down` rule (abort, never delete). `shared/SCHEMA.md` for the new columns. `PROJECT-PLAN.md` Phase 15 section, §5 item 17 (deploy done) and a Progress entry. Commit and push: `Phase 15 fix-up 1: soft-delete variants and aliases, down aborts, deploy`.
+
+### Not in this fix-up
+`sync_state.json` pull cursors are not keyed by the target web's identity — pointing the desktop at a second web server would cross them (your reason for not testing against the laptop web, correctly). Recorded as PROJECT-PLAN §5 item 18; fix when a second target ever exists.
+
+### Fix-up 1 built 2026-10-08
+
+No objection to any of the three — all accepted and built. Item 2 in
+particular: "no real deletes, ever" having no exception for text that is
+its own key is right, and the row keeping its `(place_id, alias)` key
+while carrying the flag costs nothing.
+
+**Migration `phase-15-fixup-1`**
+- `person_name_variants`: `is_deleted / deleted_at / deleted_by` + a live
+  partial index (it already had `updated_at` from Phase 15).
+- `place_aliases`: `is_deleted / deleted_at / deleted_by / updated_at` +
+  `set_updated_at` + a live partial index.
+- Phase 11's `refresh_people_search_now` re-created with
+  `nv.is_deleted = false` on the `variant_tokens` CTE — the same move
+  Phase 15 made for `photo_search`. Its `person_name_variants` update
+  trigger already unions `ot`/`nt`, so an `is_deleted` flip rebuilds the
+  index with nothing else needed.
+- `down` aborts on soft-deleted rows, as does Phase 15's amended one.
+
+**Desktop**
+- `faces/repo.remove_name_variant` soft-deletes and audits
+  `person.variant_remove` with the previous value; `add_name_variant`
+  flips a removed row back (matching on `lower(variant)`, which is what
+  the unique is on) and returns the *same id*, so the web's copy stays in
+  step; `list_name_variants` and the people autocomplete filter the flag.
+- `merge.py` moves **live** variants only and soft-deletes the colliding
+  leftovers instead of deleting them — those rows are pushed, so a real
+  delete left the web showing a nickname on a person who no longer exists.
+- `corrections/places.remove_alias` soft-deletes and audits
+  `place.alias_remove`; `add_alias` restores; `list_aliases` filters.
+- Corrections' `person_variant` and `place_alias` targets no longer offer
+  removed rows. The alias **collision check deliberately stays
+  unfiltered**: a soft-deleted row still holds its key, so renaming an
+  alias onto a removed one is still refused-and-listed rather than
+  aborting the batch.
+- Push sends the variant flag and `deleted_at`; the `place_aliases` stage
+  sends each place's **live** set.
+
+**Web**
+- `WEB_EDITABLE.person_name_variants` gains `is_deleted` (and `deleted_at`,
+  so the timestamp travels with the flag it belongs to), so
+  `sync_web_edit_wins` settles a removal exactly as it settles a rename.
+  `people.is_deleted` is deliberately *not* in any of these lists.
+- `DELETE /api/people/:id/variants/:variantId` — admin only, soft-delete,
+  stamps `edited_on_web_at`, audits `person.variant_remove`. The People
+  editor grows a **Remove** button. `POST .../variants` now restores a
+  removed variant (same id) instead of 409-ing on the key.
+- `/sync/place_aliases` flags what the laptop no longer sends and un-flags
+  what it does. Its per-alias write is **update-then-insert, not one
+  upsert**: the unique is on `lower(alias)`, so a desktop rename that only
+  changes case leaves a row whose `alias` no longer matches but whose
+  `lower(alias)` still does, and `on conflict (place_id, alias)` would miss
+  it and then violate `place_aliases_ci_uq`.
+- Readers filtered: `services/people.js` (both variant `exists` clauses and
+  `getPerson`), `services/search.js` (both alias lookups).
+
+**Item 4 — both checks passed with no code change, and now have tests.**
+Re-adding a photo to an album or place already flips the flag rather than
+failing on the key, on the desktop and through both sync routes. Phase
+11's statement triggers on `album_photos` and `photo_places` already cover
+UPDATE (`photo_search_touch_photo_id` unions `ot` and `nt`), so the
+laptop's own index refreshes on a soft-delete — `test_corrections_fixup1.py`
+asserts that directly against `photo_search`.
+
+**One bug caught while writing it.** The route's `restored` counter read
+`returning is_deleted`, which hands back the value just written (always
+false) — so it reported every pre-existing alias as restored. It now comes
+from a CTE that captures the flag before the update.
+
+**Tests:** desktop +14 (`test_corrections_fixup1.py`), web +10
+(`test/corrections-fixup1.test.js`). Totals: desktop 646 + 1 skipped, web
+207.
+
+**Not in this fix-up, recorded as PROJECT-PLAN §5 item 18:**
+`sync_state.json`'s pull cursors are not keyed by the target web's
+identity, so pointing the desktop at a second web server would cross them.
+Harmless with one target.
+
+**Still waiting on George:** the deploy (§5 and §6). Fix-up 1 is committed
+and pushed, so the VM takes `phase-7-cleanup`, `phase-15-corrections` and
+`phase-15-fixup-1` in one window.
+
+---
+
+## Answers to Claude Code's fix-up 1 questions
+(added as they come)
+
+None — nothing in fix-up 1 looked wrong rather than merely more work, so it was built as specified. The two judgement calls are noted in the Progress entry above: `deleted_at` rides along with `is_deleted` in `WEB_EDITABLE` (it is part of the same one fact), and the alias collision check stays unfiltered on purpose.

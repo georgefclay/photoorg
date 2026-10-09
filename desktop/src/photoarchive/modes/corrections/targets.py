@@ -16,9 +16,10 @@ Three row shapes, because three tables genuinely differ:
   payload around them must survive the edit untouched, so the write is a
   ``jsonb_set``, never a replacement of the whole document.
 * ``ALIAS`` — ``place_aliases`` keys on ``(place_id, alias)``: the text
-  *is* the primary key, so an edit is a delete-and-insert and can collide
-  with an alias the place already has. `repo` handles that explicitly
-  rather than hiding it behind an upsert that would drop the row.
+  *is* the primary key, so an edit renames the row and can collide with an
+  alias the place already has. `repo` handles that explicitly rather than
+  hiding it behind an upsert that would drop the row. Removed aliases are
+  soft-deleted (fix-up 1) and are not offered for correction.
 
 The master-derived group is listed too, with ``editable=False``. Phase 15
 answer 3: `photos.source_folder`, `photos.scan_batch` and
@@ -174,6 +175,7 @@ TARGETS: list[Target] = [
         "person_variant", "People — name variants", "person_name_variants",
         "person", "variant",
         display="'#' || t.id || ' — person ' || t.person_id",
+        extra="t.is_deleted = false",
     ),
 
     # ---- places -----------------------------------------------------
@@ -196,7 +198,7 @@ TARGETS: list[Target] = [
                    t.alias as value
               from place_aliases t
               join places p on p.id = t.place_id
-             where t.alias {op} %(pattern)s
+             where t.alias {op} %(pattern)s and t.is_deleted = false
              order by t.place_id, t.alias
         """,
     ),

@@ -344,9 +344,17 @@ def test_the_places_tab_edits_a_place_and_its_aliases(phase6):
         _pump()
         with dbmod.connection() as conn:
             conn.autocommit = True
-            assert conn.execute(
-                "select count(*) from place_aliases where place_id = %s", (ids["place"],)
-            ).fetchone()[0] == 0
+            # Fix-up 1: removal is a soft-delete, so the row survives and
+            # it is the *live* count that drops to zero.
+            live, total = conn.execute(
+                """
+                select count(*) filter (where not is_deleted), count(*)
+                  from place_aliases where place_id = %s
+                """,
+                (ids["place"],),
+            ).fetchone()
+            assert (live, total) == (0, 1)
+        assert tab.aliases.count() == 0
     finally:
         tab.deleteLater()
         _pump(50)

@@ -730,7 +730,8 @@ _META_STAGES = [
     (
         "person_name_variants",
         """
-        select id, person_id, variant, kind, created_at, edited_on_desktop_at
+        select id, person_id, variant, kind, created_at, edited_on_desktop_at,
+               is_deleted, deleted_at
           from person_name_variants
          where id < %(web_id_floor)s
         """,
@@ -739,6 +740,11 @@ _META_STAGES = [
             "kind": r["kind"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
+            # Fix-up 1: a removed nickname has to travel, or it goes on
+            # showing on the web forever (the push only upserts). The flag
+            # is LWW-guarded like the wording, because the web's People
+            # editor can remove a variant too.
+            "is_deleted": r["is_deleted"], "deleted_at": _iso(r["deleted_at"]),
         },
     ),
     (
@@ -817,13 +823,14 @@ _META_STAGES = [
     (
         # Phase 15: aliases used to stop at the laptop (PROJECT-PLAN sec 5
         # item 11), so a corrected alias never reached the site's search.
-        # `place_aliases` keys on (place_id, alias) and has no soft-delete:
-        # the text *is* the key, so there is nothing to flag. Hence the
-        # route takes a place's whole alias set and replaces it, which is
-        # also how a removal travels. Every desktop place is sent, alias or
-        # not -- selecting only places that *have* aliases would mean the
-        # one case a soft-delete would have covered (the last alias
-        # removed) never reaching the web at all.
+        # Each desktop place's **live** alias set, replaced wholesale by the
+        # route: anything absent from the set is flagged `is_deleted` there
+        # (fix-up 1 gave the table the flag; before that the route issued a
+        # real delete, which "no real deletes, ever" does not allow for
+        # text that happens to be its own key). Every place is sent, alias
+        # or not -- an empty set is exactly how "the last alias was
+        # removed" travels, and selecting only places that still have one
+        # would strand that case on the laptop forever.
         # Desktop-authoritative: the web has no alias editor, so there is
         # no web-born alias to protect.
         "place_aliases",
@@ -837,7 +844,8 @@ _META_STAGES = [
                  '[]'::jsonb
                ) as aliases
           from places pl
-          left join place_aliases pa on pa.place_id = pl.id
+          left join place_aliases pa
+                 on pa.place_id = pl.id and pa.is_deleted = false
          where pl.id < %(web_id_floor)s
          group by pl.id
         """,

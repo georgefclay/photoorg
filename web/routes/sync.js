@@ -31,7 +31,7 @@
 //   POST /sync/photo_backs             batch upsert (metadata + transcription)
 //   POST /sync/suggestions             batch upsert (AI + import)
 //
-//   POST /sync/place_aliases           per-place alias set, replaced wholesale
+//   POST /sync/place_aliases           per-place live alias set; absent ones flagged
 //
 //   POST /sync/photo_groups            batch upsert (soft-delete rows sync as-is)
 //   GET  /sync/pull/groups             groups + memberships + photo_groups since cursor
@@ -90,7 +90,14 @@ const WEB_EDITABLE = {
   places:               ['name', 'latitude', 'longitude', 'notes'],
   people:               ['given_name', 'middle_name', 'surname', 'maiden_name',
                          'nickname', 'suffix', 'birth_year', 'death_year', 'notes'],
-  person_name_variants: ['variant', 'kind'],
+  // Fix-up 1: `is_deleted` is guarded here, unlike everywhere else. A
+  // soft-delete is normally a decision and stays desktop-authoritative,
+  // but the web's People editor can remove a variant, so a removal here
+  // really is a human edit either side could make and the same
+  // `sync_web_edit_wins` rule should settle it. `people.is_deleted`
+  // (soft-deleting a whole person) is deliberately NOT in any of these
+  // lists.
+  person_name_variants: ['variant', 'kind', 'is_deleted', 'deleted_at'],
   suggestions:          ['payload'],
 };
 
@@ -449,8 +456,9 @@ module.exports = function syncRoutes({ pool }) {
 
   router.post('/person_name_variants', batchUpsert('person_name_variants',
     `insert into person_name_variants (id, person_id, variant, kind,
+                                       is_deleted, deleted_at,
                                        edited_on_desktop_at, created_at)
-     values ($1,$2,$3,$4,$5,coalesce($6::timestamptz, now()))
+     values ($1,$2,$3,$4,$5,$6,$7,coalesce($8::timestamptz, now()))
      on conflict (id) do update set
        -- person_id must be here: a desktop person merge re-parents the
        -- variant onto the winner (modes/faces/merge.py) without changing
@@ -463,6 +471,7 @@ module.exports = function syncRoutes({ pool }) {
        edited_on_desktop_at = excluded.edited_on_desktop_at
      where person_name_variants.id < ${WEB_ID_FLOOR}`,
     (r) => [Number(r.id), r.person_id, r.variant, r.kind,
+            !!r.is_deleted, r.deleted_at || null,
             r.edited_on_desktop_at || null, r.created_at],
     { webOriginIds: true },
   ));
@@ -566,11 +575,16 @@ module.exports = function syncRoutes({ pool }) {
             !!r.is_deleted, r.deleted_at || null, r.updated_at || null],
   ));
 
-  // `place_aliases` keys on (place_id, alias) and has no soft-delete — the
-  // text *is* the key, so there is nothing to flag. The desktop therefore
-  // sends each place's whole alias set and this route replaces it, which
-  // is how both a correction and a removal travel. Desktop-authoritative:
-  // the web has no alias editor, so nothing here can lose a web edit.
+  // `place_aliases` keys on (place_id, alias), so the desktop sends each
+  // place's whole **live** alias set and this route makes the web match
+  // it: anything absent is flagged, anything present is (re-)made live.
+  // That is how a correction, a removal and a restore all travel on one
+  // route. Desktop-authoritative: the web has no alias editor, so nothing
+  // here can lose a web edit.
+  //
+  // Fix-up 1 turned the flagging from a `delete` into an `update`. "No
+  // real deletes, ever" has no exception for text that happens to be its
+  // own key, and a deleted row cannot be restored or audited against.
   // (Phase 15 answer 6 — closes the place_aliases half of PROJECT-PLAN
   // section 5 item 11.)
   router.post('/place_aliases', async (req, res, next) => {
@@ -583,6 +597,7 @@ module.exports = function syncRoutes({ pool }) {
       let places = 0;
       let aliases = 0;
       let removed = 0;
+      let restored = 0;
       for (const r of rows) {
         const placeId = Number(r.place_id);
         if (!placeId) continue;
@@ -598,29 +613,64 @@ module.exports = function syncRoutes({ pool }) {
           .map((a) => ({ alias: String(a.alias || '').trim(), kind: a.kind || 'alias', created_at: a.created_at || null }))
           .filter((a) => a.alias);
 
-        // An empty incoming set removes every alias — `alias <> all('{}')`
-        // is vacuously true — which is exactly right: "this place now has
-        // no aliases" is the one state a soft-delete column would have
-        // represented.
+        // Flag whatever the laptop no longer has live. An empty incoming
+        // set flags everything -- `alias <> all('{}')` is vacuously true --
+        // which is exactly right: "this place now has no live aliases" is
+        // the state that has to be able to travel, and it is why the push
+        // sends alias-less places at all.
         const del = await client.query(
-          `delete from place_aliases
-            where place_id = $1 and alias <> all($2::text[])`,
+          `update place_aliases
+              set is_deleted = true, deleted_at = now(), updated_at = now()
+            where place_id = $1 and alias <> all($2::text[])
+              and is_deleted = false`,
           [placeId, incoming.map((a) => a.alias)],
         );
         removed += del.rowCount;
+
         for (const a of incoming) {
-          await client.query(
-            `insert into place_aliases (place_id, alias, kind, created_at)
-             values ($1, $2, $3, coalesce($4::timestamptz, now()))
-             on conflict (place_id, alias) do update set kind = excluded.kind`,
-            [placeId, a.alias, a.kind, a.created_at],
+          // Update-then-insert rather than one upsert, because the unique
+          // is on `lower(alias)`: a desktop rename that only changes case
+          // ("Banff West" -> "banff west") leaves a row whose `alias` no
+          // longer matches but whose `lower(alias)` still does, and an
+          // `on conflict (place_id, alias)` upsert would miss it and then
+          // violate `place_aliases_ci_uq`. This one statement also covers
+          // bringing a flagged alias back to life.
+          // `was_deleted` has to come from a CTE: `returning is_deleted`
+          // would hand back the value just written (always false), so
+          // counting on it reported every pre-existing alias as restored.
+          const upd = await client.query(
+            `with before as (
+               select alias, is_deleted from place_aliases
+                where place_id = $1 and lower(alias) = lower($2)
+             )
+             update place_aliases pa
+                set alias = $2, kind = $3,
+                    is_deleted = false, deleted_at = null, deleted_by = null,
+                    updated_at = now()
+               from before b
+              where pa.place_id = $1 and pa.alias = b.alias
+              returning b.is_deleted as was_deleted`,
+            [placeId, a.alias, a.kind],
           );
+          if (upd.rowCount === 0) {
+            await client.query(
+              `insert into place_aliases (place_id, alias, kind, created_at)
+               values ($1, $2, $3, coalesce($4::timestamptz, now()))
+               on conflict (place_id, alias) do update set
+                 kind = excluded.kind,
+                 is_deleted = false, deleted_at = null, deleted_by = null,
+                 updated_at = now()`,
+              [placeId, a.alias, a.kind, a.created_at],
+            );
+          } else if (upd.rows[0].was_deleted) {
+            restored += 1;
+          }
           aliases += 1;
         }
         places += 1;
       }
       await auditDesktop(client, 'sync.place_aliases.upsert', 'place_aliases', null,
-        { places, aliases, removed });
+        { places, aliases, removed, restored });
       await client.query('commit');
       res.json({ upserted: places, aliases, removed });
     } catch (err) {

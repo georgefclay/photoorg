@@ -282,7 +282,27 @@
 
     const variantList = pe.querySelector('[data-variant-list]');
     if (variantList) {
+      // Removal is a soft-delete on the server (fix-up 1): the row keeps
+      // its id so the flag can travel to the laptop, and re-adding the
+      // same name brings it back rather than failing on the key.
       variantList.addEventListener('click', async (e) => {
+        const rm = e.target.closest('[data-act="remove-variant"]');
+        if (rm) {
+          const li = rm.closest('[data-variant-id]');
+          const name = li.querySelector('[data-variant-text]').textContent;
+          if (!window.confirm(`Remove "${name}" as a name for this person?`)) return;
+          rm.disabled = true;
+          try {
+            await CD.api(`/api/people/${personId}/variants/${li.dataset.variantId}`,
+              { method: 'DELETE' });
+            li.remove();
+            CD.toast('Name variant removed.');
+          } catch (err) {
+            CD.toast(err.message || 'That did not save.', 'error');
+            rm.disabled = false;
+          }
+          return;
+        }
         const btn = e.target.closest('[data-act="edit-variant"]');
         if (!btn) return;
         const li = btn.closest('[data-variant-id]');

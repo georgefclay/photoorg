@@ -197,24 +197,51 @@ module.exports = function apiPeopleRoutes({ pool }) {
         'select 1 from people where id = $1 and is_deleted = false', [id],
       )).rows[0];
       if (!person) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
-      const ins = await client.query(
-        `insert into person_name_variants (person_id, variant, kind, edited_on_web_at)
-         values ($1, $2, $3, now())
-         on conflict do nothing
-         returning id`,
-        [id, variant, kind],
-      );
-      if (!ins.rowCount) {
+      // Re-adding a removed variant brings it back rather than 409-ing on
+      // the key: removal is a soft-delete since fix-up 1, so the row (and
+      // its id, and therefore the laptop's copy) still exists. The unique
+      // is on `lower(variant)`, so match that way.
+      const existing = (await client.query(
+        `select id, is_deleted from person_name_variants
+          where person_id = $1 and lower(variant) = lower($2)`,
+        [id, variant],
+      )).rows[0];
+      if (existing && !existing.is_deleted) {
         await client.query('rollback');
         return res.status(409).json({ error: 'that variant is already on this person' });
+      }
+      let variantId;
+      if (existing) {
+        await client.query(
+          `update person_name_variants
+              set variant = $1, kind = $2, is_deleted = false, deleted_at = null,
+                  deleted_by = null, edited_on_web_at = now()
+            where id = $3`,
+          [variant, kind, existing.id],
+        );
+        variantId = Number(existing.id);
+      } else {
+        const ins = await client.query(
+          `insert into person_name_variants (person_id, variant, kind, edited_on_web_at)
+           values ($1, $2, $3, now())
+           on conflict do nothing
+           returning id`,
+          [id, variant, kind],
+        );
+        if (!ins.rowCount) {
+          await client.query('rollback');
+          return res.status(409).json({ error: 'that variant is already on this person' });
+        }
+        variantId = Number(ins.rows[0].id);
       }
       await audit(client, {
         actor: req.user.email, action: 'person.variant.add',
         entityType: 'person', entityId: id, userId: req.user.id,
-        newValue: { variant, kind, variant_id: Number(ins.rows[0].id) },
+        previousValue: existing ? { variant_id: variantId, is_deleted: true } : null,
+        newValue: { variant, kind, variant_id: variantId, restored: !!existing },
       });
       await client.query('commit');
-      res.status(201).json({ id: Number(ins.rows[0].id) });
+      res.status(201).json({ id: variantId, restored: !!existing });
     } catch (err) {
       await client.query('rollback').catch(() => {});
       next(err);
@@ -238,7 +265,8 @@ module.exports = function apiPeopleRoutes({ pool }) {
       await client.query('begin');
       const prev = (await client.query(
         `select variant, kind from person_name_variants
-          where id = $1 and person_id = $2 for update`, [variantId, personId],
+          where id = $1 and person_id = $2 and is_deleted = false
+          for update`, [variantId, personId],
       )).rows[0];
       if (!prev) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
       if (prev.variant === variant) {
@@ -259,6 +287,48 @@ module.exports = function apiPeopleRoutes({ pool }) {
       });
       await client.query('commit');
       res.json({ ok: true, changed: true });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
+
+  // DELETE /api/people/:id/variants/:variantId — admin only, and a
+  // **soft-delete** (fix-up 1). A hard delete here would be invisible to
+  // the laptop: `/sync/person_name_variants` only upserts, so the desktop
+  // would re-push the name on its next run and the removal would undo
+  // itself. The flag is in `WEB_EDITABLE`, so `sync_web_edit_wins` settles
+  // it against a desktop edit exactly as it settles a rename.
+  router.delete('/:id(\\d+)/variants/:variantId(\\d+)', requireAdmin, async (req, res, next) => {
+    const personId = Number(req.params.id);
+    const variantId = Number(req.params.variantId);
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const prev = (await client.query(
+        `select variant, kind from person_name_variants
+          where id = $1 and person_id = $2 and is_deleted = false
+          for update`, [variantId, personId],
+      )).rows[0];
+      if (!prev) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
+      await client.query(
+        `update person_name_variants
+            set is_deleted = true, deleted_at = now(), deleted_by = $1,
+                edited_on_web_at = now()
+          where id = $2`,
+        [req.user.id, variantId],
+      );
+      await audit(client, {
+        actor: req.user.email, action: 'person.variant_remove',
+        entityType: 'person', entityId: personId, userId: req.user.id,
+        previousValue: { variant_id: variantId, variant: prev.variant,
+                         kind: prev.kind, is_deleted: false },
+        newValue: { variant_id: variantId, variant: prev.variant, is_deleted: true },
+      });
+      await client.query('commit');
+      res.json({ ok: true });
     } catch (err) {
       await client.query('rollback').catch(() => {});
       next(err);

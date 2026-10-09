@@ -33,13 +33,16 @@ def merge_people(
         (winner_id, loser_id),
     ).fetchall()
 
-    # Move name variants (dedupe by (person_id, lower(variant)) uniqueness)
+    # Move the loser's **live** name variants (fix-up 1: removal is a
+    # soft-delete, and a name somebody removed must not come back through
+    # a merge). Deduped by the (person_id, lower(variant)) unique.
     moved_variants = 0
     try:
         moved_variants = int(conn.execute(
             """
             update person_name_variants set person_id = %s
             where person_id = %s
+              and is_deleted = false
               and not exists (
                 select 1 from person_name_variants v2
                 where v2.person_id = %s
@@ -54,9 +57,16 @@ def merge_people(
         # variants can be re-added manually.
         log.warning("merge_people: variant move partial: %s", e)
 
-    # Drop leftover variants that would have collided.
+    # Leftovers are the ones that would have collided with a name the
+    # winner already has. Soft-delete them rather than deleting: the rows
+    # are pushed, so a real delete would leave the web showing a nickname
+    # attached to a person who no longer exists.
     conn.execute(
-        "delete from person_name_variants where person_id = %s",
+        """
+        update person_name_variants
+           set is_deleted = true, deleted_at = now(), edited_on_desktop_at = now()
+         where person_id = %s and is_deleted = false
+        """,
         (loser_id,),
     )
 

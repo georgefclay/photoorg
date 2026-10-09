@@ -16,6 +16,21 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   Ingest must refuse to run if it can write to a master.
 - **No real deletes, ever.** Soft-delete flags (`is_deleted`, `deleted_at`) and
   quarantine directories (`quarantine_path`). Restores must be possible.
+  This binds **join tables and text-keyed tables too**, and not only for
+  restorability: the push upserts, so a hard-deleted row simply stops being
+  sent and the web keeps it forever. `album_photos` and `photo_places`
+  (Phase 15), `person_name_variants` and `place_aliases` (fix-up 1) all
+  carry the flags. `place_aliases` keys on `(place_id, alias)` — the text
+  *is* the key — and that is not an exception: the row keeps its key and
+  carries `is_deleted`, and `/sync/place_aliases` flags what the laptop no
+  longer has live instead of deleting it. **Re-adding a removed row flips
+  the flag back** rather than failing on the key, on both tiers, in all
+  four tables.
+  **It binds a migration's `down` as well**: when soft-deleted rows exist,
+  `down` **aborts** with the counts and a remedy (the `photo-back-orphan`
+  precedent) — dropping the column would make every removed row read as
+  live again, silently putting photos back into albums and nicknames back
+  onto people. Never `delete from … where is_deleted` in a migration.
 - **Facts vs. suggestions.** AI output and family input go to `suggestions`
   with `status='pending'`. Only an admin promoting a suggestion writes to the
   fact columns (`photos.capture_date`, `faces.person_id`, `photo_places`, …).
@@ -89,11 +104,15 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   and the desktop's is no newer — and **ties go to the web**, the copy a
   relative is looking at. `routes/sync.js`'s `WEB_EDITABLE` names the
   guarded columns per table and is the same list the desktop's
-  `pull_web_edits` applies and `/sync/pull/web_edits` returns. Only the
-  *wording* is guarded: `is_deleted` (a decision) and
+  `pull_web_edits` applies and `/sync/pull/web_edits` returns. Mostly only
+  the *wording* is guarded: `people.is_deleted` (soft-deleting a whole
+  person — a decision only the desktop makes) and
   `person_name_variants.person_id` (which person owns the name, re-parented
   by a desktop merge) stay desktop-authoritative, or Phase 9 fix-up 2's bug
-  comes back.
+  comes back. The one exception is **`person_name_variants.is_deleted`**,
+  which fix-up 1 put *in* `WEB_EDITABLE`: the web's People editor can
+  remove a variant, so there a removal really is a human edit either side
+  could make and the same rule should settle it.
 - **A removal from a join table is a soft-delete, or it never leaves the
   laptop.** `album_photos` and `photo_places` were insert-or-update-only
   and the push only upserts, so "take this photo out of the album" never
@@ -103,7 +122,15 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   `photo_groups` has since Phase 9. **Every reader must filter
   `is_deleted = false`** — the photo page, the album page, the browse
   filters, `attentionCounts`, and the two lateral joins inside
-  `refresh_photos_search_now`.
+  `refresh_photos_search_now`. Fix-up 1 did the same for
+  `person_name_variants` (where `person_search`'s `variant_tokens` CTE is
+  the index that had to stop matching) and `place_aliases` (readers:
+  `services/search.js`'s two alias lookups, the desktop's `list_aliases`,
+  and the Corrections target's `find_sql`). An existence check used to
+  *guard a unique* is the one kind of read that must stay **unfiltered** —
+  a soft-deleted row still holds its key, so it still collides, and a
+  correction renaming an alias onto a removed one would otherwise abort the
+  whole batch.
 - **A typo that came from a master folder name is corrected in the derived
   text only.** `photos.source_folder`, `photos.scan_batch` and
   `photo_masters.master_path` are faithful records of the read-only master
@@ -1235,20 +1262,30 @@ The rule itself is in Inviolable. This is how it is built.
   thousand rows share one `edited_on_web_at` to the microsecond and a
   timestamp-only cursor with a page limit would hand back the same first
   page forever. The desktop pages until no table reports `has_more`.
-- **`/sync/place_aliases` replaces a place's whole alias set.** There is no
-  soft-delete to carry a removal — the text is the key — so the desktop
-  sends the complete set per place, *including an empty one*: selecting
-  only places that still have aliases would strand the one case that
-  matters (the last alias removed) on the laptop forever. Closes the
+- **`/sync/place_aliases` makes the web match the laptop's live alias set.**
+  The desktop sends the complete live set per place, *including an empty
+  one*: selecting only places that still have aliases would strand the one
+  case that matters (the last alias removed) on the laptop forever. The
+  route flags whatever is absent and un-flags whatever is present, so a
+  correction, a removal and a restore all travel on one route. Closes the
   `place_aliases` half of PROJECT-PLAN §5 item 11.
+  Its per-alias write is **update-then-insert, not one upsert**, because
+  the unique is on `lower(alias)`: a desktop rename that only changes case
+  leaves a row whose `alias` no longer matches but whose `lower(alias)`
+  still does, and `on conflict (place_id, alias)` would miss it and then
+  violate `place_aliases_ci_uq`. The same statement also brings a flagged
+  alias back. Counting restores needs the *old* flag, so it comes from a
+  CTE — `returning is_deleted` hands back the value just written and
+  reported every pre-existing alias as restored.
 
 ### Audit namespace
 `correction.replace`, `correction.batch`, `correction.undo`,
 `correction.undo.batch`, `correction.pull`, `sync.pull.web_edits`,
 `suggestion.edit`, `comment.edit`, `album.update`, `album.delete`,
 `album.restore`, `album.photo.add`, `album.photo.remove`, `album.reorder`,
-`place.update`, `place.alias.add`, `place.alias.remove`,
-`person.variant.edit`, `sync.place_aliases.upsert`.
+`place.update`, `place.alias.add`, `place.alias_remove`,
+`person.variant.add`, `person.variant.edit`, `person.variant_remove`,
+`sync.place_aliases.upsert`.
 
 ### A trap worth naming
 `web/test/sync-resync.test.js`'s structural sweep reads `routes/sync.js`'s

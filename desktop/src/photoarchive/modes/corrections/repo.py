@@ -175,7 +175,10 @@ def read_value(conn: psycopg.Connection, target: Target, key: dict[str, Any]) ->
         ).fetchone()
     elif target.shape is Shape.ALIAS:
         row = conn.execute(
-            "select alias from place_aliases where place_id = %s and alias = %s",
+            """
+            select alias from place_aliases
+             where place_id = %s and alias = %s and is_deleted = false
+            """,
             (key["place_id"], key["alias"]),
         ).fetchone()
     else:  # pragma: no cover - Shape is closed
@@ -222,6 +225,8 @@ def write_value(
         # raise would abort the whole correction over one duplicate, and
         # an upsert that dropped the row on conflict would lose the alias
         # altogether — a delete by accident.
+        # A soft-deleted row still holds the key, so it still collides:
+        # the check deliberately ignores `is_deleted`.
         clash = conn.execute(
             """
             select 1 from place_aliases
@@ -233,7 +238,7 @@ def write_value(
             return False
         conn.execute(
             """
-            update place_aliases set alias = %s
+            update place_aliases set alias = %s, updated_at = now()
              where place_id = %s and alias = %s
             """,
             (value, key["place_id"], key["alias"]),

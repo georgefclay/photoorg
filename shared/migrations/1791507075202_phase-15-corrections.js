@@ -29,6 +29,11 @@
 //    (insert-only; the only correction was hide/unhide). The author may now
 //    edit their own and an admin any, and an edited comment says so — text
 //    must never change silently under a relative who already read it.
+//
+// `down` **aborts** when soft-deleted join rows exist rather than deleting
+// them (amended in fix-up 1: "no real deletes, ever" binds a migration too).
+// `up` is byte-for-byte what the laptop's three databases already applied,
+// and must stay that way so the VM applies the same thing.
 
 export const shorthands = undefined;
 
@@ -125,14 +130,36 @@ export const down = (pgm) => {
   pgm.sql(searchFn({ softDeleteJoins: false }));
   pgm.sql(`drop index if exists photo_places_live_idx`);
   pgm.sql(`drop index if exists album_photos_live_idx`);
+  // A soft-deleted join row has no representation without the column:
+  // dropping it would make the row live again, which is a silent *re-add*
+  // of a photo to an album somebody removed it from. The first draft
+  // deleted those rows instead — but "no real deletes, ever" binds a
+  // migration as much as it binds the app, so this follows the
+  // `photo-back-orphan` precedent and **aborts**, naming the counts and
+  // what to do instead. `up` is unchanged and must stay so: the laptop's
+  // three databases have already applied it and the VM must apply the
+  // same thing.
+  pgm.sql(`
+    do $$
+    declare n_ap bigint; n_pp bigint;
+    begin
+      select count(*) into n_ap from album_photos where is_deleted;
+      select count(*) into n_pp from photo_places where is_deleted;
+      if n_ap > 0 or n_pp > 0 then
+        raise exception
+          'album_photos has % soft-deleted row(s) and photo_places has %. '
+          'Refusing to drop is_deleted: without the column every one of '
+          'those rows reads as live again, silently putting photos back '
+          'into albums and places somebody removed them from. Restore the '
+          'removals you want to keep (set is_deleted = false), or move the '
+          'rows out to a side table you keep, before rolling this back. '
+          'Every removal is in audit_log under album.photo.remove.', n_ap, n_pp;
+      end if;
+    end
+    $$;
+  `);
   for (const t of JOIN_TABLES) {
     pgm.sql(`drop trigger if exists ${t}_set_updated_at on ${t}`);
-    // A soft-deleted join row has no representation without the column, and
-    // dropping it would make the row live again — which is a silent
-    // *re-add* of a photo to an album somebody removed it from. Delete
-    // those rows instead: the removal is what the operator asked for, and
-    // it is in the audit log either way.
-    pgm.sql(`delete from ${t} where is_deleted`);
     pgm.dropColumns(t, ['is_deleted', 'deleted_at', 'deleted_by', 'updated_at']);
   }
 

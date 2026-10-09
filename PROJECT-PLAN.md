@@ -28,6 +28,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 
 **Progress (2026-09-27):** **Phase 7 (scan cleanup) built and green — not yet run on real scans.** Desktop pytest 291/291 (+1 skipped), web 151/151, one new migration `phase-7-cleanup` (up and down both exercised). New `desktop/src/photoarchive/modes/cleanup/` (analyse / geometry / ops / render / repo / accept / split / job / report / remote / ui), two CLI entry points (`run_cleanup`, `cleanup_report`), and 6 new test files (geometry, analyse, accept, split, report, ui, remote) plus tombstone tests on both sides. Scope measured against the live DB: **4 095** scans in scope (3 947 JPEG / 148 TIFF, up to 93.7 MP), 3 666 with faces, 4 187 labelled faces on scans, 54 batches, 639 back-shaped scans excluded, `orientation` NULL on every in-scope scan (so display frame == raw frame). **Verification steps 2–4 are blocked on the `D:` drive being attached** — masters, `WORKING_DIR` and `CLEANUP_DIR` all live there and only `C:` is mounted; batches 00001–00005 (~380 photos, not the ~250 the prompt guessed) are the first run once it is back. Three real bugs found by the tests on the way: a black scanner bed masking in as one whole-scan print (HSV saturation on near-black noise), a live `QThread` dropped when a preview render was replaced, and a preview landing wiping the last decision off the status bar.
 
+**Progress (2026-10-08, late):** **Phase 15 built, tested, committed and pushed (2b59e6d).** Desktop 632 passed / 1 skipped, web 197 passed. Verification 2's desktop half is clean on real data — album 6 renamed with a `(TEST)` marker and undone through the real Corrections tab (audit #78009 `correction.replace`, #78010 `correction.batch`, #78011 `correction.undo`, #78012 `correction.undo.batch`; the 139 pending suggestions untouched by choice). The push half and verification 3 wait on the VM deploy, which the auto-mode permission classifier refuses before George ever sees a prompt — **George runs the one-liner Code prepares**. PM review of the diff: the LWW guard is right (`edited_on_web_at` is never in a push's insert list, so the web's stamp cannot regress; the `albums` upsert is still floor-guarded) and the migration is additive and safe for the VM. Three things sent back as **fix-up 1** before the phase closes: `person_name_variants` and `place_aliases` still use real deletes (a removed nickname never leaves the site; `/sync/place_aliases` deletes rows on the web) — both get the soft-delete shape; Phase 15's migration `down` deletes soft-deleted join rows where the `photo-back-orphan` precedent says abort; and two checks (re-add after removal flips the flag; the laptop's search refresh fires on the soft-delete UPDATE). The deploy happens **once, after fix-up 1**, taking `phase-7-cleanup`, `phase-15-corrections` and `phase-15-fixup-1` together; then the first push past `photo_masters` since Sep 17, then the on-site round trips. New §5 item 18: `sync_state.json` pull cursors are not keyed by target web identity.
+
 **Progress (2026-10-08):** **Phase 15 (corrections) in Claude Code with GO.** The last commit on `main` is the 2026-10-04 groundwork (prompt, findings A–C, the corrected diagnosis of the `photo_masters` 500 — no Corrections code yet). Answers 1–7 were given 2026-10-04; Code's later questions 8 (comments have no edit path) and 9 (find & replace scope) were answered 2026-10-08 in `prompts/phase-15-corrections.md` — author/admin comment edit with an "(edited)" marker, web-only; each tier's find & replace stays on the text it owns. The VM deploy (Phase 7 + Phase 15 migrations, current web code) is still step 1 of the phase and has not happened. After Phase 15: **Phase 13** (prompt written) → **Phase 12** (prompt not yet written) → George's group bulk-assignment (item 6), which performs the full file push implicitly.
 
 **Progress (2026-10-03):** Phase 9 fix-up 2 landed (1bdc016): the Canaca correction had been run against `photoorg_web`, not `photoorg`; while verifying, Code found and fixed three real sync faults (a never-updated `person_id` column, one failed stage aborting all later stages, a broken `run_push` entry point). The VM is a migration behind (`phase-7-cleanup`) and its journal has been silent since Sep 17 — both to be fixed in the deploy step of Phase 15. **George's ruling: a typo must never again need SQL to fix. Full stop until it's fixed.** New **Phase 15 — Corrections** (`prompts/phase-15-corrections.md`): find & replace with preview/undo on the desktop, albums editor, inline suggestion editing on the web with LWW both ways, people name edits both ways, and the VM deploy. Phase 15 now precedes Phase 13.
@@ -77,7 +79,7 @@ Consequences of the survey:
 | Mobile-first web | Every page is designed for a phone first (thumb-reachable actions, large tap targets, one column), then widens for desktop. Upload, tagging, dating, and liking must be comfortable one-handed. |
 | Backs | Ingest runs a "looks like a back" heuristic (mostly blank, handwriting-like ink, low colour) and proposes pairing with the previous file in scan order. Every proposed pair is reviewed before commit. |
 | Ops notes | `GC.md` in the repo root, gitignored, same convention as every other site. Own DB role, own secrets. Nothing copied from CraftTags. |
-| Deletes | Never. Quarantine + soft-delete flag everywhere. Phase 15 extended this to the join tables: removing a photo from an album or a place is a soft-delete, both so it is restorable and so the removal can reach the VM at all. |
+| Deletes | Never. Quarantine + soft-delete flag everywhere. Phase 15 extended this to the join tables and fix-up 1 to the two text-keyed ones: removing a photo from an album or a place, a nickname from a person, or an alias from a place is a soft-delete — both so it is restorable and because the push only upserts, so a hard-deleted row just stops being sent and the web keeps it forever. `place_aliases` keys on its own text and is not an exception. The rule binds a migration's `down` too: when soft-deleted rows exist it aborts with the counts and a remedy, never deletes them. |
 | Corrections | **Every human-visible text is editable in the UI that owns it** (Phase 15, after a folder typo cost an evening of hand SQL). Each edit writes an audit row with previous and new values and reaches every copy through the normal sync with no further step. A field with no edit path is a bug. Each tier corrects only the text it owns: the desktop sweeps albums, pending suggestions, people and variants, places and aliases, back transcriptions and `physical_ref_note`; the web's admin tool covers pending suggestions, and comments and group text are edited one at a time. Master-derived columns (`source_folder`, `scan_batch`, `master_path`) are shown with their count and no edit path — they mirror a read-only disk on purpose. Cross-tier conflicts are settled by `edited_on_desktop_at` vs `edited_on_web_at` (human edits only, never `updated_at`, which every push bumps), ties to the web. |
 
 Carried over from CraftTags lessons (go into every web prompt): compute expiries in SQL with `NOW() + INTERVAL`; token links land on a POST-confirm page, never act on GET; `app.set('trust proxy', 1)`; register specific routes before wildcards; watch fail2ban when smoke-testing.
@@ -430,6 +432,53 @@ Order as planned: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 
     cursor paging past a shared timestamp, place-alias round trips
     including the empty set, join-table removals reaching the site, and
     the comment edit permission matrix.
+- **Fix-up 1 (2026-10-08) — the last real deletes, and the `down`
+  precedent.** PM review of `2b59e6d` accepted the build and named three
+  things to close first.
+  1. **`person_name_variants` gets soft-delete.** A nickname removed on the
+     desktop went on showing on the web forever — the `album_photos` fault
+     with a different table name, and exactly what the Inviolable names.
+     `is_deleted / deleted_at / deleted_by` + a live partial index; the
+     desktop's People sidebar and Corrections both soft-delete with a
+     `person.variant_remove` audit row; the web gets `DELETE
+     /api/people/:id/variants/:variantId` (admin only) which stamps
+     `edited_on_web_at`; `is_deleted` joins `WEB_EDITABLE` so
+     `sync_web_edit_wins` settles a removal exactly as it settles a rename
+     — the one soft-delete the cross-tier LWW decides, because the web can
+     make it too. A merge moves live variants only. Re-adding flips the
+     flag back on the same row. `person_search`'s `variant_tokens` CTE
+     filters the flag, so a removed nickname stops finding the person.
+  2. **`place_aliases` gets the same treatment.** The route's real `delete`
+     is gone: it now flags what the laptop no longer sends and un-flags
+     what it does, so a correction, a removal and a restore all travel on
+     one route. The per-alias write had to become update-then-insert
+     because the unique is on `lower(alias)` — a case-only rename slips
+     past an `on conflict (place_id, alias)` upsert and then violates
+     `place_aliases_ci_uq`.
+  3. **`down` aborts, it does not delete.** Phase 15's own migration had
+     `delete from … where is_deleted` in `down`, which is a real delete.
+     Both migrations now follow the `photo-back-orphan` precedent: raise
+     with the counts and a remedy. Phase 15's `up` is byte-for-byte
+     unchanged, because the laptop's three databases have already applied
+     it and the VM must apply the same thing.
+  Item 4's two checks both passed with no code change: re-adding a photo to
+  an album or place already flips the flag (desktop and sync), and Phase
+  11's statement triggers on both join tables already cover UPDATE, so the
+  laptop's `photo_search` refreshes on a soft-delete. Tests now assert
+  both. Tests: desktop +14 (`test_corrections_fixup1.py`), web +10
+  (`test/corrections-fixup1.test.js`).
+- **Fix-up 1 (scoped 2026-10-08, PM review of 2b59e6d; prompt appended to
+  `prompts/phase-15-corrections.md`).** Soft-delete for
+  `person_name_variants` (`is_deleted` joins `WEB_EDITABLE` so a removal is
+  decided by the same `sync_web_edit_wins` rule as a rename; `person_search`
+  re-created to skip deleted variants) and for `place_aliases` (the sync
+  route keeps replace-the-set semantics but flips flags instead of deleting
+  rows); the Phase 15 migration's `down` aborts with counts when soft-deleted
+  rows exist instead of deleting them (the `photo-back-orphan` precedent —
+  `up` untouched, byte for byte); re-add-after-removal and laptop-side
+  search-refresh checks; then George's single deploy window and Phase 15's
+  remaining verification (zero-failed-stage push, album round trip on the
+  site, variant round trip).
 
 ## 5. Open items for George
 - **Candidate fix-up 12 — shared VLM inbox on the mini.** classify, describe and estimate_date all upload the same 1024-px JPEGs to three per-job inboxes (3 × ~2.5 GB, ~40 min each). One shared inbox with per-job result files, swept only when all three results are collected, would make it one upload. Do it before the next model / prompt-version rerun; not while a queue is running. (2026-09-16)
@@ -467,8 +516,23 @@ Code runs the runbook itself and George approves each prompt** — dump (taken)
 Phase 15 and has not happened yet. The companion "why is the journal
 silent" question is **answered and closed**: the unit logs to
 `/var/log/photoorg.log`, so `journalctl` never had the app's output.
+**2026-10-08:** answer 7's arrangement cannot work — the auto-mode
+classifier refuses `[Remote Shell Writes]` before George sees any prompt.
+**George runs the one-liner Code prepares** (runbook dump line first, then
+`git pull --ff-only` → `migrate:up` → `npm ci` → restart → `/healthz`),
+**after fix-up 1 is pushed**, so one window takes `phase-7-cleanup`,
+`phase-15-corrections` and `phase-15-fixup-1`. Code then verifies read-only
+(`pgmigrations`, `/sync/status`, `/var/log/photoorg.log`, caddy 4xx) and
+runs the zero-failed-stage push.
+18. **`sync_state.json`'s pull cursors are not keyed by the target web's
+identity.** Pointing the desktop at a second web server (the laptop's local
+one, say) would advance the VM's cursors and make the next real pull skip
+rows — which is why the Phase 15 push could not be rehearsed against the
+laptop web. Harmless while there is exactly one target; fix when a second
+one ever exists. (Recorded 2026-10-08, Phase 15 fix-up 1.)
 14. Search name strip shows phonetic-only people for ordinary words ("Christmas" → Christina). Harmless (score 50, never displaces hits); if it annoys anyone, hide phonetic-only people from the strip when the same term produced full-text hits. Phase 11 fix-up when convenient.
 13. ~~**Resolved 2026-10-02 (Phase 7 fix-up 7).**~~ Root cause: ingest parsed exifread's `Rotated 90 CW` against an exiftool-vocabulary table, so `orientation` was NULL for every photo ever ingested; the fix-up 6 backfill had nothing to key on. Now: 8,672 orientations backfilled, 235 photos' dims corrected, 280 boxes rescaled, 6 cleanup-mapped boxes fixed (Samara restored), `check_working_files` post-condition = 0. Needs one push to reach the site. Original: 235 photos (EXIF 6/8, `orientation` NULL, raw dims stored) slipped past the fix-up 6 backfill; 280 face boxes in the wrong frame, 95 labelled. Fix-up 7 in the Phase 7 prompt repairs them. Original note — check `photos.orientation` on the desktop: Code found no photo with orientation set in the 408-photo local copy. Either the sync omits the column or the fix-up 6 backfill missed. `select orientation, count(*) from photos group by 1` on `photoorg`; phone photos should show 6/8 as well as 1.
+18. **`sync_state.json` pull cursors are not keyed by the target web's identity** (found 2026-10-08, when Code rightly declined to test Phase 15's push against the laptop web). `push()` pulls unconditionally, so pointing the desktop at a second web server would apply that server's facts into `photoorg` and advance the VM's cursors. Key the state file by the `/sync/status` identity (the shared-DB guard already fetches it) if a second target ever exists; until then the desktop points at the VM only.
 
 ## 6. Risks
 

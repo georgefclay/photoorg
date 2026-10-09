@@ -30,7 +30,8 @@ async function listPeople(pool, user, { q = '', cursor = null, limit = 100, scop
                  or lower(coalesce(pe.nickname, '')) like $${i}
                  or pe.id = any($${idsP}::bigint[])
                  or exists (select 1 from person_name_variants v
-                             where v.person_id = pe.id and lower(v.variant) like $${i}))`);
+                             where v.person_id = pe.id and v.is_deleted = false
+                               and lower(v.variant) like $${i}))`);
   }
   const vis = visibleSql(user, params, 'ph');
   const sc = scopeSql(scope, params, 'ph');
@@ -119,7 +120,8 @@ async function autocompletePeople(pool, q) {
                or lower(coalesce(p.nickname, '')) like $1
                or lower(coalesce(p.maiden_name, '')) like $1
                or exists (select 1 from person_name_variants v
-                           where v.person_id = p.id and lower(v.variant) like $1))
+                           where v.person_id = p.id and v.is_deleted = false
+                             and lower(v.variant) like $1))
         limit 10
      ),
      trigram_hits as (
@@ -156,10 +158,14 @@ async function getPerson(pool, id) {
   )).rows[0];
   if (!person) return null;
   const [variants, rels] = await Promise.all([
-    // `id` is needed by the Phase 15 admin editor: correcting a variant
-    // PATCHes it by id, so a list without ids is a list that cannot be
-    // edited.
-    pool.query(`select id, variant, kind from person_name_variants where person_id = $1 order by lower(variant)`, [id]),
+    // `id` is needed by the Phase 15 admin editor: correcting or removing
+    // a variant addresses it by id, so a list without ids is a list that
+    // cannot be edited. Live rows only — removal is a soft-delete since
+    // fix-up 1, so the row outlives the name being shown.
+    pool.query(
+      `select id, variant, kind from person_name_variants
+        where person_id = $1 and is_deleted = false
+        order by lower(variant)`, [id]),
     pool.query(
       `select r.id, r.person_a_id, r.person_b_id, r.type, r.confirmed,
               pa.display_name as a_name, pb.display_name as b_name

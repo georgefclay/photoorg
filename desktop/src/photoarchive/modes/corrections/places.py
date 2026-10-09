@@ -5,6 +5,12 @@ column in its `do update set`, and Phase 15 adds `/sync/place_aliases`
 so an alias correction reaches the VM too — before this, alias edits
 stopped at the laptop (PROJECT-PLAN §5 item 11).
 
+Alias **removal is a soft-delete** since fix-up 1. The row keeps its
+`(place_id, alias)` key and gains `is_deleted`, so a removal is
+restorable and the sync route flags the web's copy rather than deleting
+it. Re-adding a removed alias flips the flag back — a plain insert would
+hit the case-insensitive unique and the name would be un-re-addable.
+
 `places.name` is unique on `lower(name)`, so a rename can collide. The
 rename refuses and says which place holds the name rather than letting
 the constraint abort a larger correction.
@@ -60,8 +66,14 @@ def list_places(
 
 
 def list_aliases(conn: psycopg.Connection, place_id: int) -> list[tuple[str, str]]:
+    """Live aliases only. Removal is a soft-delete since fix-up 1 — "no
+    real deletes, ever" has no exception for text that is its own key."""
     rows = conn.execute(
-        "select alias, kind from place_aliases where place_id = %s order by lower(alias)",
+        """
+        select alias, kind from place_aliases
+         where place_id = %s and is_deleted = false
+         order by lower(alias)
+        """,
         (place_id,),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
@@ -123,9 +135,43 @@ def add_alias(
     conn: psycopg.Connection, place_id: int, alias: str, *,
     kind: str = "alias", actor: str = "desktop",
 ) -> bool:
+    """Add, or bring back a removed alias.
+
+    The row survives a removal, so a plain insert would hit
+    `place_aliases_ci_uq` and the alias would be un-re-addable. Match
+    case-insensitively (that is what the unique is on), and take the
+    caller's spelling.
+    """
     alias = alias.strip()
     if not alias:
         return False
+    existing = conn.execute(
+        """
+        select alias, is_deleted from place_aliases
+         where place_id = %s and lower(alias) = lower(%s)
+        """,
+        (place_id, alias),
+    ).fetchone()
+    if existing is not None:
+        if not existing[1]:
+            return False  # already live
+        conn.execute(
+            """
+            update place_aliases
+               set alias = %s, kind = %s, is_deleted = false, deleted_at = null,
+                   deleted_by = null, updated_at = now()
+             where place_id = %s and alias = %s
+            """,
+            (alias, kind, place_id, existing[0]),
+        )
+        dbmod.audit(
+            conn, actor=actor, action="place.alias.add", entity_type="place",
+            entity_id=place_id,
+            previous_value={"alias": existing[0], "is_deleted": True},
+            new_value={"alias": alias, "kind": kind, "restored": True},
+        )
+        return True
+
     row = conn.execute(
         """
         insert into place_aliases (place_id, alias, kind) values (%s, %s, %s)
@@ -146,21 +192,34 @@ def add_alias(
 def remove_alias(
     conn: psycopg.Connection, place_id: int, alias: str, *, actor: str = "desktop",
 ) -> bool:
+    """Soft-delete (fix-up 1).
+
+    The first draft issued a real `delete` on the grounds that the text is
+    its own key and there was nothing to flag. There is now: the row keeps
+    its key and carries `is_deleted`, so the removal is restorable and
+    `/sync/place_aliases` can flag the web's copy instead of deleting it.
+    """
     row = conn.execute(
-        "select kind from place_aliases where place_id = %s and alias = %s",
+        """
+        select kind, is_deleted from place_aliases
+         where place_id = %s and alias = %s
+        """,
         (place_id, alias),
     ).fetchone()
-    if row is None:
+    if row is None or row[1]:
         return False
-    # place_aliases has no soft-delete: the PK *is* the text, so there is
-    # nothing to flag. `/sync/place_aliases` therefore replaces a place's
-    # alias set wholesale, which is how a removal reaches the web.
     conn.execute(
-        "delete from place_aliases where place_id = %s and alias = %s",
+        """
+        update place_aliases
+           set is_deleted = true, deleted_at = now(), updated_at = now()
+         where place_id = %s and alias = %s
+        """,
         (place_id, alias),
     )
     dbmod.audit(
-        conn, actor=actor, action="place.alias.remove", entity_type="place",
-        entity_id=place_id, previous_value={"alias": alias, "kind": row[0]},
+        conn, actor=actor, action="place.alias_remove", entity_type="place",
+        entity_id=place_id,
+        previous_value={"alias": alias, "kind": row[0], "is_deleted": False},
+        new_value={"alias": alias, "is_deleted": True},
     )
     return True

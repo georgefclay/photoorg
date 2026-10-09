@@ -91,16 +91,34 @@ def test_merge_moves_faces_and_dedupes_variants_and_audits(phase6):
 
         # Variants: winner has {Peggy, Peg} (no dup Peggy).
         variants = {r[0] for r in conn.execute(
-            "select variant from person_name_variants where person_id = %s",
+            """
+            select variant from person_name_variants
+             where person_id = %s and is_deleted = false
+            """,
             (winner_id,),
         ).fetchall()}
         assert variants == {"Peggy", "Peg"}
-        # Loser has no variants.
-        n_lv = conn.execute(
-            "select count(*) from person_name_variants where person_id = %s",
+        # The loser has no LIVE variants. The one that collided with a name
+        # the winner already had is **soft-deleted, not deleted** (Phase 15
+        # fix-up 1): these rows are pushed, so a real delete would leave the
+        # web showing a nickname attached to a person who no longer exists.
+        n_live = conn.execute(
+            """
+            select count(*) from person_name_variants
+             where person_id = %s and is_deleted = false
+            """,
             (loser_id,),
         ).fetchone()[0]
-        assert n_lv == 0
+        assert n_live == 0
+        leftover = conn.execute(
+            """
+            select variant, is_deleted, deleted_at from person_name_variants
+             where person_id = %s
+            """,
+            (loser_id,),
+        ).fetchall()
+        assert [(r[0], r[1]) for r in leftover] == [("Peggy", True)]
+        assert leftover[0][2] is not None
 
         # Audit rows both directions.
         actions = {r[0] for r in conn.execute(

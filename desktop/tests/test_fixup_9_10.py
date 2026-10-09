@@ -141,11 +141,19 @@ def test_add_and_remove_name_variant_writes_audit(phase6):
     with dbmod.connection() as conn:
         conn.autocommit = True
         assert repo.list_name_variants(conn, pid) == []
+        # Phase 15 fix-up 1: the removal is a **soft-delete**, so the row
+        # survives (that is how it reaches the web at all — the push only
+        # upserts), and the action is `person.variant_remove`.
+        row = conn.execute(
+            "select variant, is_deleted from person_name_variants where id = %s",
+            (variant_id,),
+        ).fetchone()
+        assert row == ("Peg", True)
         actions = {r[0] for r in conn.execute(
             "select action from audit_log where entity_type='person' and entity_id=%s",
             (pid,),
         ).fetchall()}
-        assert {"person.create", "person.variant.add", "person.variant.remove"} <= actions
+        assert {"person.create", "person.variant.add", "person.variant_remove"} <= actions
 
 
 def test_search_people_prefix_and_variant(phase6):

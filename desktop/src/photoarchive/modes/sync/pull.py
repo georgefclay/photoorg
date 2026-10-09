@@ -412,7 +412,10 @@ _WEB_EDIT_TABLES: dict[str, list[str]] = {
         "given_name", "middle_name", "surname", "maiden_name", "nickname",
         "suffix", "birth_year", "death_year", "notes",
     ],
-    "person_name_variants": ["variant", "kind"],
+    # Fix-up 1: `is_deleted` is guarded like the wording, because the
+    # web's People editor can remove a variant too. `deleted_at` travels
+    # with the flag it belongs to.
+    "person_name_variants": ["variant", "kind", "is_deleted", "deleted_at"],
     "suggestions": ["payload"],
 }
 
