@@ -23,6 +23,7 @@ def default_modes() -> list[Mode]:
     from ..modes.faces import FacesPanel
     from ..modes.people import PeoplePanel
     from ..modes.corrections import CorrectionsPanel
+    from ..modes.metadata.ui import MetadataPanel
     from ..modes.sync import SyncPanel
 
     return [
@@ -34,5 +35,6 @@ def default_modes() -> list[Mode]:
         Mode("faces", "Faces", FacesPanel),
         Mode("people", "People", PeoplePanel),
         Mode("corrections", "Corrections", CorrectionsPanel),
+        Mode("metadata", "Metadata", MetadataPanel),
         Mode("sync", "Sync", SyncPanel),
     ]

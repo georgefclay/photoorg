@@ -589,7 +589,7 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **File moves happen inside the transaction, just before commit** — the
   opposite of Triage's rule, deliberately. A failed triage move leaves a
   recoverable mismatch; a committed `file_version` bump whose bytes never
-  arrived is unrecoverable. `_swap_in_new_version` moves the old copy aside,
+  arrived is unrecoverable. `swap_in_new_version` moves the old copy aside,
   then the render into place, and puts the old one back if the second move
   fails.
 - **`check_working_files` is cleanup-aware.** A missing working file is now
@@ -1295,6 +1295,97 @@ the sweep now expands it with the route's own exported helper before
 parsing, and asserts nothing is left unexpanded. A sweep that cannot see
 through an interpolation is a blind spot, not a pass.
 
+## Metadata writer (Phase 13)
+
+`modes/metadata/` embeds the settled truth about each photo in its working
+copy — confirmed date, who is in it (names, keywords, face regions), place,
+what the back says, how to find the print, the archive identity — so the
+archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
+*Embedded metadata*.
+
+### The five non-negotiables
+1. **Writes only to working copies, asserted in code.**
+   `writer.assert_working_target` refuses any path outside `WORKING_DIR` or
+   inside a master root **before a byte is written** — the source, the temp
+   file and the `_versions/` target alike — and the masters-guard probe runs
+   at the start of every run and every chunk (`MastersWritable`, exit 2).
+2. **Facts only.** Confirmed dates; people through assigned, undisputed,
+   non-ignored faces; confirmed live `photo_places`; `description_ai` (the
+   accepted fact) always prefixed `AI-generated description: `; back
+   transcriptions, unconfirmed ones as `Back of print (unverified
+   transcription): `. **`suggestions` is never read.** Every selector filters
+   `is_deleted = false` (albums, album_photos, photo_places, places, faces,
+   people, person_name_variants), so a removal leaves the file.
+   `misspelling` variants stay out. Audit history, contributors, comments,
+   likes, suggestion status: never.
+3. **Never write a guess into a date field — and never fabricate a time of
+   day.** `exact` → XMP + IPTC date; `month`/`year` → partial XMP date
+   (`YYYY-MM`, `YYYY`) plus a description line; `decade` → description line
+   only; `unknown` → nothing at all. EXIF `DateTimeOriginal` needs a time, so
+   it is written only when the DB holds the camera's time for that very day
+   and the file has none — and **never on a scan**, whose only time is the
+   scanner's. A camera's own `DateTimeOriginal` and GPS are never touched;
+   `XMP-photoarchive:WroteExif` records the EXIF fields that are ours.
+   **A scan's date counts only when a person set it** (answer 9): a
+   `photo.capture_date.set` audit row, which both accept paths write. Ingest
+   confirmed 21 scans from the scan file's EXIF — the scanner's clock
+   (`2025-11-23`) or a device set to a guessed `1947-01-01` — and those write
+   no date. **Viewers fabricate too**: Windows reads `xmp:CreateDate` as
+   "Date taken" and shows `1962` as 1 January 1962, midnight, so a partial
+   date goes only to `photoshop:DateCreated` and the description;
+   `xmp:CreateDate` and `IPTC:DateCreated` are day-precise only.
+4. **Atomic, metadata only.** exiftool writes `WORKING_DIR/_tmp/{id}.{ext}`
+   with `-o` — **never `-overwrite_original`** — the temp file must decode to
+   the same stored size and read back the payload hash, and then Cleanup's
+   `swap_in_new_version` moves the old file to `_versions/{id:08d}_v{n}.{ext}`
+   (kept forever) inside the transaction that bumps `file_version`. Pixels are
+   never re-encoded: JPEG decodes identically, TIFF strips are byte-identical
+   (16-bit included). A multi-line value goes in via `-TAG<=file` written with
+   `newline="
+"` — on Windows the default turns the description's newlines
+   into CRLF and the file stops matching the dry run.
+5. **Scope:** `triage_status in ('keep','private')`, `is_deleted = false`.
+   `photo_backs` images are not photos; their text travels in the front's
+   description. Digital photos keep their own EXIF; ours goes alongside.
+
+### How it runs
+- **Incremental by hash.** `repo.load_candidates` composes the canonical
+  payload for every in-scope photo (1.3 s for the whole archive) and a photo
+  is due when `sha256(payload) <> photos.metadata_hash` **or**
+  `file_version <> metadata_file_version` — the second is what notices a
+  working file replaced by Cleanup, a rescan accept or `check_working_files`
+  (every one of those bumps `file_version`). A re-run with no fact changes
+  writes nothing; one new face assignment writes one file; a pulled rename
+  writes that person's photos. Bump `payload.PAYLOAD_VERSION` when the
+  wording or shape changes, and every photo is due once.
+- **The writer owns its tags and replaces them wholesale** (answer 4): a
+  merge would mean a removed person could never leave the file. Pre-existing
+  values in those tags (camera captions, Picasa/Lightroom keywords, named
+  face regions) are listed in the dry-run report's `foreign_values.csv` —
+  the masters still hold them.
+- **Chunks in fresh processes** (Cleanup (c)): `run.run` hands each
+  `METADATA_CHUNK` (250) ids to `python -m photoarchive.tools.write_metadata
+  --chunk-worker`; a killed chunk stays due and the next run continues.
+- **One photo never aborts a chunk**: a missing / undecodable file is
+  skipped and listed (and stays due); a failure is listed with its error.
+  A working file whose `file_version` changed under the run is skipped.
+- **One name per person, never de-duplicated by text.** Batch 00033 #2608
+  has a father and son who are both "George Frederick Clay"; de-duplicating
+  `PersonInImage` by string silently dropped one of them from the file.
+  Keywords, full names and regions are each one per person, left to right.
+- **A job, not a human**: it never stamps `edited_on_desktop_at` /
+  `edited_on_web_at`. Audit `metadata.write` per file (payload summary,
+  version file, tags changed); `job_runs.job_name = 'metadata_write'`.
+- **Run it before the group bulk-assignment**: the first full write gives all
+  12,686 photos a new `file_version`, and every grouped photo's bytes
+  re-push. The Sync tab offers "Write metadata for N changed photos" after
+  every pull or push (never automatic) and says how many files that re-pushes;
+  Sync refuses to run while the writer is running (one shared
+  `MetadataRunner`).
+- The dry run writes the report to `WORKING_DIR/_report/metadata/<stamp>-dry/`:
+  `summary.md`, `changes.txt`, `samples.json`, `foreign_values.csv`,
+  `date_mismatch.csv`, `skipped.csv`.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site
@@ -1316,6 +1407,8 @@ through an interpolation is a blind spot, not a pass.
   Masters-guard first; resumable; `--report` writes the run report.
 - `python -m photoarchive.tools.cleanup_report [--batch …] [--samples N]` —
   the report on its own (counts, timings, op frequency, before/after sheet).
+- `python -m photoarchive.tools.write_metadata [--dry-run] [--photo ID] [--batch …]
+  [--limit N] [--chunk N]` — Phase 13 metadata writer (needs `EXIFTOOL_PATH`).
 - `python -m photoarchive.tools.check_working_files [--dry-run]` — working-file
   integrity (now `_versions/`-aware; see Cleanup).
 - `python -m photoarchive.tools.repair_face_boxes`,

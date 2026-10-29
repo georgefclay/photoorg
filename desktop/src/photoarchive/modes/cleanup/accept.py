@@ -249,7 +249,7 @@ def install_new_version(
                      entity_type="photo", entity_id=proposal.photo_id,
                      previous_value=previous, new_value=new_value)
 
-            _swap_in_new_version(src, version_target, derived, working_target)
+            swap_in_new_version(src, version_target, derived, working_target)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -288,7 +288,7 @@ def _check_source_dims(src: Path, proposal: repo.Proposal) -> None:
         )
 
 
-def _swap_in_new_version(
+def swap_in_new_version(
     current: Path, version_target: Path, derived: Path, working_target: Path,
 ) -> None:
     """Move the current working copy aside, then the render into place.

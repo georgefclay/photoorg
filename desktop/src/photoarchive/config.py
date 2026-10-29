@@ -226,6 +226,14 @@ class Settings(BaseSettings):
     CLAID_BASE_URL: str = Field(default="https://api.claid.ai")
     CLAID_COST_PER_OP_USD: float = Field(default=0.03, ge=0.0)
 
+    # --- Metadata writer (Phase 13) ---------------------------------------
+    # Full path to exiftool. Empty means "not installed": the writer and the
+    # "What's embedded" viewer refuse to run and say so, rather than guess.
+    EXIFTOOL_PATH: str = Field(default="")
+    # Photos per fresh process. A whole-archive pass is a chain of these
+    # (CLAUDE.md, Cleanup (c)): a kill costs one chunk, not the run.
+    METADATA_CHUNK: int = Field(default=250, ge=1)
+
     @field_validator("CLEANUP_MASK_MODE")
     @classmethod
     def _known_mask_mode(cls, v: str) -> str:

@@ -61,7 +61,7 @@ web-authoritative and never travel to the laptop.
 
 ### Photos and physical files
 
-- **`photos`** — one row per unique photograph. `sha256` (of the preferred master) is the identity. `working_path` is the derived copy the desktop app manipulates; masters are never touched. `source_root` / `source_folder` / `source_filename` / `scan_batch` / `scan_sequence` record where the file came from and, for scans, how to find the physical print (`Batch 00012 #017`). `capture_date` + `capture_date_precision` (`exact|month|year|decade|unknown`) + `capture_date_confirmed` separate a confirmed date from a hint. `triage_status` (`untriaged|keep|junk|private`), `is_private`, `is_deleted`, `rescan_wanted` are workflow flags. `file_version` bumps whenever the working copy changes so sync knows to re-push. `description_ai` is the accepted AI description (feeds FTS). `completeness_score` is 0–100, maintained by `refresh_completeness(photo_id)`. `width` / `height` are the **display** dimensions (post EXIF-transpose) since fix-up 6 — the coordinate frame face bboxes are stored in. `orientation` is the EXIF value (1..8, migration 23); `photo_masters.width/height` on each master row remain the raw file dims. `parent_photo_id` (Phase 7) is set on a split child and points at the scan it was cut from. `tombstoned_at` (Phase 7) records when the desktop last told the web this photo is gone — see *Photo sync columns*.
+- **`photos`** — one row per unique photograph. `sha256` (of the preferred master) is the identity. `working_path` is the derived copy the desktop app manipulates; masters are never touched. `source_root` / `source_folder` / `source_filename` / `scan_batch` / `scan_sequence` record where the file came from and, for scans, how to find the physical print (`Batch 00012 #017`). `capture_date` + `capture_date_precision` (`exact|month|year|decade|unknown`) + `capture_date_confirmed` separate a confirmed date from a hint. `triage_status` (`untriaged|keep|junk|private`), `is_private`, `is_deleted`, `rescan_wanted` are workflow flags. `file_version` bumps whenever the working copy changes so sync knows to re-push. `description_ai` is the accepted AI description (feeds FTS). `completeness_score` is 0–100, maintained by `refresh_completeness(photo_id)`. `width` / `height` are the **display** dimensions (post EXIF-transpose) since fix-up 6 — the coordinate frame face bboxes are stored in. `orientation` is the EXIF value (1..8, migration 23); `photo_masters.width/height` on each master row remain the raw file dims. `parent_photo_id` (Phase 7) is set on a split child and points at the scan it was cut from. `tombstoned_at` (Phase 7) records when the desktop last told the web this photo is gone — see *Photo sync columns*. `metadata_hash` / `metadata_written_at` / `metadata_file_version` (Phase 13) are the metadata writer's own bookkeeping — see *Embedded metadata*.
 - **`photo_masters`** — one photograph, many master files (original 300 DPI JPG, later 1200 DPI TIFF rescan, etc.). Exactly one is `is_preferred` per `photo_id` (partial unique index). Ingest inserts here first, then `photos.sha256` mirrors the preferred row. Rescans add a new preferred row and demote the old one.
   `region` (jsonb) and `region_key` (text, default `'-'`) arrived with Phase 7:
   a **split child** points at the *same master file* as its siblings, carrying
@@ -264,6 +264,74 @@ the `synced_at` write too, so `synced_at > updated_at` can never hold.
 - **`job_items`** — per-photo status within a run; PK `(job_run_id, photo_id)`.
 - **`photo_job_status`** — per-photo, per-job current state. `model` and (as of Phase 6 migration 21) `prompt_version` remembered so an upgrade to either — new VLM weights *or* a new prompt template — is `update photo_job_status set status='pending' where job_name='describe'` and the batch runner re-runs the whole set at the current model+prompt_version. Selectors gate on this rather than on downstream row counts (so a legitimately zero-face photo isn't re-processed forever).
 - **`job_cursors`** (Phase 6, migration 21) — one row per job name; `line_no` is the last NDJSON line index consumed from the mini's per-job results file (`LOG_DIR/batches/{job_name}.ndjson` on the service). Collect reads strictly after this cursor, applies each writer idempotently in a transaction with the cursor advance, then sweeps the inbox with `?done=true`. Rewinding the cursor and re-collecting is safe — every writer checks for the row it would insert.
+
+## Embedded metadata (Phase 13)
+
+The metadata writer (`desktop/src/photoarchive/modes/metadata/`) embeds the
+settled truth about each photo in its **working copy** — never a master — so
+a file found loose on a disk still says who, when, where and how to find the
+print. It writes with exiftool (`EXIFTOOL_PATH`), which rewrites metadata
+segments and leaves JPEG scan data and TIFF strips byte for byte.
+
+**Bookkeeping columns on `photos`** (migration `phase-13-metadata-writer`):
+`metadata_hash` (sha256 of the canonical payload last written),
+`metadata_written_at`, and `metadata_file_version` (the `file_version` right
+after that write). A photo is written when its payload hash differs **or**
+`file_version <> metadata_file_version` — the second catches a working file
+replaced by Cleanup, a rescan accept or `check_working_files`, which carries
+none of the metadata although no fact changed. Desktop-only; nothing pushes
+them. A write bumps `file_version` (sync re-pushes the bytes), keeps the
+previous file at `WORKING_DIR/_versions/{id:08d}_v{n}.{ext}` and writes a
+`metadata.write` audit row with a payload summary.
+
+**Where the facts come from** (live rows only, facts only — never
+`suggestions`): `capture_date` only when `capture_date_confirmed` — and **on a scan only when
+a person set it** (a `photo.capture_date.set` audit row; Phase 13 answer 9:
+ingest confirmed 21 scans from the scan file's EXIF, which is the scanner's
+clock); people
+through `faces` with `person_id` set, not deleted, not disputed, not
+`review_status = 'ignore'`, the person not deleted; names from `people` plus
+live `person_name_variants` of kind `nickname` / `alternate_spelling`
+(`misspelling` is a search aid and stays out); places through
+`photo_places.confirmed and not is_deleted`; albums through live
+`album_photos` / `albums`; `description_ai` (the accepted fact); every
+`photo_backs.transcribed_text`, marked when unconfirmed. `place_aliases` are
+not written.
+
+**The tags.** The archive *owns* every tag in the first table and replaces it
+wholesale on every write (an empty value clears it), so a removed person,
+album or place leaves the file. Everything else in the file — camera,
+exposure, the camera's GPS and `DateTimeOriginal` — is never touched.
+
+| What | Tags | Value |
+|---|---|---|
+| Description | `XMP-dc:Description`, `IPTC:Caption-Abstract`, `IFD0:ImageDescription` | Lines in fixed order: `Albums: A; B` · `People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie), George Clay Jr.` · `Date: March 1962` / `Date: about 1962` / `Date: 1960s` (only when not day-precise) · `AI-generated description: …` · `Back of print: …` or `Back of print (unverified transcription): …`. Under 2,000 characters; the AI text is cut first. |
+| Keywords | `XMP-dc:Subject`, `IPTC:Keywords` | Each person's common name: nickname-or-given + surname + suffix (`Peggy Clay`, `George Clay Jr.`); `display_name` if that yields nothing. Left to right. |
+| Full names | `XMP-iptcExt:PersonInImage` | Formal name: given middle surname suffix (née maiden). |
+| Face regions | `XMP-mwg-rs:RegionInfo`, `XMP-MP:RegionInfoMP` | Named faces only, labelled with the common name. **In the stored pixel frame**: `faces.bbox` is display-frame, so each box goes through the inverse of the file's EXIF orientation; `AppliedToDimensions` is the file's stored size. Skipped (and noted) when the file's display size differs from `photos.width/height`. |
+| Date | `XMP-photoshop:DateCreated` | `exact` → `YYYY-MM-DD` (with the time when the DB holds the camera's time for that day); `month` → `YYYY-MM`; `year` → `YYYY`; `decade` / `unknown` → nothing. |
+| | `XMP-xmp:CreateDate`, `IPTC:DateCreated` | `exact` only. Windows reads `xmp:CreateDate` as "Date taken" and shows a year-only value as 1 January, midnight — so a partial date never goes there. |
+| Place | `XMP-iptcExt:LocationShown` (one per place: `LocationName`, `City`, `ProvinceState`, `CountryName`, GPS) | `places.name`, parsed into city/state/country only when unambiguous (three parts, or two ending in a country). |
+| | `XMP-photoshop:City/State/Country`, `IPTC:City/Province-State/Country-PrimaryLocationName` | From the first place. |
+| Archive identity | `XMP-photoarchive:PhotoId`, `MasterSha256` | `photos.id`; the preferred master's file hash (for a split child, the scan it was cut from). |
+| Physical reference | `XMP-photoarchive:ScanLocator`, `PhysicalRef` | `Batch 00012 #017` (`, print 2 of 3` for a split child); `physical_ref_note`. |
+| Provenance | `XMP-photoarchive:SourceFolder`, `SourceFilename` | Faithful records of the master path — folder typos and all, which is why they are here and not in the description. |
+| Bookkeeping | `XMP-photoarchive:PayloadHash`, `WroteExif` | The payload hash (read back from the temp file before every swap); which EXIF fields the archive itself wrote. |
+
+The `photoarchive` namespace is
+`https://cyberdinosaurs.com/ns/photoarchive/1.0/`, defined in
+`desktop/src/photoarchive/modes/metadata/photoarchive.config` — permanent;
+changing it orphans every file already written.
+
+**Two EXIF fields, written only where the camera left none:**
+`ExifIFD:DateTimeOriginal` (only when the confirmed day-precise date has a
+time of day in the DB — `exif_taken_at` for that same day; a time is never
+invented, so in practice this almost never fires) and `GPS:GPSLatitude/…`
+(from the first place with coordinates, only when the photo has no camera
+GPS). `WroteExif` records that they are ours, so a later write may change or
+clear them; a camera value is never claimed. A confirmed date that disagrees
+with the camera's `DateTimeOriginal` goes to XMP only and is listed in the
+dry-run report's `date_mismatch.csv`.
 
 ## Search (Phase 11)
 

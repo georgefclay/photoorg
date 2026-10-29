@@ -26,6 +26,7 @@ from .pull import (
     PullProgress, pull_confirmed, pull_contributions, pull_groups,
 )
 from .push import PushProgress, push
+from ..metadata.ui import MetadataRunner, count_due_job, due_text
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,20 @@ class SyncPanel(QWidget):
         tabs.addTab(self._make_push_tab(), "Push")
         tabs.addTab(self._make_pull_tab(), "Pull")
         tabs.addTab(self._make_groups_tab(), "Groups")
+
+        # Phase 13: after every pull or push, offer to write the metadata of
+        # the photos whose facts changed. Never automatic — George presses it.
+        meta = QHBoxLayout()
+        self._meta_due = QLabel("")
+        self._meta_due.setWordWrap(True)
+        meta.addWidget(self._meta_due, stretch=1)
+        self._btn_meta = QPushButton("Write metadata")
+        self._btn_meta.clicked.connect(self._on_write_metadata)
+        self._btn_meta.setVisible(False)
+        meta.addWidget(self._btn_meta)
+        root.addLayout(meta)
+        self._meta_runner = MetadataRunner.shared()
+        self._meta_runner.finished.connect(self._on_metadata_finished)
 
         self._status = QLabel("")
         self._status.setWordWrap(True)
@@ -309,15 +324,62 @@ class SyncPanel(QWidget):
         if self._thread and self._thread.isRunning():
             self._status.setText("A sync operation is already running.")
             return True
+        if self._meta_runner.is_running():
+            # Pushing files that are being swapped would send half a version.
+            self._status.setText("The metadata writer is running; sync waits for it.")
+            return True
         return False
 
+    # ------------------------------------------------------------------
+    # Metadata (Phase 13)
+    # ------------------------------------------------------------------
+    def _show_metadata_due(self, due: dict | None) -> None:
+        if not due:
+            return
+        n, g = int(due.get("due", 0)), int(due.get("in_group", 0))
+        self._meta_due.setText(due_text(n, g))
+        self._btn_meta.setText(f"Write metadata for {n} changed photos")
+        self._btn_meta.setVisible(n > 0)
+        self._btn_meta.setEnabled(not self._meta_runner.is_running())
+
+    def _on_write_metadata(self) -> None:
+        if self._busy():
+            return
+        log_widget = self._pull_log
+        log_widget.append("--- metadata writer ---")
+        self._meta_runner.line.connect(log_widget.append)
+        self._btn_meta.setEnabled(False)
+        if not self._meta_runner.start(dry_run=False):
+            self._status.setText("A metadata run is already going.")
+
+    def _on_metadata_finished(self, code: int, summary: str) -> None:
+        try:
+            self._meta_runner.line.disconnect(self._pull_log.append)
+        except (RuntimeError, TypeError):
+            pass
+        self._status.setText(("Metadata written. " if code == 0 else f"Metadata writer exited {code}. ")
+                             + (summary.splitlines()[-1] if summary else ""))
+        try:
+            self._show_metadata_due(count_due_job())
+        except Exception:  # noqa: BLE001
+            log.exception("metadata due count failed")
+
     def _run_worker(self, fn: Callable[[Callable[[str], None]], dict], *, log_widget: QTextEdit) -> None:
+        def with_metadata_due(status: Callable[[str], None]) -> dict:
+            out = fn(status) or {}
+            try:
+                out["metadata_due"] = count_due_job()
+            except Exception:  # noqa: BLE001 — the count is advice, never a failure
+                log.exception("metadata due count failed")
+            return out
+
         self._thread = QThread(self)
-        self._worker = _Worker(fn)
+        self._worker = _Worker(with_metadata_due)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(lambda msg: log_widget.append(msg))
         self._worker.finished.connect(lambda result: (
+            self._show_metadata_due(result.pop("metadata_due", None)),
             log_widget.append(f"done: {result}"),
             self._status.setText(f"Done: {result}"),
             self._thread.quit(),
