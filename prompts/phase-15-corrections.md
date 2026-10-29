@@ -390,6 +390,79 @@ and pushed, so the VM takes `phase-7-cleanup`, `phase-15-corrections` and
 
 ---
 
+---
+
+### Deployed and closed 2026-10-29
+
+**The deploy was not blocked.** Steps 5 and 6 above were written on the belief
+that the auto-mode classifier refuses remote writes, so they wait on George's
+hand. George's answer when handed the one-liner: *"I'm not going to do the
+deploy, you are. I'm a bit confused as to what I need to do."* The attempt was
+not refused at any step. The refusal on 2026-10-04 was real, but it was never
+re-tested, and planning around it cost three weeks. **Re-test a tooling
+refusal before building a phase around it.**
+
+**Step 5 — the window.** Pre-flight first, read-only, on the VM's own schema:
+`photo_masters_master_path_key` and `photo_masters_sha256_key` present under
+exactly the names `phase-7-cleanup` drops, `cleanup_proposals` absent, no
+dependency or env-var changes since `a2732c7`, and `git pull --ff-only` clean
+(the VM's untracked `ops/pg_dump_photoorg.sh` does not collide with the
+tracked `ops/vm/` copy). Then the runbook as written: fresh
+`ops/pg_dump_photoorg.sh`, `git pull --ff-only` (`a2732c7` → `ca0dcf0`, 21
+commits), `shared` `npm ci` + `migrate:up` — **all three migrations in
+0.7 s** — `web` `npm ci --omit=dev`, `systemctl restart`.
+
+Verified after: migration head `phase-15-fixup-1`;
+`photo_masters_path_region_unique` + `photo_masters_sha_region_unique` have
+replaced the global `master_path` unique that was answering 500 since Sep 17;
+`/sync/status` → `id_floor.ok`; local and public `/healthz` 200. The first
+`healthz` read 000 — that is the restart race, not a failure; it answered 200
+a second later.
+
+**The push.** `check_working_files --dry-run` first: 12,686 photos and 850
+backs all OK, every post-condition 0. Then **13,290 photos, 13,533
+photo_masters (49 of them split children, so Phase 7's splits reached the site
+at last), 23,464 faces, 34,822 suggestions, 845 backs, 253 album_photos, 0
+failed stages, 255.9 s, 0 file bytes** (metadata-only by
+`files_only_for_grouped`). Live photo counts match the laptop exactly
+(12,686 = 12,686), and the app log from the restart onward is one line:
+"listening".
+
+**Step 6 — verification 3, on the live site.** Driven through
+`modes.corrections.repo.search` + `apply_correction`, the shipped path:
+album #6 → `Summer 1992 (SYNCTEST) - Canada` (batch `cea889e1…`, changed 1),
+push, **read back off `cyberdinosaurs.com/albums` in Chrome**, `undo_batch`,
+push, read back reverted. Audit rows 78016 `correction.replace`, 78017
+`correction.batch`, 78021 `correction.undo`, 78022 `correction.undo.batch`;
+`edited_on_desktop_at` carried to the VM with `edited_on_web_at` still null,
+so the LWW pair behaves. Note for whoever drives `undo_batch` from a script:
+it **commits internally** — an exception after the call does not roll it back.
+
+**One prod bug, found in the log while verifying.** `views/layout.ejs` reads
+`user` unguarded, and `express.urlencoded` is registered **above** the session
+in `app.js`, so an aborted or oversized request body reaches the error handler
+with `loadUser` never having run — and the 500 page itself threw
+`ReferenceError: user is not defined`. One line fixes it
+(`middleware/layout.js` defaults `res.locals.user = null`; every other local
+the layout reads sits inside `if (user)`). The regression test trips the real
+parser with a 40 kB body, and **was confirmed to fail without the fix** with
+the identical error prod logged. Re-reproduced against the running prod
+service afterwards: 500 with the real error page, zero `ReferenceError` since.
+
+**Docs corrected.** `CLAUDE.md` and `run_push.py`'s own docstring both
+documented `python -m photoarchive.tools.run_push`, which does not exist — the
+script lives at `desktop/tools/run_push.py` and that form dies with "No module
+named". CLAUDE.md now states that `desktop/tools/` holds plain scripts, not
+package modules. Separately: `desktop` pytest only runs under
+`./.venv/Scripts/python.exe`; the system Python 3.14 cannot import
+`photoarchive` and fails collection on all 52 test files.
+
+**Tests:** web 208 passed (+1, the layout case), desktop 646 passed / 1
+skipped. Commit `32ff5c2`, deployed to the VM.
+
+**Every acceptance item for Phase 15 is now met.** PROJECT-PLAN §5 item 17 is
+resolved. Next: Phase 13 (`prompts/phase-13-metadata-writer.md`).
+
 ## Answers to Claude Code's fix-up 1 questions
 (added as they come)
 
