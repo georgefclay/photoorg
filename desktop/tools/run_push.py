@@ -3,10 +3,15 @@ r"""Headless push driver for Phase 9 verification.
 Runs `push()` against the configured WEB_API_URL, prints per-stage
 progress, and reports totals. Reads settings via desktop `.env`.
 
+This is a script under `desktop/tools/`, NOT a module in the
+`photoarchive.tools` package — `python -m photoarchive.tools.run_push`
+fails with "No module named". Run it from `desktop/`:
+
 Usage:
-  python -m photoarchive.tools.run_push          # push everything
-  python -m photoarchive.tools.run_push --dry    # count target rows only
-  python -m photoarchive.tools.run_push --state-dir D:\PhotoArchive\sync-state
+  python tools/run_push.py                       # push everything
+  python tools/run_push.py --dry                 # count target rows only
+  python tools/run_push.py --all-files           # file bytes for every photo
+  python tools/run_push.py --state-dir D:\PhotoArchive\sync-state
 """
 
 from __future__ import annotations

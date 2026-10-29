@@ -168,3 +168,18 @@ test('static assets are served', async () => {
     assert.equal(r.status, 200, p);
   }
 });
+
+// Prod, 2026-10-29: an aborted request body made the *error page* throw
+// `ReferenceError: user is not defined` at layout.ejs:14. express.urlencoded
+// is registered above the session, so a body error reaches the error handler
+// with loadUser never having run — the layout must still render signed-out.
+test('an error raised above loadUser still renders the 500 page', async () => {
+  const res = await request(app)
+    .post('/scope')
+    .type('form')
+    .send(`scope=all&pad=${'x'.repeat(40 * 1024)}`); // over the 32kb limit
+  assert.equal(res.status, 500);
+  assert.match(res.text, /Something went wrong/);
+  assert.match(res.text, /Sign in/);              // signed-out header rendered
+  assert.doesNotMatch(res.text, /ReferenceError/); // not express's fallback
+});

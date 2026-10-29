@@ -1008,9 +1008,9 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   photos in at least one live `photo_groups` row. This is on while
   Phase 7 cleanup and inference jobs are still bumping `file_version`
   — pushing 28 GB of bytes that are about to change wastes hours.
-  Pass `--all-files` to `run_push` (or uncheck the Sync-tab checkbox)
-  when the archive is quiescent and we're doing the one-time full
-  file push.
+  Pass `--all-files` to `python tools/run_push.py` (or uncheck the
+  Sync-tab checkbox) when the archive is quiescent and we're doing the
+  one-time full file push.
 - **Content changes always re-sync** (fix-up 2). A plain `update` to any
   pushed row — a corrected album name, a re-worded `suggestions.payload`,
   a re-parented name variant — must reach the VM on the next push with
@@ -1320,3 +1320,10 @@ through an interpolation is a blind spot, not a pass.
   integrity (now `_versions/`-aware; see Cleanup).
 - `python -m photoarchive.tools.repair_face_boxes`,
   `python -m photoarchive.tools.diagnose_face_box PHOTO_ID` — face geometry.
+- **`desktop/tools/` holds plain scripts, not package modules** — run them by
+  path from `desktop/`, never with `python -m photoarchive.tools.…`, which
+  fails with "No module named":
+  - `python tools/run_push.py [--dry] [--all-files] [--state-dir DIR]` — the
+    Phase 9 push. `--dry` counts targets without sending; exits 1 and prints
+    the failed stages on a `PushStageError`.
+  - `python tools/dedupe_report.py`, `python tools/verify_private.py`.

@@ -3,7 +3,7 @@
 Owner: George Clay. PM: Claude (this Cowork chat). Coding: Claude Code on the Windows laptop and on the Mac mini.
 Spec: `photo-archive-build-prompts.md` (the 12 build prompts). This file records what changed after looking at the real data, the decisions made, and the phase plan. Phase prompts are written one at a time from this file when each phase starts.
 
-Last updated: 2026-10-08
+Last updated: 2026-10-29
 
 ---
 
@@ -27,6 +27,8 @@ Total ≈ 16,900 files, roughly 3× the spec's estimate.
 **Progress (2026-09-15):** Phase 9 closed. The phone-on-LAN upload test could not connect and was **deferred to the live domain** — it is now verification step 2/4 of Phase 14. **Phase order changed: 14 (deploy) runs next, before 10 (pages)**, so every remaining phase is tested on a phone against `https://cyberdinosaurs.com`. Prompt: `prompts/phase-14-deploy.md`. **Phase 14 deploys the site with metadata + one test group's files only.** The full 28 GB file push is deferred until the mini's classify/describe/date jobs finish and Phase 7 (cleanup) has replaced the working copies it will replace — otherwise most files would be pushed twice. VM disk (30 GB, 19 free) is enough for the test set; grow to 80 GB before the full push.
 
 **Progress (2026-09-27):** **Phase 7 (scan cleanup) built and green — not yet run on real scans.** Desktop pytest 291/291 (+1 skipped), web 151/151, one new migration `phase-7-cleanup` (up and down both exercised). New `desktop/src/photoarchive/modes/cleanup/` (analyse / geometry / ops / render / repo / accept / split / job / report / remote / ui), two CLI entry points (`run_cleanup`, `cleanup_report`), and 6 new test files (geometry, analyse, accept, split, report, ui, remote) plus tombstone tests on both sides. Scope measured against the live DB: **4 095** scans in scope (3 947 JPEG / 148 TIFF, up to 93.7 MP), 3 666 with faces, 4 187 labelled faces on scans, 54 batches, 639 back-shaped scans excluded, `orientation` NULL on every in-scope scan (so display frame == raw frame). **Verification steps 2–4 are blocked on the `D:` drive being attached** — masters, `WORKING_DIR` and `CLEANUP_DIR` all live there and only `C:` is mounted; batches 00001–00005 (~380 photos, not the ~250 the prompt guessed) are the first run once it is back. Three real bugs found by the tests on the way: a black scanner bed masking in as one whole-scan print (HSV saturation on near-black noise), a live `QThread` dropped when a preview render was replaced, and a preview landing wiping the last decision off the status bar.
+
+**Progress (2026-10-29):** **Phase 15 deployed and closed — the VM is current for the first time since Sep 17.** The three-week block was a false premise: §5 item 17 recorded that Code could not write to the VM, so the deploy waited for George, and when he said *"I'm not going to do the deploy, you are"* the attempt went through with no refusal at all. Runbook as written — fresh `ops/pg_dump_photoorg.sh` (06:50 UTC), `git pull --ff-only` `a2732c7` → `ca0dcf0` (21 commits), `shared` `npm ci` + `migrate:up` (**`phase-7-cleanup`, `phase-15-corrections`, `phase-15-fixup-1` in 0.7 s**), `web` `npm ci --omit=dev`, `systemctl restart`. Verified: `photo_masters_path_region_unique` and `photo_masters_sha_region_unique` replaced the global `master_path` unique that had been answering 500 since Sep 17; `/sync/status` → `id_floor.ok`; public `/healthz` 200. **Then the first clean push in 25 days: 13,290 photos, 13,533 masters (49 of them split children — Phase 7's splits reached the site at last), 23,464 faces, 34,822 suggestions, 845 backs, 253 album_photos, 0 failed stages, 255.9 s, 0 files (metadata-only by `files_only_for_grouped`).** Live photo counts match the laptop exactly (12,686 = 12,686) and the app log since the restart is one line: "listening". Pre-flight `check_working_files --dry-run` was clean with every post-condition 0. **Verification 3 done on the live site** through the shipped `corrections.repo` path, not a harness: album #6 → `Summer 1992 (SYNCTEST) - Canada`, push, **read back off `cyberdinosaurs.com/albums` in Chrome**, `undo_batch`, push, read back reverted — four audit rows (78016 `correction.replace`, 78017 `correction.batch`, 78021 `correction.undo`, 78022 `correction.undo.batch`) and `edited_on_desktop_at` carried to the VM with `edited_on_web_at` still null. One real bug found in the prod log on the way and fixed: `views/layout.ejs` reads `user` unguarded, and `express.urlencoded` is registered **above** the session, so an aborted or oversized body reached the error handler with no user local and **the 500 page itself threw** `ReferenceError: user is not defined`. `middleware/layout.js` now defaults `res.locals.user = null`; the regression test trips the real parser with a 40 kB body and was confirmed to fail without the fix. Web 208 passed, desktop 646 passed / 1 skipped. Also corrected: `CLAUDE.md` and `run_push.py`'s own docstring both documented `python -m photoarchive.tools.run_push`, which does not exist — the script lives at `desktop/tools/run_push.py` and that invocation dies with "No module named". **Next: Phase 13** (`prompts/phase-13-metadata-writer.md`), then Phase 12, then the group bulk-assignment.
 
 **Progress (2026-10-08, late):** **Phase 15 built, tested, committed and pushed (2b59e6d).** Desktop 632 passed / 1 skipped, web 197 passed. Verification 2's desktop half is clean on real data — album 6 renamed with a `(TEST)` marker and undone through the real Corrections tab (audit #78009 `correction.replace`, #78010 `correction.batch`, #78011 `correction.undo`, #78012 `correction.undo.batch`; the 139 pending suggestions untouched by choice). The push half and verification 3 wait on the VM deploy, which the auto-mode permission classifier refuses before George ever sees a prompt — **George runs the one-liner Code prepares**. PM review of the diff: the LWW guard is right (`edited_on_web_at` is never in a push's insert list, so the web's stamp cannot regress; the `albums` upsert is still floor-guarded) and the migration is additive and safe for the VM. Three things sent back as **fix-up 1** before the phase closes: `person_name_variants` and `place_aliases` still use real deletes (a removed nickname never leaves the site; `/sync/place_aliases` deletes rows on the web) — both get the soft-delete shape; Phase 15's migration `down` deletes soft-deleted join rows where the `photo-back-orphan` precedent says abort; and two checks (re-add after removal flips the flag; the laptop's search refresh fires on the soft-delete UPDATE). The deploy happens **once, after fix-up 1**, taking `phase-7-cleanup`, `phase-15-corrections` and `phase-15-fixup-1` together; then the first push past `photo_masters` since Sep 17, then the on-site round trips. New §5 item 18: `sync_state.json` pull cursors are not keyed by target web identity.
 
@@ -467,6 +469,17 @@ Order as planned: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 
   laptop's `photo_search` refreshes on a soft-delete. Tests now assert
   both. Tests: desktop +14 (`test_corrections_fixup1.py`), web +10
   (`test/corrections-fixup1.test.js`).
+- **Deployed and closed (2026-10-29).** Step 1 finally ran: the three
+  migrations, the current web code, `id_floor.ok`, and a push with **0 failed
+  stages** (13,290 photos / 13,533 masters / 34,822 suggestions in 255.9 s).
+  Verification 3 round-tripped a real correction through the site —
+  `Summer 1992 (SYNCTEST) - Canada` read off `cyberdinosaurs.com/albums`,
+  then read back reverted after the undo, with all four audit rows and
+  `edited_on_desktop_at` carried across. One prod bug fixed on the way: the
+  500 page threw `ReferenceError: user is not defined`, because
+  `express.urlencoded` sits above the session and `layout.ejs` reads `user`
+  unguarded — `middleware/layout.js` now defaults it, with a test that trips
+  the real parser. Every acceptance item is met.
 - **Fix-up 1 (scoped 2026-10-08, PM review of 2b59e6d; prompt appended to
   `prompts/phase-15-corrections.md`).** Soft-delete for
   `person_name_variants` (`is_deleted` joins `WEB_EDITABLE` so a removal is
@@ -497,7 +510,16 @@ Order as planned: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 
 15. **Backs are out of scope for Phase 7 cleanup** (639 back-shaped scans excluded, same rule Dedupe uses). Deskew/crop for backs needs its own pass — the transcription is already captured, so this is cosmetic; schedule after Phase 12.
 16. Cleanup's cross-restart undo is manual (from `WORKING_DIR/_versions/` + the `cleanup.accept` audit row); the recipe is in `GC.md`. A UI for it only if George ever wants one.
 12. ~~Phase 10 phone checklist~~ — done 2026-09-17.
-17. **The VM has not run `phase-7-cleanup`** (its last migration is
+17. ~~**Resolved 2026-10-29.**~~ The VM took `phase-7-cleanup`,
+`phase-15-corrections` and `phase-15-fixup-1` in one window (migrations 0.7 s)
+and is now on `ca0dcf0`; the per-`region_key` uniques replaced the global
+`master_path` one, and the first clean push in 25 days carried 13,533 masters
+including 49 split children with **0 failed stages**. **The premise of the
+block was wrong** — the deploy was deferred for three weeks because remote
+writes had been refused on 2026-10-04 and nobody re-tested; running the same
+runbook from Claude Code on 2026-10-29 was not refused at any step. Re-test a
+tooling refusal before planning around it. Original note follows.
+**The VM has not run `phase-7-cleanup`** (its last migration is
 `phase-11-search`; the VM is on `a2732c7`, 17 days behind `main`). **Corrected
 mechanism (2026-10-04):** the `/sync/photo_masters` 500 is *not* the missing
 `region` column as first reported — `/var/log/photoorg.log` shows

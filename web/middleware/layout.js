@@ -11,6 +11,13 @@
 function layoutMiddleware(req, res, next) {
   res.locals.page = { title: null, nav: null, css: [], js: [], wide: false, bodyClass: '' };
   res.locals.currentUrl = req.originalUrl;
+  // layout.ejs reads `user` unguarded, and an error raised *above* loadUser in
+  // the stack still renders through here: express.urlencoded is registered
+  // before the session, so a payload-too-large or aborted body goes to the
+  // error handler with no user local and the 500 page itself threw
+  // `ReferenceError: user is not defined` (seen on prod 2026-10-29).
+  // loadUser overwrites this on every request that reaches it.
+  res.locals.user = null;
   const render = res.render.bind(res);
   res.render = function renderWithLayout(view, options, cb) {
     if (typeof options === 'function') { cb = options; options = {}; }
