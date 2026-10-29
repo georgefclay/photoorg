@@ -436,7 +436,8 @@ Order as planned: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 
     the comment edit permission matrix.
 - **Fix-up 1 (2026-10-08) — the last real deletes, and the `down`
   precedent.** PM review of `2b59e6d` accepted the build and named three
-  things to close first.
+  things to close first; the scoping prompt is appended to
+  `prompts/phase-15-corrections.md`.
   1. **`person_name_variants` gets soft-delete.** A nickname removed on the
      desktop went on showing on the web forever — the `album_photos` fault
      with a different table name, and exactly what the Inviolable names.
@@ -480,18 +481,6 @@ Order as planned: **0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 
   `express.urlencoded` sits above the session and `layout.ejs` reads `user`
   unguarded — `middleware/layout.js` now defaults it, with a test that trips
   the real parser. Every acceptance item is met.
-- **Fix-up 1 (scoped 2026-10-08, PM review of 2b59e6d; prompt appended to
-  `prompts/phase-15-corrections.md`).** Soft-delete for
-  `person_name_variants` (`is_deleted` joins `WEB_EDITABLE` so a removal is
-  decided by the same `sync_web_edit_wins` rule as a rename; `person_search`
-  re-created to skip deleted variants) and for `place_aliases` (the sync
-  route keeps replace-the-set semantics but flips flags instead of deleting
-  rows); the Phase 15 migration's `down` aborts with counts when soft-deleted
-  rows exist instead of deleting them (the `photo-back-orphan` precedent —
-  `up` untouched, byte for byte); re-add-after-removal and laptop-side
-  search-refresh checks; then George's single deploy window and Phase 15's
-  remaining verification (zero-failed-stage push, album round trip on the
-  site, variant round trip).
 
 ## 5. Open items for George
 - **Candidate fix-up 12 — shared VLM inbox on the mini.** classify, describe and estimate_date all upload the same 1024-px JPEGs to three per-job inboxes (3 × ~2.5 GB, ~40 min each). One shared inbox with per-job result files, swept only when all three results are collected, would make it one upload. Do it before the next model / prompt-version rerun; not while a queue is running. (2026-09-16)
@@ -547,14 +536,16 @@ classifier refuses `[Remote Shell Writes]` before George sees any prompt.
 (`pgmigrations`, `/sync/status`, `/var/log/photoorg.log`, caddy 4xx) and
 runs the zero-failed-stage push.
 18. **`sync_state.json`'s pull cursors are not keyed by the target web's
-identity.** Pointing the desktop at a second web server (the laptop's local
-one, say) would advance the VM's cursors and make the next real pull skip
-rows — which is why the Phase 15 push could not be rehearsed against the
-laptop web. Harmless while there is exactly one target; fix when a second
-one ever exists. (Recorded 2026-10-08, Phase 15 fix-up 1.)
+identity** (recorded 2026-10-08, Phase 15 fix-up 1, when Code rightly declined
+to rehearse Phase 15's push against the laptop web). `push()` pulls
+unconditionally, so pointing the desktop at a second web server — the laptop's
+local one, say — would apply that server's facts into `photoorg` and advance
+the VM's cursors, making the next real pull skip rows. Key the state file by
+the `/sync/status` identity (the shared-DB guard already fetches it) if a
+second target ever exists; until then the desktop points at the VM only, and
+this is harmless.
 14. Search name strip shows phonetic-only people for ordinary words ("Christmas" → Christina). Harmless (score 50, never displaces hits); if it annoys anyone, hide phonetic-only people from the strip when the same term produced full-text hits. Phase 11 fix-up when convenient.
 13. ~~**Resolved 2026-10-02 (Phase 7 fix-up 7).**~~ Root cause: ingest parsed exifread's `Rotated 90 CW` against an exiftool-vocabulary table, so `orientation` was NULL for every photo ever ingested; the fix-up 6 backfill had nothing to key on. Now: 8,672 orientations backfilled, 235 photos' dims corrected, 280 boxes rescaled, 6 cleanup-mapped boxes fixed (Samara restored), `check_working_files` post-condition = 0. Needs one push to reach the site. Original: 235 photos (EXIF 6/8, `orientation` NULL, raw dims stored) slipped past the fix-up 6 backfill; 280 face boxes in the wrong frame, 95 labelled. Fix-up 7 in the Phase 7 prompt repairs them. Original note — check `photos.orientation` on the desktop: Code found no photo with orientation set in the 408-photo local copy. Either the sync omits the column or the fix-up 6 backfill missed. `select orientation, count(*) from photos group by 1` on `photoorg`; phone photos should show 6/8 as well as 1.
-18. **`sync_state.json` pull cursors are not keyed by the target web's identity** (found 2026-10-08, when Code rightly declined to test Phase 15's push against the laptop web). `push()` pulls unconditionally, so pointing the desktop at a second web server would apply that server's facts into `photoorg` and advance the VM's cursors. Key the state file by the `/sync/status` identity (the shared-DB guard already fetches it) if a second target ever exists; until then the desktop points at the VM only.
 
 ## 6. Risks
 
