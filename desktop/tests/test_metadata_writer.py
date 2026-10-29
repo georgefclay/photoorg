@@ -615,6 +615,40 @@ def test_a_rebuilt_working_file_is_selected_again(mw):
     assert _read(mw, _wp(pid))["XMP-photoarchive:PhotoId"] == pid
 
 
+_DUPLICATE_PROPERTY_XMP = (
+    b'<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+    b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+    b'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+    + b''.join(b'<rdf:Description rdf:about="" xmlns:exif="http://ns.adobe.com/exif/1.0/">'
+               b'<exif:ResolutionUnit>2</exif:ResolutionUnit></rdf:Description>'
+               for _ in range(2))
+    + b'</rdf:RDF></x:xmpmeta><?xpacket end="w"?>'
+)
+
+
+def test_a_minor_fault_in_the_files_own_xmp_is_written_past_and_noted(mw):
+    """Photoshop left a duplicate XMP property in five real files (#6249 …):
+    exiftool's minor warning made it keep the old XMP block, so our tags never
+    landed and the hash check failed. The retry with -m must land them."""
+    pid = _photo(mw, is_scan=False)
+    wp = _wp(pid)
+    Image.open(wp).copy().save(wp, "JPEG", quality=92, xmp=_DUPLICATE_PROPERTY_XMP)
+    pixels = np.asarray(Image.open(wp))
+    _person_id = _person("Ada", "Clay")
+    _face(pid, _person_id, {"x": 10, "y": 10, "w": 40, "h": 40})
+
+    [res] = _write(mw, [pid])
+    assert res.status == "written", res.error
+    assert any("exiftool -m" in n and "Duplicate XMP property" in n for n in res.notes)
+    tags = _read(mw, _wp(pid))
+    assert "Ada Clay" in _as_list(tags.get("XMP-dc:Subject"))
+    assert np.array_equal(np.asarray(Image.open(_wp(pid))), pixels)
+    audit = _q("select new_value from audit_log where action = 'metadata.write' "
+               "and entity_id = %s", (pid,), one=True)[0]
+    assert any("exiftool -m" in n for n in audit["notes"])
+    assert _due_ids() == []
+
+
 def test_a_missing_file_is_skipped_and_the_chunk_goes_on(mw):
     gone, ok = _photo(mw), _photo(mw, seq=18)
     _wp(gone).replace(Path(mw.WORKING_DIR).parent / "gone.jpg")

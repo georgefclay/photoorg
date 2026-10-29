@@ -133,6 +133,31 @@ def _verify_decodes(path: Path, want: tuple[int, int]) -> None:
             )
 
 
+class _MinorFault(RuntimeError):
+    """The first write fell over a minor fault in the existing metadata."""
+
+
+def _write_and_check(
+    et: et_mod.ExifTool, src: Path, tmp: Path, args: Sequence[str],
+    size: tuple[int, int], expected_hash: str, *, ignore_minor: bool = False,
+) -> list[str]:
+    """Write the temp copy and prove it: same stored size, our hash readable."""
+    try:
+        warnings = et.write_copy(src, tmp, args, ignore_minor=ignore_minor)
+    except et_mod.ExifToolError as e:
+        if not ignore_minor and "[minor]" in str(e).lower():
+            raise _MinorFault(str(e)) from e
+        raise
+    _verify_decodes(tmp, size)
+    back = et.read(tmp, [et_mod.HASH_TAG])
+    if str(back.get(et_mod.HASH_TAG) or "") != expected_hash:
+        msg = "the written file does not read back the payload hash"
+        if not ignore_minor:
+            raise _MinorFault(f"{msg} ({'; '.join(warnings) or 'no warning'})")
+        raise RuntimeError(msg)
+    return warnings
+
+
 def write_one(
     settings: Settings, cand: repo.Candidate, et: et_mod.ExifTool, *,
     dry_run: bool, actor: str = "desktop",
@@ -200,11 +225,20 @@ def write_one(
             # newline="\n": Windows would otherwise store CRLF in the file,
             # and what exiftool reads back would not be what the dry run said.
             text_file.write_text(text, encoding="utf-8", newline="\n")
-        et.write_copy(src, tmp, et_mod.write_args(desired, text_file=text_file))
-        _verify_decodes(tmp, (sw, sh))
-        back = et.read(tmp, [et_mod.HASH_TAG])
-        if str(back.get(et_mod.HASH_TAG) or "") != cand.hash:
-            raise RuntimeError("the written file does not read back the payload hash")
+        args = et_mod.write_args(desired, text_file=text_file)
+        try:
+            _write_and_check(et, src, tmp, args, (sw, sh), cand.hash)
+        except _MinorFault as first:
+            # A fault in the file's own metadata — Photoshop's duplicate XMP
+            # property, a camera's bad MakerNotes offset — makes exiftool skip
+            # the block (or the file) unless told -m. The check below still
+            # has to pass; the master keeps the original either way.
+            if tmp.exists():
+                tmp.unlink()
+            warnings = _write_and_check(et, src, tmp, args, (sw, sh), cand.hash,
+                                        ignore_minor=True)
+            notes.append(f"written with exiftool -m after: {first}"
+                         + (f" ({'; '.join(warnings)})" if warnings else ""))
 
         with db.connection() as conn:
             conn.autocommit = False

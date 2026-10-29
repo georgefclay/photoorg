@@ -1344,6 +1344,13 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
    `newline="
 "` — on Windows the default turns the description's newlines
    into CRLF and the file stops matching the dry run.
+   **A minor fault in the file's own metadata gets one retry with `-m`**:
+   Photoshop's duplicate XMP property or empty `xmpMM:History` makes exiftool
+   keep the old XMP block untouched (the hash check catches it), and a bad
+   MakerNotes offset makes it refuse the file. The retry still has to pass the
+   same decode-and-hash check, and the audit row's `notes` says "written with
+   exiftool -m after: …". `-m` may drop a broken block (#10162 lost a
+   truncated PreviewIFD); the `_versions/` copy and the master keep it.
 5. **Scope:** `triage_status in ('keep','private')`, `is_deleted = false`.
    `photo_backs` images are not photos; their text travels in the front's
    description. Digital photos keep their own EXIF; ours goes alongside.

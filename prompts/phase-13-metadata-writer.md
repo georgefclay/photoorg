@@ -259,3 +259,30 @@ is right (no confirmed date). On a scratch file a day-precise
 **For George:** open `D:\PhotoArchive\working\00002608_54ce1de3.jpg` in
 Windows Photos and confirm the people show. For a dated photo, the Batch
 00033 run had none; any digital photo after the full write will do.
+
+---
+
+## Phase 13 fix-up 1 — date hygiene (PM, 2026-10-29)
+
+PM review of 878f89f: the build is accepted. The three catches on real files (scanner-clock dates, Windows' January 1st, father-and-son de-dup) were all the right calls, and the Q9 answer stands. But Q9 is a workaround for a data fault the writer did not cause: **ingest confirmed dates it had no business confirming.** 21 scans carry `capture_date_confirmed = true` from the scan file's EXIF with no `photo.capture_date.set` audit row — scanner or phone clocks, or a device set to a guessed January 1st — and an unknown number of digital photos carry an unset camera clock the same way (#4096: `2004-01-01 00:00:11`). A wrong confirmed date is a wrong fact: it feeds the web photo page, completeness, decade search, and Phase 12's year/month zip tree, where a 1960s print files under 2025. **Run this after the full write and before Phase 12.**
+
+### 1. Report first — no writes
+`python -m photoarchive.tools.date_hygiene --report`: every confirmed date with no `photo.capture_date.set` audit row (i.e. ingest-sourced), flagged by rule: **(a)** the photo is `is_scan` or on a `|scan` root; **(b)** January 1st with a time of day under 00:01:00; **(c)** disagrees with the `_YYYY-MM` folder hint by more than 3 months; **(d)** later than the file's own ingest date, or before 1826. Counts per rule and per batch, a CSV under `WORKING_DIR/_report/date-hygiene/`, and 10 sample rows pasted here.
+
+### 2. Un-confirm, audited — never SQL
+`--apply --rules a,b[,c,d]` sets `capture_date_confirmed = false` on the flagged rows and keeps the old value as a `date` suggestion (`source='import'`, `details.reason=<rule>`, low confidence) so nothing is lost and the Suggestions block still shows where it came from; one `photo.capture_date.unconfirm` audit row per photo with previous/new; `refresh_completeness` on each; the search index follows by trigger. George picks the rules from the report — default **a + b**; c and d only if their numbers look right to him.
+
+### 3. The edit path that was missing
+Today a confirmed date can be overridden by force-accepting another suggestion but never cleared. Add **Clear confirmed date** to the desktop Suggestions block and to the web admin photo page (`POST /api/admin/photos/:id/capture_date/clear`), both writing `photo.capture_date.unconfirm` with previous/new, both syncing the way a date accept does — the push carries the cleared fact, the web's clear comes down through `pull_confirmed`'s fact-set audit rows. Phase 15's rule applies to facts as much as to text: fixing a mistake must never need SQL.
+
+### 4. Ingest stops creating these
+On a `|scan` root or `is_scan`, an EXIF date becomes a `date` suggestion (`source='import'`, `details.reason='scanner_clock'`), never a confirmed fact. On a digital root, an EXIF `DateTimeOriginal` of January 1st with a time under 00:01:00 becomes a suggestion with `details.reason='unset_camera_clock'`. Tests for both; every other digital EXIF date stays confirmed exactly as before.
+
+### 5. Then the writer
+Re-run `write_metadata`: the un-confirmed photos drop their date tags and only they are due ("facts changed"). Paste the count — it must equal the rows un-confirmed — and confirm no scan gained a date.
+
+### Tests, verification, docs
+pytest green; the report pasted; apply on George's rules with before/after counts; the writer re-run count; `CLAUDE.md` Metadata section gains "a scan's EXIF date is never a fact; an ingest-sourced date can be cleared from the UI"; `PROJECT-PLAN.md` Phase 13; commit and push `Phase 13 fix-up 1: date hygiene`.
+
+## Answers to Claude Code's fix-up 1 questions
+(added as they come)

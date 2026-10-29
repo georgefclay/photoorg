@@ -203,16 +203,24 @@ class ExifTool:
 
     # ---- writes -----------------------------------------------------------
 
-    def write_copy(self, src: Path, dst: Path, args: Sequence[str]) -> None:
-        """Write `src` + metadata changes to a new file `dst`. Never in place."""
+    def write_copy(self, src: Path, dst: Path, args: Sequence[str], *,
+                   ignore_minor: bool = False) -> list[str]:
+        """Write `src` + metadata changes to a new file `dst`. Never in place.
+
+        `ignore_minor` adds `-m`: exiftool then writes past a *minor* fault in
+        the file's existing metadata (a duplicate XMP property, a bad
+        MakerNotes offset) instead of skipping that block or the file.
+        Returns exiftool's warnings."""
         if Path(dst).resolve() == Path(src).resolve():
             raise ExifToolError("write_copy refuses to write a file onto itself")
-        out, errs = self.execute([*args, "-o", str(dst), str(src)])
+        out, errs = self.execute([*(["-m"] if ignore_minor else []), *args,
+                                  "-o", str(dst), str(src)])
         hard = [e for e in errs if e.startswith("Error")]
         if hard or "1 image files created" not in out:
             raise ExifToolError(
                 f"exiftool did not write {dst}: {'; '.join(hard or errs) or out.strip()}"
             )
+        return [e for e in errs if e.startswith("Warning")]
 
 
 # --------------------------------------------------------------------------
