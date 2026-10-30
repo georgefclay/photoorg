@@ -4,9 +4,12 @@
 # agenticcomplete, etc). NEVER install with `crontab cron-fragment.txt` —
 # that would replace the whole crontab and delete the other apps' lines.
 #
-# Use the fragmented sed pattern the mineralsmonitor site documents:
-#   ( crontab -l 2>/dev/null | sed '/# --- photoorg ---/,/# --- END photoorg ---/d' ; \
-#     cat ops/vm/cron-fragment.txt ) | crontab -
+# Replace only the photoorg block, with ANCHORED markers: these comment
+# lines contain the marker text, so an unanchored pattern matches here too
+# and drags this header into the crontab (found in Phase 12). Back up first:
+#   crontab -l > ~/backups/crontab-$(date +%F).txt
+#   ( crontab -l | sed '/^# --- photoorg ---$/,/^# --- END photoorg ---$/d' ; \
+#     sed -n '/^# --- photoorg ---$/,/^# --- END photoorg ---$/p' ops/vm/cron-fragment.txt ) | crontab -
 #
 # Times are in the system's local TZ (America/Chicago).
 
