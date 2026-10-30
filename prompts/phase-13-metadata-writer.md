@@ -430,3 +430,14 @@ contrib roots; confirmed failing with the guard off), `test_sync_ui_jobs.py`
 (5), `test_date_clear_ui.py` (2), `web/test/date-clear.test.js` (3).
 Needs a VM deploy (web code only, no migration) for the web Clear link and
 `/sync/pull/confirmed` carrying `photo.capture_date.unconfirm`.
+
+**George's push after the deploy (2026-10-30 07:39, the fixed Sync tab):**
+done in 269.9 s — 13,290 photos, 13,533 masters, 23,464 faces, 34,849
+suggestions, 845 backs, 0 files, 0 failed stages; the window stayed open and
+every stage start/end is in `photoarchive.log` with memory (peak 799 MB at
+the album_photos → faces boundary, back to ~360 MB after); `crash.log` empty.
+That push carried the 24 un-confirms to the VM (a read-back of them on the VM
+was refused by the auto-mode classifier — check #2693 on the site: "No date
+yet"). The new Qt handler also caught one thing on its first day: the 07:20
+`--smoke` exit logged `QThread: Destroyed while thread '' is still running` —
+another mode's startup job, not Sync; PROJECT-PLAN §5 item 22.

@@ -564,6 +564,8 @@ this is harmless.
 
 21. **Bug — Metadata panel's batch box wants the full batch name** (George, 2026-10-29). The field is labelled `Batch:`, so George typed `00033`; `scan_batch` holds `Batch 00033`, nothing matched, and the run reported an ordinary-looking "0 due" (`job_runs` 38, scope 0). Fix: accept the bare number (prefix `Batch ` when the text is all digits) or offer the batch names as a completer, and say "no photos in batch '…'" when the scope is empty rather than "0 due". The CLI's `--batch` has the same exact-match behaviour.
 
+22. **Bug — a QThread is destroyed at quit when the app closes within ~2 s of starting** (found 2026-10-30 by fix-up 1's new Qt message handler). The 07:20 `--smoke` run logged `CRITICAL qt: QThread: Destroyed while thread '' is still running` as it exited: some mode starts a `BackgroundJob` at construction (the Metadata panel's due count is the likely one — it takes ~1.3 s) and nothing joins it on close. It is the same abort class as the Sync tab's, harmless in normal use (nobody quits that fast) but it would hide a real shutdown crash. Fix: give that mode `running_job()` / `shutdown()` like Sync, so `MainWindow.closeEvent` joins it.
+
 ## 6. Risks
 
 - Volume: ~17k files means every review UI must be keyboard-first and resumable, or George will not finish. Triage exists to shrink the set before faces and cleanup run.
