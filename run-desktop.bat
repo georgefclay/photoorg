@@ -1,5 +1,5 @@
 @echo off
 setlocal
-cd /d "%~dp0"
-"desktop\.venv\Scripts\python.exe" -m photoarchive %*
+cd /d "%~dp0desktop"
+".venv\Scripts\python.exe" -m photoarchive %*
 endlocal
