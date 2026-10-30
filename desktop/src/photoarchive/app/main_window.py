@@ -140,7 +140,26 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.status_guard.setText(f"Guard: err ({e.__class__.__name__})")
 
+    def _mode_widgets(self) -> list[QWidget]:
+        return [self.stack.widget(i) for i in range(self.stack.count())]
+
     def closeEvent(self, event):
+        # A mode with a job on a QThread says so through `running_job()` and
+        # stops it through `shutdown()` (Sync, Phase 13 fix-up 1). Closing
+        # over a running QThread aborts the process with no traceback.
+        running = [name for w in self._mode_widgets()
+                   if callable(getattr(w, "running_job", None)) and (name := w.running_job())]
+        if running:
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, "A job is running",
+                f"{', '.join(running).capitalize()} is still running. Quit anyway? "
+                f"It stops at its next safe point; running it again carries on.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
         try:
             with db.connection() as conn:
                 pending = conn.execute(
@@ -164,5 +183,8 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 event.ignore()
                 return
+        for w in self._mode_widgets():
+            if callable(getattr(w, "shutdown", None)):
+                w.shutdown()
         self.log_dock.detach()
         super().closeEvent(event)

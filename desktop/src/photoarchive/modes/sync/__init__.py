@@ -9,10 +9,11 @@ bar. See push.py, pull.py, bulk.py, and client.py for the innards.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
     QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ... import db
 from ...config import Settings, load as load_settings
+from ...memory import rss_text
 from .bulk import bulk_apply, group_summary, resolve_photo_ids, unfiled_ids
 from .client import WebSyncClient, WebSyncError
 from .pull import (
@@ -31,22 +33,78 @@ from ..metadata.ui import MetadataRunner, count_due_job, due_text
 log = logging.getLogger(__name__)
 
 
+class _Cancelled(Exception):
+    """Raised from the progress callback once the app is closing. Push is
+    resumable: a second Push after a stopped one carries on."""
+
+
 class _Worker(QObject):
+    """Runs one sync job on a QThread.
+
+    **Every signal goes to a bound method of the panel, never a lambda**
+    (Phase 13 fix-up 1, item 6). A lambda has no receiver, so PySide6 runs
+    it on the thread that emitted, this worker's, and the old `finished`
+    lambda called `setVisible`, `setText` and `append` on widgets from
+    there. Touching a widget off the GUI thread kills the process without a
+    Python traceback, which is how the app vanished the moment George's
+    first GUI push finished (2026-10-29). A bound slot of a QObject living
+    on the GUI thread is delivered queued, on the GUI thread.
+    """
     progress = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, fn: Callable[[Callable[[str], None]], dict]) -> None:
+    def __init__(self, name: str, fn: Callable[[Callable[[str], None]], dict]) -> None:
         super().__init__()
+        self.name = name
         self._fn = fn
+        self.cancel_requested = False
+
+    def _status(self, msg: str) -> None:
+        if self.cancel_requested:
+            raise _Cancelled()
+        self.progress.emit(msg)
 
     def run(self) -> None:
+        t0 = time.monotonic()
+        log.info("sync %s: start (%s)", self.name, rss_text())
         try:
-            out = self._fn(lambda msg: self.progress.emit(msg))
-            self.finished.emit(out or {})
+            out = self._fn(self._status) or {}
+            log.info("sync %s: done in %.1f s: %s (%s)", self.name, time.monotonic() - t0,
+                     {k: v for k, v in out.items() if k != "metadata_due"}, rss_text())
+            self.finished.emit(out)
+        except _Cancelled:
+            log.warning("sync %s: stopped at a safe point because the app is closing", self.name)
+            self.finished.emit({"cancelled": True})
         except Exception as e:  # noqa: BLE001
-            log.exception("sync worker failed")
+            log.exception("sync %s: failed after %.1f s (%s)", self.name,
+                          time.monotonic() - t0, rss_text())
             self.failed.emit(str(e))
+
+
+class _StageLog:
+    """Writes a push's stage starts and ends, with counts and memory, to the
+    log file as well as the pane: the GUI twin of `run_push.py`'s output.
+    Per-item progress stays in the pane only."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._stage: str | None = None
+        self._last = ""
+        self._t0 = time.monotonic()
+
+    def update(self, stage: str, line: str) -> None:
+        if stage != self._stage:
+            self.close()
+            self._stage, self._t0 = stage, time.monotonic()
+            log.info("sync %s: stage %s start: %s (%s)", self._name, stage, line, rss_text())
+        self._last = line
+
+    def close(self) -> None:
+        if self._stage is not None:
+            log.info("sync %s: stage %s end after %.1f s: %s (%s)", self._name, self._stage,
+                     time.monotonic() - self._t0, self._last, rss_text())
+            self._stage = None
 
 
 class SyncPanel(QWidget):
@@ -54,8 +112,13 @@ class SyncPanel(QWidget):
         super().__init__()
         self._settings: Settings | None = None
         self._client: WebSyncClient | None = None
-        self._thread: QThread | None = None
-        self._worker: _Worker | None = None
+        # One sync job at a time. `_job` is the running one; `_live_jobs`
+        # holds every (thread, worker) until the thread's own `finished`
+        # fires, so the last Python reference to a running QThread is never
+        # dropped (CLAUDE.md, Cleanup, "two UI rules").
+        self._job: _Worker | None = None
+        self._job_log: QTextEdit | None = None
+        self._live_jobs: list[tuple[QThread, _Worker]] = []
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -79,10 +142,24 @@ class SyncPanel(QWidget):
         self._meta_runner = MetadataRunner.shared()
         self._meta_runner.finished.connect(self._on_metadata_finished)
 
+        status_row = QHBoxLayout()
         self._status = QLabel("")
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: #333; padding: 4px;")
-        root.addWidget(self._status)
+        status_row.addWidget(self._status, stretch=1)
+        # Resident memory while a job runs: low memory is the usual killer.
+        self._rss = QLabel("")
+        self._rss.setStyleSheet("color: #666; padding: 4px;")
+        status_row.addWidget(self._rss)
+        root.addLayout(status_row)
+        self._rss_timer = QTimer(self)
+        self._rss_timer.setInterval(2000)
+        self._rss_timer.timeout.connect(self._update_rss)
+
+        self._work_buttons = [
+            self._btn_push, self._btn_pull_groups, self._btn_pull_confirmed,
+            self._btn_pull_contribs, self._btn_add, self._btn_remove, self._btn_meta,
+        ]
 
     # ------------------------------------------------------------------
     # Push tab
@@ -119,17 +196,24 @@ class SyncPanel(QWidget):
         files_only_for_grouped = bool(self._chk_files_only_grouped.isChecked())
 
         def do(status: Callable[[str], None]) -> dict:
+            stages = _StageLog("push")
+
             def prog(p: PushProgress) -> None:
-                status(f"{p.stage}: {p.done}/{p.total} {p.detail}")
-            stats = push(
-                client,
-                working_dir=Path(settings.WORKING_DIR),
-                thumbs_dir=Path(settings.THUMBS_DIR),
-                state_dir=Path(settings.WORKING_DIR).parent / "sync-state",
-                send_face_embeddings=_env_bool("SYNC_FACE_EMBEDDINGS"),
-                files_only_for_grouped=files_only_for_grouped,
-                progress=prog,
-            )
+                line = f"{p.stage}: {p.done}/{p.total} {p.detail}"
+                stages.update(p.stage, line)
+                status(line)
+            try:
+                stats = push(
+                    client,
+                    working_dir=Path(settings.WORKING_DIR),
+                    thumbs_dir=Path(settings.THUMBS_DIR),
+                    state_dir=Path(settings.WORKING_DIR).parent / "sync-state",
+                    send_face_embeddings=_env_bool("SYNC_FACE_EMBEDDINGS"),
+                    files_only_for_grouped=files_only_for_grouped,
+                    progress=prog,
+                )
+            finally:
+                stages.close()
             return {
                 "photos": stats.photos_upserted,
                 "files": stats.files_uploaded,
@@ -137,7 +221,7 @@ class SyncPanel(QWidget):
                 "tables": stats.tables,
             }
 
-        self._run_worker(do, log_widget=self._push_log)
+        self._run_worker("push", do, log_widget=self._push_log)
 
     # ------------------------------------------------------------------
     # Pull tab
@@ -176,7 +260,7 @@ class SyncPanel(QWidget):
             g, m, pg = pull_groups(client, state_dir)
             status(f"groups {g}, members {m}, photo_groups {pg}")
             return {"groups": g, "members": m, "photo_groups": pg}
-        self._run_worker(do, log_widget=self._pull_log)
+        self._run_worker("pull groups", do, log_widget=self._pull_log)
 
     def _on_pull_confirmed(self) -> None:
         if self._busy(): return
@@ -189,7 +273,7 @@ class SyncPanel(QWidget):
                                thumbs_dir=Path(settings.THUMBS_DIR))
             status(f"applied {n} facts")
             return {"facts": n}
-        self._run_worker(do, log_widget=self._pull_log)
+        self._run_worker("pull confirmed", do, log_widget=self._pull_log)
 
     def _on_pull_contribs(self) -> None:
         if self._busy(): return
@@ -210,7 +294,7 @@ class SyncPanel(QWidget):
             c, f = pull_contributions(client, contrib_root)
             status(f"pulled {c} contributions, {f} files")
             return {"contributions": c, "files": f}
-        self._run_worker(do, log_widget=self._pull_log)
+        self._run_worker("pull contributions", do, log_widget=self._pull_log)
 
     # ------------------------------------------------------------------
     # Groups tab: bulk assign/unassign + counts
@@ -272,6 +356,8 @@ class SyncPanel(QWidget):
             self._status.setText(f"Refresh failed: {e}")
 
     def _on_bulk(self, direction: str) -> None:
+        if self._busy():
+            return
         try:
             kind = self._filter_kind.currentText()
             raw = self._filter_value.text().strip()
@@ -320,15 +406,26 @@ class SyncPanel(QWidget):
             self._client = WebSyncClient(s.WEB_API_URL, s.WEB_API_TOKEN)
         return self._client
 
+    def running_job(self) -> str | None:
+        """The name of the sync job running now, for the main window's close."""
+        return self._job.name if self._job is not None else None
+
     def _busy(self) -> bool:
-        if self._thread and self._thread.isRunning():
-            self._status.setText("A sync operation is already running.")
+        if self._job is not None:
+            self._status.setText(
+                f"{self._job.name.capitalize()} is running; one sync job at a time.")
             return True
         if self._meta_runner.is_running():
             # Pushing files that are being swapped would send half a version.
             self._status.setText("The metadata writer is running; sync waits for it.")
             return True
         return False
+
+    def _set_buttons(self) -> None:
+        """Every button that starts work shares the one slot."""
+        free = self._job is None and not self._meta_runner.is_running()
+        for b in self._work_buttons:
+            b.setEnabled(free)
 
     # ------------------------------------------------------------------
     # Metadata (Phase 13)
@@ -340,7 +437,7 @@ class SyncPanel(QWidget):
         self._meta_due.setText(due_text(n, g))
         self._btn_meta.setText(f"Write metadata for {n} changed photos")
         self._btn_meta.setVisible(n > 0)
-        self._btn_meta.setEnabled(not self._meta_runner.is_running())
+        self._set_buttons()
 
     def _on_write_metadata(self) -> None:
         if self._busy():
@@ -348,9 +445,9 @@ class SyncPanel(QWidget):
         log_widget = self._pull_log
         log_widget.append("--- metadata writer ---")
         self._meta_runner.line.connect(log_widget.append)
-        self._btn_meta.setEnabled(False)
         if not self._meta_runner.start(dry_run=False):
             self._status.setText("A metadata run is already going.")
+        self._set_buttons()
 
     def _on_metadata_finished(self, code: int, summary: str) -> None:
         try:
@@ -359,12 +456,17 @@ class SyncPanel(QWidget):
             pass
         self._status.setText(("Metadata written. " if code == 0 else f"Metadata writer exited {code}. ")
                              + (summary.splitlines()[-1] if summary else ""))
+        self._set_buttons()
         try:
             self._show_metadata_due(count_due_job())
         except Exception:  # noqa: BLE001
             log.exception("metadata due count failed")
 
-    def _run_worker(self, fn: Callable[[Callable[[str], None]], dict], *, log_widget: QTextEdit) -> None:
+    # ------------------------------------------------------------------
+    # The one job slot
+    # ------------------------------------------------------------------
+    def _run_worker(self, name: str, fn: Callable[[Callable[[str], None]], dict], *,
+                    log_widget: QTextEdit) -> None:
         def with_metadata_due(status: Callable[[str], None]) -> dict:
             out = fn(status) or {}
             try:
@@ -373,24 +475,77 @@ class SyncPanel(QWidget):
                 log.exception("metadata due count failed")
             return out
 
-        self._thread = QThread(self)
-        self._worker = _Worker(with_metadata_due)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(lambda msg: log_widget.append(msg))
-        self._worker.finished.connect(lambda result: (
-            self._show_metadata_due(result.pop("metadata_due", None)),
-            log_widget.append(f"done: {result}"),
-            self._status.setText(f"Done: {result}"),
-            self._thread.quit(),
-        ))
-        self._worker.failed.connect(lambda err: (
-            log_widget.append(f"FAILED: {err}"),
-            self._status.setText(f"Failed: {err}"),
-            self._thread.quit(),
-        ))
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.start()
+        # No Qt parent: a parented QThread is destroyed with the panel even
+        # while it runs. `_live_jobs` owns it until its `finished` fires.
+        thread = QThread()
+        worker = _Worker(name, with_metadata_due)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_job_progress)
+        worker.finished.connect(self._on_job_finished)
+        worker.failed.connect(self._on_job_failed)
+        # Direct: QThread.quit is thread-safe, and a queued quit would wait
+        # for a GUI thread that `shutdown()` is blocking in `wait()`.
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        worker.failed.connect(thread.quit, Qt.DirectConnection)
+        # The worker is deleted by its own thread's last event; the thread
+        # object (GUI-owned) in `_on_thread_finished`.
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+
+        self._job, self._job_log = worker, log_widget
+        self._live_jobs.append((thread, worker))
+        self._status.setText(f"{name.capitalize()} running...")
+        self._set_buttons()
+        self._update_rss()
+        self._rss_timer.start()
+        thread.start()
+
+    @Slot(str)
+    def _on_job_progress(self, msg: str) -> None:
+        if self._job_log is not None:
+            self._job_log.append(msg)
+
+    @Slot(dict)
+    def _on_job_finished(self, result: dict) -> None:
+        name = self._job.name if self._job else "sync"
+        self._show_metadata_due(result.pop("metadata_due", None))
+        if self._job_log is not None:
+            self._job_log.append(f"done: {result}")
+        self._status.setText(f"{name.capitalize()} done: {result}")
+
+    @Slot(str)
+    def _on_job_failed(self, err: str) -> None:
+        name = self._job.name if self._job else "sync"
+        if self._job_log is not None:
+            self._job_log.append(f"FAILED: {err}")
+        self._status.setText(f"{name.capitalize()} failed: {err}")
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        for pair in list(self._live_jobs):
+            thread, worker = pair
+            if thread.isFinished():
+                self._live_jobs.remove(pair)
+                if worker is self._job:
+                    self._job = None
+                thread.deleteLater()
+        if self._job is None:
+            self._rss_timer.stop()
+            self._update_rss()
+        self._set_buttons()
+
+    def _update_rss(self) -> None:
+        self._rss.setText(rss_text())
+
+    def shutdown(self, timeout_ms: int = 30_000) -> None:
+        """Called by the main window as it closes: ask the running job to stop
+        at its next safe point, then join every live thread."""
+        for thread, worker in list(self._live_jobs):
+            worker.cancel_requested = True
+            if not thread.wait(timeout_ms):
+                log.error("sync %s did not stop within %d ms of closing", worker.name, timeout_ms)
+        self._rss_timer.stop()
 
 
 def _env_bool(name: str) -> bool:

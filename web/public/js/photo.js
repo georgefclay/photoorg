@@ -177,6 +177,23 @@
     });
   }
 
+  // ---- admin: clear a confirmed date (Phase 13 fix-up 1) --------------------
+  const clearDate = $('[data-clear-date]');
+  if (clearDate) {
+    clearDate.addEventListener('click', async () => {
+      if (!window.confirm('Clear this confirmed date? The old date stays as a suggestion you can accept again.')) return;
+      clearDate.disabled = true;
+      try {
+        const r = await CD.api(clearDate.dataset.url, { method: 'POST', body: {} });
+        CD.toast(r.cleared ? 'Date cleared. The old date is now a suggestion.' : 'This photo had no confirmed date.');
+        window.location.reload();
+      } catch (err) {
+        CD.toast(errorText(err), 'error');
+        clearDate.disabled = false;
+      }
+    });
+  }
+
   // ---- moderators: remove from group ---------------------------------------
   $$('[data-remove-group]').forEach((btn) => btn.addEventListener('click', async () => {
     const name = btn.dataset.groupName;

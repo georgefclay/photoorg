@@ -37,6 +37,7 @@ from psycopg.rows import dict_row
 
 from ... import db
 from ...id_ranges import is_web_origin
+from ..dates import repo as date_repo
 from ..ingest.paths import resolve_working_path
 from .client import WebSyncClient
 
@@ -547,6 +548,14 @@ def pull_confirmed(
                 if action == "photo.capture_date.set" and eid:
                     _apply_date_set(conn, eid, new_value)
                     applied += 1
+                elif action == "photo.capture_date.unconfirm" and eid:
+                    # A web admin cleared the date. The web keeps the old
+                    # value as its own (web-born) suggestion; here only the
+                    # fact goes, audited, with the folder-month hint added.
+                    if date_repo.unconfirm(conn, eid, reason=new_value.get("reason") or "cleared",
+                                           actor="web", via="sync.pull.confirmed",
+                                           keep_as_suggestion=False) is not None:
+                        applied += 1
                 elif action == "photo.description.set" and eid:
                     _apply_description(conn, eid, new_value)
                     applied += 1

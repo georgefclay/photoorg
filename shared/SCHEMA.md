@@ -288,7 +288,11 @@ previous file at `WORKING_DIR/_versions/{id:08d}_v{n}.{ext}` and writes a
 `suggestions`): `capture_date` only when `capture_date_confirmed` — and **on a scan only when
 a person set it** (a `photo.capture_date.set` audit row; Phase 13 answer 9:
 ingest confirmed 21 scans from the scan file's EXIF, which is the scanner's
-clock); people
+clock; fix-up 1 un-confirmed them and ingest no longer confirms a scan's,
+an unset camera clock's or an implausible EXIF date — each arrives as a
+`date` suggestion with `payload.reason`. A confirmed date is cleared only
+through `photo.capture_date.unconfirm`, which nulls the value, sets
+`precision='unknown'` and keeps the old value as a pending suggestion); people
 through `faces` with `person_id` set, not deleted, not disputed, not
 `review_status = 'ignore'`, the person not deleted; names from `people` plus
 live `person_name_variants` of kind `nickname` / `alternate_spelling`

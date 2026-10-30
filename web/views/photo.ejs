@@ -120,6 +120,10 @@ function faceState(f) {
           <% if (d.confirmed) { %>
             <strong><%= d.text %></strong>
             <span class="chip date-mark confirmed"><%- include('partials/icon', { name: 'check' }) %>Confirmed</span>
+            <% if (isAdmin) { %>
+            <button type="button" class="link-button" data-clear-date data-js-only
+              data-url="/api/admin/photos/<%= photo.id %>/capture_date/clear">Clear confirmed date</button>
+            <% } %>
           <% } else if (d.guess) { %>
             <strong><%= d.text %></strong>
             <span class="chip date-mark guess">Guess</span>

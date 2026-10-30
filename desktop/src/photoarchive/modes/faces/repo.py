@@ -144,6 +144,9 @@ class PhotoContext:
     description_suggestion: str | None = None
     folder_hint: str | None = None
     has_confirmed_date: bool = False
+    # Fix-up 1 (Phase 13): what the Clear confirmed date button shows.
+    confirmed_date: str | None = None
+    confirmed_precision: str | None = None
 
 
 @dataclass
@@ -306,7 +309,8 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
         description_suggestion = None
 
     has_confirmed = conn.execute(
-        "select capture_date_confirmed from photos where id = %s", (photo_id,)
+        "select capture_date_confirmed, capture_date::text, capture_date_precision::text"
+        " from photos where id = %s", (photo_id,)
     ).fetchone()
     has_confirmed_flag = bool(has_confirmed[0]) if has_confirmed else False
 
@@ -326,6 +330,8 @@ def load_photo_context(conn: psycopg.Connection, photo_id: int) -> PhotoContext 
         description_suggestion=description_suggestion,
         folder_hint=source_folder,
         has_confirmed_date=has_confirmed_flag,
+        confirmed_date=has_confirmed[1] if has_confirmed_flag else None,
+        confirmed_precision=has_confirmed[2] if has_confirmed_flag else None,
     )
 
 

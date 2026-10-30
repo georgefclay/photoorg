@@ -657,6 +657,7 @@ class SuggestionsPanel(QWidget):
     promotes into `photos.capture_date`."""
 
     accept_date_requested = Signal(int)  # suggestion_id
+    clear_date_requested = Signal(int)   # photo_id
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -687,6 +688,8 @@ class SuggestionsPanel(QWidget):
             self.body.setText("(none)")
             return
         parts: list[str] = []
+        if context.has_confirmed_date:
+            parts.append(f"Confirmed date: {context.confirmed_date} ({context.confirmed_precision})")
         if context.description_suggestion:
             parts.append(f"Description: {context.description_suggestion}")
         if context.folder_hint:
@@ -711,6 +714,14 @@ class SuggestionsPanel(QWidget):
             sid = d.suggestion_id
             btn.clicked.connect(lambda _=None, s=sid: self.accept_date_requested.emit(s))
             self._buttons_layout.addWidget(btn)
+        if context.has_confirmed_date:
+            # Fixing a wrong fact must never need SQL (Phase 13 fix-up 1).
+            clear = QPushButton("Clear confirmed date")
+            clear.setToolTip("The date stops being a fact; it comes back as a "
+                             "suggestion you can accept again.")
+            pid = context.photo_id
+            clear.clicked.connect(lambda _=None, p=pid: self.clear_date_requested.emit(p))
+            self._buttons_layout.addWidget(clear)
 
 
 # --- PhotoPreviewWidget ---------------------------------------------------
@@ -727,6 +738,7 @@ class PhotoPreviewWidget(QWidget):
     confirm_back_requested = Signal(int)             # photo_back_id
     edit_back_confirmed = Signal(int, str)           # photo_back_id, text
     accept_date_requested = Signal(int)              # suggestion_id
+    clear_date_requested = Signal(int)               # photo_id
     toggle_front_back_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -762,6 +774,7 @@ class PhotoPreviewWidget(QWidget):
 
         self.suggestions = SuggestionsPanel(self)
         self.suggestions.accept_date_requested.connect(self.accept_date_requested)
+        self.suggestions.clear_date_requested.connect(self.clear_date_requested)
         outer.addWidget(self.suggestions)
         self.suggestions.setVisible(False)
 

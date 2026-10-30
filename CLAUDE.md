@@ -623,7 +623,19 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   status bar has two halves*: the left is the last **decision** and persists
   until the next one; the right is context (which photo, what was measured,
   what a job is doing). A preview landing must never wipe out what George just
-  did — the Phase 3 "no flash messages" lesson, restated.
+  did — the Phase 3 "no flash messages" lesson, restated. (c) *A worker's
+  signals go to `@Slot` methods of a GUI-thread QObject, never to a lambda*
+  (Phase 13 fix-up 1). PySide6 runs a receiver-less lambda — and a plain
+  function patched over a slot's name — on the **emitting** thread, so a
+  `finished` lambda that touches a widget does it from the worker thread and
+  the process dies with no traceback. That is how the app vanished the moment
+  George's first GUI push finished. The Sync tab is one job slot: every
+  button that starts work is disabled while one runs, the (thread, worker)
+  pair is held until the thread's `finished`, and `MainWindow.closeEvent`
+  asks any mode with `running_job()` to confirm, then calls its `shutdown()`.
+  The app logs uncaught errors and Qt's own messages, `faulthandler` writes
+  hard-crash stacks to `crash.log` beside `photoarchive.log`, and a clean run
+  ends with "Photo Archive exiting" — a log that stops without it was killed.
 - **Audit namespace:** `cleanup.propose`, `cleanup.accept`, `cleanup.reject`,
   `cleanup.split`, `cleanup.remote`, `cleanup.undo`, plus
   `cleanup_analyse.start` on the `job_run`.
@@ -1393,6 +1405,39 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
   `summary.md`, `changes.txt`, `samples.json`, `foreign_values.csv`,
   `date_mismatch.csv`, `skipped.csv`.
 
+### Date hygiene (fix-up 1)
+- **A scan's EXIF date is never a fact**, and neither is 1 January before
+  00:01 (a camera clock never set) or a date after the file existed (+1 day
+  for time zones) or before 1826. Ingest turns each into a pending `date`
+  suggestion (`source='import'`, `payload.reason` = `scanner_clock` |
+  `unset_camera_clock` | `implausible_date`) — the rule is
+  `dates.rules.ingest_reason`, one function for scan, digital and contrib
+  roots alike. Every other digital EXIF date is confirmed exactly as before.
+  Q9's writer gate (a scan's date only when a person set it) stays as the
+  second line.
+- **Any confirmed date can be cleared from the desktop or the web admin page;
+  the cleared value returns as a suggestion.** Desktop: **Clear confirmed
+  date** in the Faces preview's Suggestions block. Web: the same link next to
+  the Confirmed chip on the photo page (admin only),
+  `POST /api/admin/photos/:id/capture_date/clear`. Both go through one shape
+  (`dates.repo.unconfirm` / `services/dates.js clearConfirmedDate`): the
+  **value** goes, not just the flag — Browse's sort, the year/decade filters,
+  a person's year span and the search index read `capture_date` without the
+  flag — `precision='unknown'`, the old value becomes a pending suggestion
+  (`source='human'` if a person ever set it, else `'import'`;
+  `payload.reason='cleared'`), one `photo.capture_date.unconfirm` audit row
+  with previous/new, `refresh_completeness`. A cleared digital photo also
+  gets the `_YYYY-MM` folder-month suggestion ingest would have made. The
+  push carries a desktop clear; a web clear comes down through
+  `pull_confirmed`'s fact-set audit rows, and its suggestion stays on the web
+  like every web-born suggestion. `suggestions` has no `details` column, so
+  reasons ride in the payload.
+- `python -m photoarchive.tools.date_hygiene --report | --apply --rules a,b`
+  checks every confirmed date with no `photo.capture_date.set` row against
+  rules a (scan) / b (unset clock) / c (> 3 months from its `_YYYY-MM`
+  folder) / d (after ingest or before 1826), and clears the chosen rules'
+  rows through `unconfirm` in one transaction. Never SQL.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site
@@ -1416,6 +1461,9 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
   the report on its own (counts, timings, op frequency, before/after sheet).
 - `python -m photoarchive.tools.write_metadata [--dry-run] [--photo ID] [--batch …]
   [--limit N] [--chunk N]` — Phase 13 metadata writer (needs `EXIFTOOL_PATH`).
+- `python -m photoarchive.tools.date_hygiene --report | --apply [--rules a,b]` —
+  Phase 13 fix-up 1: ingest-sourced confirmed dates checked against rules a–d;
+  report under `WORKING_DIR/_report/date-hygiene/`.
 - `python -m photoarchive.tools.check_working_files [--dry-run]` — working-file
   integrity (now `_versions/`-aware; see Cleanup).
 - `python -m photoarchive.tools.repair_face_boxes`,

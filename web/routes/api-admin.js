@@ -16,6 +16,7 @@
 //   POST /api/admin/corrections/apply          apply it, audited per row
 //   GET  /api/admin/corrections/batches        recent correction batches
 //   POST /api/admin/corrections/undo           undo one batch
+//   POST /api/admin/photos/:id/capture_date/clear   clear a confirmed date (old value → suggestion)
 
 const express = require('express');
 const { requireAdmin } = require('../middleware/require-user');
@@ -23,6 +24,7 @@ const { audit } = require('../services/audit');
 const { parseListQuery } = require('../services/pagination');
 const adminSvc = require('../services/admin');
 const corrections = require('../services/corrections');
+const { clearConfirmedDate } = require('../services/dates');
 
 function toInt(v) { const n = parseInt(v, 10); return Number.isInteger(n) ? n : null; }
 
@@ -90,6 +92,27 @@ module.exports = function apiAdminRoutes({ pool }) {
         next,
       });
     } catch (err) { next(err); }
+  });
+
+  // -----------------------------------------------------------------
+  //  Clear a confirmed date (Phase 13 fix-up 1). Fixing a wrong fact must
+  //  never need SQL; the desktop applies it via /sync/pull/confirmed.
+  // -----------------------------------------------------------------
+  router.post('/photos/:id(\\d+)/capture_date/clear', async (req, res, next) => {
+    const id = Number(req.params.id);
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const r = await clearConfirmedDate(client, id, req.user);
+      if (r.notFound) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
+      await client.query('commit');
+      res.json({ ok: true, ...r });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
   });
 
   router.post('/suggestions/:id(\\d+)/accept', async (req, res, next) => {

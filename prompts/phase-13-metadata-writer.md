@@ -281,8 +281,152 @@ On a `|scan` root or `is_scan`, an EXIF date becomes a `date` suggestion (`sourc
 ### 5. Then the writer
 Re-run `write_metadata`: the un-confirmed photos drop their date tags and only they are due ("facts changed"). Paste the count — it must equal the rows un-confirmed — and confirm no scan gained a date.
 
+### 6. The GUI push must never die silently (added 2026-10-29, evening)
+George's first Sync-tab push today was killed hard — no exception, no line in `photoarchive.log` between app start and the restart four hours later; the worker only logs on a Python failure and progress goes to the pane alone. Mistakes are fixable only if they leave a trace: the sync worker logs every stage start and end, the per-stage counts and the final summary to the log file as well as the pane; the app installs a `sys.excepthook` and a Qt message handler so an uncaught error or a Qt abort writes its last words before the process goes; and the Sync tab shows the resident memory next to the progress line, since low memory is the usual killer on this laptop (CLAUDE.md, Cleanup). `run_push.py` already does the terminal equivalent; the GUI path must match it.
+Evidence so far: the app window vanished after the push had already delivered its 139 files (the next terminal push was asked for 0), with no traceback and no log line — the Phase 7 pattern, a finished `BackgroundJob` dropped while Qt still owns the thread (CLAUDE.md, Cleanup, "two UI rules"). Check the Sync worker against that rule first. And while on the VM read-only: confirm `synced_file_version = file_version` for all 139 grouped photos and paste the count — that is Phase 13's closing number.
+
 ### Tests, verification, docs
 pytest green; the report pasted; apply on George's rules with before/after counts; the writer re-run count; `CLAUDE.md` Metadata section gains "a scan's EXIF date is never a fact; an ingest-sourced date can be cleared from the UI"; `PROJECT-PLAN.md` Phase 13; commit and push `Phase 13 fix-up 1: date hygiene`.
 
 ## Answers to Claude Code's fix-up 1 questions
 (added as they come)
+
+### Claude Code's questions (2026-10-30)
+
+**F1. Un-confirm only flips the flag, or does it clear the value too?** As
+written, `--apply` sets `capture_date_confirmed = false` and leaves
+`capture_date` in place. Most web readers never look at the flag: Browse's
+oldest/newest sort (`services/photos.js:15`), the year/decade filters
+(`photos.js:64`, `admin.js:515-578`), a person's year span (`people.js:53`),
+and the search index's `photo_date_range(capture_date, …)` gist. A 1960s
+print would still sort and search as 2025. Proposal: **un-confirm clears
+it** (`capture_date = null`, `precision = 'unknown'`, `confirmed = false`).
+The old value survives in the `import` suggestion and in the audit row's
+`previous`. The same applies to **Clear confirmed date** (item 3).
+
+**F2. Which dates can Clear confirmed date clear?** Item 3 reads as *any*
+confirmed date. The CLAUDE.md line in "Tests, verification, docs" reads as
+*ingest-sourced* only. Proposal: **any**, because a person's wrong accept is
+also a mistake that must not need SQL. The old value goes back as a `date`
+suggestion with `source='human'` when a person set it and `source='import'`
+otherwise, `details.reason='cleared'`, so it can be re-accepted with one click.
+
+**F3. The writer re-run count will not equal the rows un-confirmed.** Q9's
+gate already keeps scans without a human-set date from writing a date. So
+the rule-(a) rows have no date tags to drop, their payload hash doesn't
+change, and they won't come up as due. What I'll actually check: **due =
+un-confirmed non-scan rows (rules b/c/d)**, rule-(a) rows due = 0, and no
+scan carries a date tag. Q9's gate stays as a second line of defence. OK?
+
+**F4. Rule (c) has no stored hint to compare against.** Ingest writes the
+`_YYYY-MM` folder suggestion only when the photo has *no* EXIF date
+(`_record_folder_hints`, `has_exif`). So every confirmed-from-EXIF photo has
+no folder suggestion. The report will parse `source_folder` with the same
+`parse_date_folder` instead. Noting this, not asking.
+
+**F5. Should the ingest guard also cover rule (d)?** Item 4 names scans and
+the January 1st unset clock. Proposal: an EXIF date **after the master
+file's mtime, or before 1826**, also arrives as a suggestion
+(`details.reason='implausible_date'`), because the same wrong fact can
+otherwise come back on the next contrib pull. Yes / no?
+
+**F6. The Sync tab's worker lifecycle (item 6), what I see before testing
+anything.** `_run_worker` stores the worker in `self._worker` (no Qt
+parent) and the thread in `self._thread`. Nothing stops a second Pull /
+Push / Write-metadata click while one is running. A second click overwrites
+both, so the running worker's last Python reference goes away mid-run. That
+is the Phase 7 rule (a) shape, and there's no `closeEvent` join either. The
+fix: one-job-at-a-time buttons, a `_live_jobs` park until `finished`, and
+join on close, plus the logging, excepthook, Qt handler and RSS display the
+prompt asks for. **For George:** during that first push, did you click
+anything else on the Sync tab (Pull, or "Write metadata for N changed
+photos" when it appeared)? Or did you switch modes or close a dialog? Either
+answer is useful. If you did nothing, memory is the suspect, and the RSS
+display and the log lines are what will show it next time.
+
+### Answers (PM, 2026-10-30)
+
+Yes to all six, with these specifics.
+
+**F1. Yes — clear the value, not just the flag.** `capture_date = null`, `capture_date_precision = 'unknown'`, `capture_date_confirmed = false`; the old value survives in the suggestion and in the audit row's `previous`; `refresh_completeness` runs. One addition for the digital rows this clears (rules b/c/d): if the photo's `source_folder` parses as `_YYYY-MM`, also insert the folder-month suggestion (`source='import'`, precision `month`) when none exists — that is exactly what ingest would have recorded had it not trusted the camera, so the Suggestions block offers the next-best date instead of nothing.
+
+**F2. Any confirmed date.** A person's wrong accept is a mistake like any other. `source='human'` when a person set it, `source='import'` otherwise, `details.reason='cleared'`, re-acceptable in one click. Fix the CLAUDE.md wording accordingly: "any confirmed date can be cleared from the desktop or the web admin page; the cleared value returns as a suggestion". Admin-only on the web.
+
+**F3. Yes, your check is the right one.** Due = cleared non-scan rows; rule-(a) rows due = 0; no scan carries a date tag; Q9's gate stays. Paste the three numbers.
+
+**F4. Noted, agreed** — parse `source_folder` with `parse_date_folder`.
+
+**F5. Yes.** An EXIF date after the master file's mtime (allow one day of slack for time zones) or before 1826 arrives as a suggestion with `details.reason='implausible_date'`. Test with a contrib pull fixture, since that is the path it would come back through.
+
+**F6. Build all of it regardless of what George did** — one job at a time on the Sync tab (every button that starts work shares the one slot and says which job is running), the `_live_jobs` park until `finished`, cancel-and-join in `closeEvent` with a confirm dialog when a job is running, plus the logging, `sys.excepthook`, Qt message handler and RSS display from item 6. The second-click path is a real bug whether or not it fired on 2026-10-29. George will tell you in the session what he clicked; if the answer is "nothing", memory is the suspect and the new log lines and RSS figure are what will show it next time. While on the VM read-only, confirm `synced_file_version = file_version` for the 139 grouped photos and paste the count.
+
+GO.
+
+### Fix-up 1 verification log (Claude Code, 2026-10-30)
+
+**Report** (`date_hygiene --report`, read-only; `D:\PhotoArchive\working\_report\date-hygiene\20261030-063951\`):
+9,646 ingest-sourced confirmed dates; 24 flagged. Rule a (scan) 21, b (unset
+clock) 3, c (folder > 3 months) 0, d (after ingest / before 1826) 0 — so a+b
+and a+b+c+d are the same set. Per batch: 00009 1, 00024 1, 00033 1, 00045 8,
+00047 2, Photo Book 8 (all a); `photos:_2004-01` 3 (b). Samples:
+
+```
+photo_id | capture_date | exif_taken_at       | kind    | batch           | rules
+676      | 1968-02-01   | 1968-02-01 10:05:21 | scan    | Batch 00009     | a
+1907     | 1963-01-01   | 1963-01-01 08:52:59 | scan    | Batch 00024     | a
+2693     | 2025-11-07   | 2025-11-07 12:07:57 | scan    | Batch 00033     | a
+3739     | 2025-11-11   | 2025-11-11 17:34:16 | scan    | Batch 00045     | a
+3741     | 2025-11-23   | 2025-11-23 10:03:14 | scan    | Batch 00045     | a
+3742     | 2025-11-23   | 2025-11-23 10:03:29 | scan    | Batch 00045     | a
+3745     | 1949-01-01   | 1949-01-01 10:00:32 | scan    | Batch 00045     | a
+3746     | 1947-01-01   | 1947-01-01 09:58:11 | scan    | Batch 00045     | a
+4096     | 2004-01-01   | 2004-01-01 00:00:11 | digital | photos:_2004-01 | b
+4097     | 2004-01-01   | 2004-01-01 00:00:19 | digital | photos:_2004-01 | b
+```
+
+**Apply** (`--apply --rules a,b`, default; one transaction): un-confirmed
+a=21, b=3 (**24**); 24 `photo.capture_date.unconfirm` rows + one
+`date_hygiene.apply`; each old value is a pending `date` suggestion
+(`source='import'`, `payload.reason`/`rule`); 3 folder-month suggestions
+(`_2004-01`) added for the digital three. Ingest-sourced confirmed dates
+9,646 → 9,622.
+
+**Writer re-run** (F3's three numbers): due = **3** (#4096–4098, "facts
+changed", all digital = the cleared non-scan rows); cleared scans due = **0**;
+scans carrying a date tag = **0**. Real run: wrote 3, skipped 0, failed 0;
+#4096 keeps only its camera's own `DateTimeOriginal`; second run 0 due;
+`check_working_files --dry-run` post-conditions 0.
+
+**Item 6 — the GUI push that vanished.** George pressed Push and nothing
+else; the app closed as the push finished. Cause found and reproduced: the
+Sync tab's `finished` handler was a **lambda**, and PySide6 6.11 runs a
+receiver-less lambda on the *emitting* thread — so `setVisible` on the
+metadata button, `setText` and `append` ran on the worker thread, which kills
+the process with no Python traceback. A test that observes the real slots
+fails with the old lambda (`('halfway', <worker thread>)`) and passes now.
+Also found: a plain function patched over a `@Slot` name runs on the emitting
+thread too — the test is written around that. Built: one job slot (every
+work button disabled while one runs, the pair held until `finished`),
+`shutdown()` stopping at the next progress callback and joining, a confirm in
+`MainWindow.closeEvent`, stage start/end + counts + memory in the log,
+`sys.excepthook` / `threading.excepthook` / Qt message handler,
+`faulthandler` → `%LOCALAPPDATA%\PhotoArchive\logs\crash.log`, an
+"exiting rc=" last line, and the memory figure beside the progress line.
+
+**VM (read-only):** grouped live photos with `synced_file_version =
+file_version`: **139 / 139**, 0 behind. (A second read cross-checking each id's
+version against the laptop was refused by the auto-mode classifier.)
+
+**Deviation:** `suggestions` has no `details` column; reasons ride in the
+payload (`payload.reason`, `payload.rule`). A web clear's returned suggestion
+stays on the web (web-born, like every web suggestion); the desktop applies
+the clear and adds only the folder-month hint. The web cannot see a desktop
+accept, so a desktop-set date cleared on the web returns as `source='import'`.
+
+Tests: desktop 727 passed / 1 skipped in the full run, plus the 2 tests in
+`test_date_clear_ui.py` written while it ran (green on their own); web 211 passed. New: `test_date_hygiene.py` (14),
+`test_ingest_date_guard.py` (1, real `run_ingest` over digital / scan /
+contrib roots; confirmed failing with the guard off), `test_sync_ui_jobs.py`
+(5), `test_date_clear_ui.py` (2), `web/test/date-clear.test.js` (3).
+Needs a VM deploy (web code only, no migration) for the web Clear link and
+`/sync/pull/confirmed` carrying `photo.capture_date.unconfirm`.

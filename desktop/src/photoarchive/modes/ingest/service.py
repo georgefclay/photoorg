@@ -7,7 +7,7 @@ import logging
 import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -16,6 +16,7 @@ from PIL import Image
 from ... import db
 from ...config import MasterRoot, Settings
 from ...workers import CancelToken, Cancelled
+from ..dates import rules as date_rules
 from . import back_detect, paths, staging
 from .exif import ExifData, read_exif
 from .guard import GuardResult, remediation_message, run_masters_guard
@@ -303,7 +304,15 @@ def _commit_normal(
     capture_date_val: date | None = None
     precision = "unknown"
     confirmed = False
-    if exif.taken_at is not None:
+    # Fix-up 1: a scan's EXIF date is the scanner's clock, 1 January before
+    # 00:01 is a camera never set, and a date after the file existed (or
+    # before photography) is no date at all. Those arrive as a suggestion,
+    # never a fact; every other digital EXIF date is confirmed as before.
+    untrusted = date_rules.ingest_reason(
+        exif.taken_at, is_scan=is_scan_flag,
+        master_mtime=datetime.fromtimestamp(f.master_path.stat().st_mtime),
+    )
+    if exif.taken_at is not None and untrusted is None:
         capture_date_val = exif.taken_at.date()
         precision = "exact"
         confirmed = True
@@ -338,6 +347,18 @@ def _commit_normal(
                 scan_batch=f.scan_batch, scan_sequence=f.scan_sequence,
                 master_path=str(f.master_path),
             )
+
+            if untrusted is not None:
+                staging.insert_suggestion(
+                    conn, kind="date", source="import", confidence=0.2,
+                    photo_id=photo_id,
+                    payload={
+                        "date": exif.taken_at.date().isoformat(),
+                        "precision": "exact",
+                        "evidence": f"EXIF date {exif.taken_at:%Y-%m-%d %H:%M:%S}",
+                        "reason": untrusted,
+                    },
+                )
 
             # Folder hints → suggestions/albums
             _record_folder_hints(conn, root=root, f=f, photo_id=photo_id, has_exif=confirmed)

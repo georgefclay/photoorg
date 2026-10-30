@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import db
 from .config import load as load_config
-from .logging_setup import configure_logging
+from .logging_setup import configure_logging, install_crash_handlers
+from .memory import rss_text
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +35,9 @@ def main() -> int:
     args = parser.parse_args()
 
     log_path = configure_logging()
-    log.info("Photo Archive starting; log at %s", log_path)
+    crash_path = install_crash_handlers()
+    log.info("Photo Archive starting; log at %s, hard-crash stacks at %s (%s)",
+             log_path, crash_path, rss_text())
 
     app = QApplication(sys.argv)
 
@@ -64,6 +67,8 @@ def main() -> int:
 
     rc = app.exec()
     db.close_pool()
+    # The last line of a clean run. A log that stops without it was killed.
+    log.info("Photo Archive exiting, rc=%s (%s)", rc, rss_text())
     return rc
 
 

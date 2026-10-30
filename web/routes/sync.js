@@ -943,6 +943,7 @@ module.exports = function syncRoutes({ pool }) {
           where created_at > $1
             and action in (
               'photo.capture_date.set',
+              'photo.capture_date.unconfirm',
               'photo.description.set',
               'photo.place.set',
               'photo.has_no_people.set',

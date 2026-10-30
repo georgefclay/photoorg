@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from ... import db as dbmod
 from ...config import load as load_settings
+from ..dates import repo as date_repo
 from ..ingest.paths import resolve_working_path
 from ...workers import BackgroundJob
 from .clustering import (
@@ -229,6 +230,7 @@ class FacesPanel(QWidget):
         self.preview.confirm_back_requested.connect(self._on_confirm_back)
         self.preview.edit_back_confirmed.connect(self._on_edit_back)
         self.preview.accept_date_requested.connect(self._on_accept_date)
+        self.preview.clear_date_requested.connect(self._on_clear_date)
         self.preview.toggle_front_back_requested.connect(self.preview.toggle_front_back)
         self.preview.setVisible(False)
         splitter.addWidget(self.preview)
@@ -1307,6 +1309,28 @@ class FacesPanel(QWidget):
             self.status_label.setText("Confirmed date overwritten.")
         else:
             self.status_label.setText(f"Date {outcome.new_date} accepted.")
+        self._refresh_preview_context()
+
+    def _on_clear_date(self, photo_id: int) -> None:
+        confirm = QMessageBox.question(
+            self, "Clear confirmed date?",
+            f"Photo {photo_id}: the date stops being a fact. It comes back as a "
+            f"suggestion you can accept again.",
+        )
+        if confirm != QMessageBox.Yes:
+            self.status_label.setText("Clear date cancelled.")
+            return
+        with dbmod.connection() as conn:
+            conn.autocommit = False
+            try:
+                res = date_repo.unconfirm(conn, photo_id, reason="cleared", via="desktop.faces")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.status_label.setText(
+            f"Date {res.previous_date} cleared; it is now a suggestion." if res
+            else "This photo had no confirmed date.")
         self._refresh_preview_context()
 
     def _photo_for_face(self, face_id: int) -> int:
