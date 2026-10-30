@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <body style="font-family: system-ui, -apple-system, sans-serif; color:#1c1917;">
+    <p>Hello <%= displayName %>,</p>
+    <p>Your download is ready:<br><strong><%= label %></strong><br>
+      <%= photoCount %> photos, <%= size %><% if (missingCount) { %> (<%= missingCount %> more are listed in MISSING.txt — their images are not on the server yet)<% } %></p>
+    <p>
+      <a href="<%= url %>" style="display:inline-block;padding:12px 22px;background:#6d28d9;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Get the zip</a>
+    </p>
+    <p style="color:#57534e;">The zip is kept for 72 hours. If you are signed out, the page will send you a sign-in link and bring you back.</p>
+    <p style="color:#57534e;">Keep it somewhere safe: the point of the archive is that everyone holds a copy.</p>
+    <p style="color:#57534e;font-size:0.9em;">If the button doesn't work, paste this into your browser:<br /><%= url %></p>
+  </body>
+</html>

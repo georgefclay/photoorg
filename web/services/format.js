@@ -92,7 +92,19 @@ function relTime(ts) {
   return d.toISOString().slice(0, 10);
 }
 
+// 1536 → "1.5 KB", 2.3e9 → "2.1 GB" (binary units, one decimal under 10).
+function bytes(n) {
+  const v = Number(n) || 0;
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let x = v;
+  while (x >= 1024 && i < units.length - 1) { x /= 1024; i += 1; }
+  if (i === 0) return `${v} bytes`;
+  return `${x < 10 ? x.toFixed(1) : Math.round(x)} ${units[i]}`;
+}
+
 module.exports = {
+  bytes,
   MONTHS, PRECISION_WORDS, dateStr, dateLabel, dateRange, captureDate, physicalRef,
   yearSpan, plural, initials, relTime,
 };

@@ -14,6 +14,9 @@ function clearOutbox() { outbox.length = 0; }
 
 let postmarkClient = null;
 function client() {
+  // Never a real send from a test — including a child process (the zip
+  // worker), whose dotenv would otherwise load the key from web/.env.
+  if (process.env.NODE_ENV === 'test') return null;
   if (!process.env.POSTMARK_API_KEY) return null;
   if (!postmarkClient) {
     postmarkClient = new postmark.ServerClient(process.env.POSTMARK_API_KEY);
@@ -56,6 +59,15 @@ async function send({ to, subject, template, vars }) {
   const fullSubject = SUBJECT_PREFIX + subject;
   const message = { to, subject: fullSubject, template, vars, text, html, sentAt: new Date() };
   outbox.push(message);
+  // A child process (tools/zip-worker.js) has its own in-memory outbox,
+  // which no test can read. MAIL_SINK_DIR makes it leave a JSON copy.
+  if (process.env.MAIL_SINK_DIR) {
+    fs.mkdirSync(process.env.MAIL_SINK_DIR, { recursive: true });
+    fs.writeFileSync(
+      path.join(process.env.MAIL_SINK_DIR, `${Date.now()}-${process.pid}-${outbox.length}.json`),
+      JSON.stringify(message),
+    );
+  }
 
   const pm = client();
   if (pm) {

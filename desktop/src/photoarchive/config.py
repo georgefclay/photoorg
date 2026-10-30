@@ -234,6 +234,13 @@ class Settings(BaseSettings):
     # (CLAUDE.md, Cleanup (c)): a kill costs one chunk, not the run.
     METADATA_CHUNK: int = Field(default=250, ge=1)
 
+    # --- Full export (Phase 12) --------------------------------------------
+    # pg_dump for `db/photoorg.sql`. Empty: PATH, then the newest
+    # C:/Program Files/PostgreSQL/<n>/bin.
+    PG_DUMP_PATH: str = Field(default="")
+    # Files copied per fresh process (CLAUDE.md, Cleanup (c)).
+    EXPORT_CHUNK: int = Field(default=250, ge=1)
+
     @field_validator("CLEANUP_MASK_MODE")
     @classmethod
     def _known_mask_mode(cls, v: str) -> str:

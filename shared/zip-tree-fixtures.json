@@ -1,0 +1,92 @@
+{
+  "_about": "Phase 12: the download/export tree, one rule set ported twice (web/services/zip-tree.js, desktop photoarchive/export_tree.py). Both test suites read THIS file, so the two cannot drift. A date counts only when confirmed; never invent a January.",
+  "paths": [
+    { "name": "exact -> YYYY/MM, day in the name",
+      "in": { "id": 1234, "ext": "jpg", "capture_date": "1962-07-04", "precision": "exact", "confirmed": true },
+      "out": "1962/07/1962-07-04_00001234.jpg" },
+    { "name": "month -> YYYY/MM, month in the name",
+      "in": { "id": 7, "ext": "jpg", "capture_date": "1962-03-01", "precision": "month", "confirmed": true },
+      "out": "1962/03/1962-03_00000007.jpg" },
+    { "name": "year -> top of the year folder, never a January",
+      "in": { "id": 8, "ext": "jpg", "capture_date": "1962-01-01", "precision": "year", "confirmed": true },
+      "out": "1962/1962_00000008.jpg" },
+    { "name": "decade -> 1960s folder",
+      "in": { "id": 9, "ext": "tif", "capture_date": "1964-01-01", "precision": "decade", "confirmed": true },
+      "out": "1960s/1960s_00000009.tif" },
+    { "name": "decade stored at the decade start",
+      "in": { "id": 10, "ext": "jpg", "capture_date": "1970-01-01", "precision": "decade", "confirmed": true },
+      "out": "1970s/1970s_00000010.jpg" },
+    { "name": "unknown precision -> Unsorted",
+      "in": { "id": 11, "ext": "jpg", "capture_date": "1962-07-04", "precision": "unknown", "confirmed": true },
+      "out": "Unsorted/undated_00000011.jpg" },
+    { "name": "unconfirmed date is not a date",
+      "in": { "id": 12, "ext": "jpg", "capture_date": "1962-07-04", "precision": "exact", "confirmed": false },
+      "out": "Unsorted/undated_00000012.jpg" },
+    { "name": "no date at all",
+      "in": { "id": 13, "ext": "jpg", "capture_date": null, "precision": null, "confirmed": false },
+      "out": "Unsorted/undated_00000013.jpg" },
+    { "name": "confirmed but null date",
+      "in": { "id": 14, "ext": "jpg", "capture_date": null, "precision": "exact", "confirmed": true },
+      "out": "Unsorted/undated_00000014.jpg" },
+    { "name": "extension normalised: JPEG",
+      "in": { "id": 15, "ext": "JPEG", "capture_date": "2004-12-25", "precision": "exact", "confirmed": true },
+      "out": "2004/12/2004-12-25_00000015.jpg" },
+    { "name": "extension normalised: .TIFF",
+      "in": { "id": 16, "ext": ".TIFF", "capture_date": null, "precision": null, "confirmed": false },
+      "out": "Unsorted/undated_00000016.tif" },
+    { "name": "missing extension falls back to jpg",
+      "in": { "id": 17, "ext": "", "capture_date": null, "precision": null, "confirmed": false },
+      "out": "Unsorted/undated_00000017.jpg" },
+    { "name": "web-range id keeps all its digits",
+      "in": { "id": 1000000000042, "ext": "jpg", "capture_date": "1999-05-01", "precision": "month", "confirmed": true },
+      "out": "1999/05/1999-05_1000000000042.jpg" }
+  ],
+  "people_folders": [
+    { "name": "nickname-or-given + surname + suffix (the Phase 13 keyword form)",
+      "in": [
+        { "id": 1, "given_name": "Margaret", "nickname": "Peggy", "surname": "Clay", "suffix": null, "display_name": "Margaret Clay", "birth_year": 1931 },
+        { "id": 2, "given_name": "George", "nickname": null, "surname": "Clay", "suffix": "Jr.", "display_name": "George Clay Jr.", "birth_year": null }
+      ],
+      "out": { "1": "Peggy Clay", "2": "George Clay Jr" } },
+    { "name": "falls back to display_name, then Person <id>",
+      "in": [
+        { "id": 3, "given_name": null, "nickname": null, "surname": null, "suffix": null, "display_name": "Grandma B", "birth_year": null },
+        { "id": 4, "given_name": "  ", "nickname": null, "surname": null, "suffix": null, "display_name": null, "birth_year": null }
+      ],
+      "out": { "3": "Grandma B", "4": "Person 4" } },
+    { "name": "a collision gets the birth year, else the id",
+      "in": [
+        { "id": 5, "given_name": "George", "nickname": null, "surname": "Clay", "suffix": null, "display_name": "George Clay", "birth_year": 1931 },
+        { "id": 6, "given_name": "George", "nickname": null, "surname": "Clay", "suffix": null, "display_name": "George Clay", "birth_year": 1958 },
+        { "id": 7, "given_name": "george", "nickname": null, "surname": "clay", "suffix": null, "display_name": "george clay", "birth_year": null }
+      ],
+      "out": { "5": "George Clay (b. 1931)", "6": "George Clay (b. 1958)", "7": "george clay #7" } },
+    { "name": "same name and same birth year: both get the id",
+      "in": [
+        { "id": 8, "given_name": "Ann", "nickname": null, "surname": "Boots", "suffix": null, "display_name": "Ann Boots", "birth_year": 1940 },
+        { "id": 9, "given_name": "Ann", "nickname": null, "surname": "Boots", "suffix": null, "display_name": "Ann Boots", "birth_year": 1940 }
+      ],
+      "out": { "8": "Ann Boots #8", "9": "Ann Boots #9" } },
+    { "name": "characters Windows refuses are replaced; trailing dots and spaces go",
+      "in": [
+        { "id": 10, "given_name": "Pete", "nickname": null, "surname": "O'Neil/Smith", "suffix": "Sr.", "display_name": null, "birth_year": null },
+        { "id": 11, "given_name": "Who?", "nickname": null, "surname": "<unknown>", "suffix": null, "display_name": null, "birth_year": null }
+      ],
+      "out": { "10": "Pete O'Neil_Smith Sr", "11": "Who_ _unknown_" } },
+    { "name": "trimmed to 80 characters",
+      "in": [
+        { "id": 12, "given_name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "nickname": null, "surname": "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "suffix": null, "display_name": null, "birth_year": null }
+      ],
+      "out": { "12": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
+    { "name": "Windows reserved device names are not folder names",
+      "in": [
+        { "id": 13, "given_name": "Con", "nickname": null, "surname": null, "suffix": null, "display_name": null, "birth_year": null }
+      ],
+      "out": { "13": "Con_" } }
+  ],
+  "people_paths": [
+    { "name": "a photo under each person, same file name as the dated tree",
+      "in": { "photo": { "id": 1234, "ext": "jpg", "capture_date": "1962-07-04", "precision": "exact", "confirmed": true }, "folder": "Peggy Clay" },
+      "out": "People/Peggy Clay/1962-07-04_00001234.jpg" }
+  ]
+}

@@ -131,3 +131,18 @@
 @media (max-width: 560px) {
   .person-edit-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Phase 12 - album editing (admins). */
+.album-order { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--s2); }
+.album-order-row { display: grid; grid-template-columns: 64px 1fr auto; gap: var(--s2); align-items: center; }
+.album-order-thumb img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; display: block; }
+.album-order-btns { display: flex; gap: var(--s1); }
+.album-order-btns form, .inline-form { display: inline; margin: 0; }
+.album-order-btns .icon-btn { min-width: 44px; min-height: 44px; font-size: 1.2rem; }
+.album-new, .album-removed { margin: var(--s3) 0; }
+.album-new summary, .album-removed summary, .album-add summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+.album-add form.row { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
+.album-add select, .album-add input { min-height: 44px; font-size: 16px; flex: 1 1 12rem; }
+.chip-with-x { display: inline-flex; align-items: center; gap: 2px; }
+.icon-btn.small { min-width: 44px; min-height: 44px; }
+.icon-btn.small .icon { width: 16px; height: 16px; }

@@ -222,6 +222,25 @@ _PLACES_UPSERT = """
       is_deleted = excluded.is_deleted
 """
 
+# Phase 12: albums an admin made on the web, and their memberships. The
+# web is authoritative for these (ids at or above the floor); the desktop
+# shows them read-only and never pushes them.
+_ALBUMS_UPSERT = """
+    insert into albums (id, name, description, source, is_deleted, created_at)
+    values (%s,%s,%s,%s,%s, coalesce(%s::timestamptz, now()))
+    on conflict (id) do update set
+      name = excluded.name, description = excluded.description,
+      source = excluded.source, is_deleted = excluded.is_deleted
+"""
+
+_WEB_ALBUM_PHOTOS_UPSERT = """
+    insert into album_photos (album_id, photo_id, position, is_deleted, deleted_at, created_at)
+    values (%s,%s,%s,%s,%s, coalesce(%s::timestamptz, now()))
+    on conflict (album_id, photo_id) do update set
+      position = excluded.position, is_deleted = excluded.is_deleted,
+      deleted_at = excluded.deleted_at
+"""
+
 _FACES_UPSERT = """
     insert into faces (id, photo_id, person_id, bbox, embedding, embedding_stale,
                        source, is_disputed, dispute_note,
@@ -255,14 +274,17 @@ def pull_web_origin(
     working_dir: Path | None = None,
     thumbs_dir: Path | None = None,
 ) -> dict[str, int]:
-    """Copy web-born people / places / relationships / faces (ids at or
-    above WEB_ID_FLOOR) down with their web ids. The web is authoritative
-    for these rows: a desktop edit to one is overwritten by the next pull
-    and never pushed. Face crops go to THUMBS_DIR/faces/ when both
-    directories are given. Returns per-table counts."""
+    """Copy web-born people / places / relationships / faces / albums (ids
+    at or above WEB_ID_FLOOR) down with their web ids, plus the memberships
+    of those albums. The web is authoritative for these rows: a desktop
+    edit to one is overwritten by the next pull and never pushed (the
+    Corrections > Albums tab shows a web-born album read-only for that
+    reason). Face crops go to THUMBS_DIR/faces/ when both directories are
+    given. Returns per-table counts."""
     state = _load_state(state_dir)
     data = client.pull_web_origin(state.get("web_origin_cursor"))
-    counts = {"people": 0, "places": 0, "relationships": 0, "faces": 0, "crops": 0}
+    counts = {"people": 0, "places": 0, "relationships": 0, "faces": 0,
+              "albums": 0, "album_photos": 0, "crops": 0}
     crops: list[tuple[int, int, dict]] = []  # (face_id, photo_id, bbox)
     with db.connection() as conn:
         conn.autocommit = False
@@ -354,6 +376,34 @@ def pull_web_origin(
                     if bbox_changed and not f.get("is_deleted"):
                         crops.append((int(f["id"]), int(f["photo_id"]), bbox))
                     cur.execute("select refresh_completeness(%s)", (f["photo_id"],))
+
+                for al in data.get("albums", []) or []:
+                    if not is_web_origin(al.get("id")):
+                        continue
+                    cur.execute(_ALBUMS_UPSERT, (
+                        al["id"], al["name"], al.get("description"), al.get("source") or "manual",
+                        bool(al.get("is_deleted")), al.get("created_at"),
+                    ))
+                    counts["albums"] += 1
+
+                for ap in data.get("album_photos", []) or []:
+                    if not is_web_origin(ap.get("album_id")):
+                        continue
+                    cur.execute("select 1 from albums where id = %s", (ap["album_id"],))
+                    if cur.fetchone() is None:
+                        log.warning("pull web_origin: album_photos for unknown album %s; skipped",
+                                    ap["album_id"])
+                        continue
+                    cur.execute("select 1 from photos where id = %s", (ap["photo_id"],))
+                    if cur.fetchone() is None:
+                        log.warning("pull web_origin: album %s holds unknown photo %s; skipped",
+                                    ap["album_id"], ap["photo_id"])
+                        continue
+                    cur.execute(_WEB_ALBUM_PHOTOS_UPSERT, (
+                        ap["album_id"], ap["photo_id"], ap.get("position"),
+                        bool(ap.get("is_deleted")), ap.get("deleted_at"), ap.get("created_at"),
+                    ))
+                    counts["album_photos"] += 1
             db.audit(conn, actor="web", action="sync.pull.web_origin",
                      entity_type="sync", entity_id=None,
                      new_value={k: v for k, v in counts.items() if k != "crops"})
@@ -407,7 +457,9 @@ def _write_web_face_crops(conn, crops, working_dir: Path, thumbs_dir: Path) -> i
 #: relative is looking at, and a tie means the two edits are
 #: indistinguishable in time anyway.
 _WEB_EDIT_TABLES: dict[str, list[str]] = {
-    "albums": ["name", "description"],
+    # Phase 12: an admin can remove (and restore) an album on the web, so
+    # its soft-delete is a human edit either side can make.
+    "albums": ["name", "description", "is_deleted"],
     "places": ["name", "latitude", "longitude", "notes"],
     "people": [
         "given_name", "middle_name", "surname", "maiden_name", "nickname",
@@ -419,6 +471,25 @@ _WEB_EDIT_TABLES: dict[str, list[str]] = {
     "person_name_variants": ["variant", "kind", "is_deleted", "deleted_at"],
     "suggestions": ["payload"],
 }
+
+#: Phase 12: web edits to a desktop-born album's membership and order.
+#: Keyed (album_id, photo_id) rather than `id`, so applied separately; the
+#: same rule decides (the web's edit wins unless the laptop's own human
+#: edit is newer, ties to the web). Mirrors routes/sync.js
+#: `WEB_EDITABLE.album_photos`.
+_WEB_EDIT_JOIN_FIELDS = ["position", "is_deleted", "deleted_at"]
+
+_WEB_EDIT_ALBUM_PHOTO = """
+    insert into album_photos (album_id, photo_id, position, is_deleted, deleted_at, edited_on_web_at)
+    values (%s, %s, %s, %s, %s, %s)
+    on conflict (album_id, photo_id) do update set
+      position = excluded.position,
+      is_deleted = excluded.is_deleted,
+      deleted_at = excluded.deleted_at,
+      edited_on_web_at = excluded.edited_on_web_at
+    where album_photos.edited_on_desktop_at is null
+       or album_photos.edited_on_desktop_at <= excluded.edited_on_web_at
+"""
 
 
 def pull_web_edits(client: WebSyncClient, state_dir: Path) -> dict[str, int]:
@@ -437,6 +508,7 @@ def pull_web_edits(client: WebSyncClient, state_dir: Path) -> dict[str, int]:
     state = _load_state(state_dir)
     cursors: dict[str, str] = dict(state.get("web_edits_cursors") or {})
     counts = {t: 0 for t in _WEB_EDIT_TABLES}
+    counts["album_photos"] = 0
 
     # Page until every table is drained. The web caps a page at its
     # META_BATCH, and one bulk replace there can touch thousands of
@@ -452,7 +524,9 @@ def pull_web_edits(client: WebSyncClient, state_dir: Path) -> dict[str, int]:
         _save_state(state_dir, state)
         if not any((data.get("has_more") or {}).values()):
             break
-        if not applied_this_page and not any(data.get(t) for t in _WEB_EDIT_TABLES):
+        if not applied_this_page and not any(
+            data.get(t) for t in (*_WEB_EDIT_TABLES, "album_photos")
+        ):
             break
     else:
         log.warning("pull_web_edits: stopped after 200 pages; run the push again")
@@ -481,12 +555,18 @@ def _apply_web_edits(data: dict, counts: dict[str, int]) -> int:
                         if not rid or is_web_origin(rid) or not edited:
                             continue
                         casts = {"payload": "%s::jsonb"}
+                        # Only the fields the web actually sent: a server a
+                        # release behind (no `albums.is_deleted` before
+                        # Phase 12) must not null a not-null column here.
+                        present = [f for f in fields if f in row]
+                        if not present:
+                            continue
                         sets = ", ".join(
-                            f"{f} = {casts.get(f, '%s')}" for f in fields
+                            f"{f} = {casts.get(f, '%s')}" for f in present
                         )
                         values = [
                             json.dumps(row.get(f)) if f == "payload" else row.get(f)
-                            for f in fields
+                            for f in present
                         ]
                         cur.execute(
                             f"""
@@ -506,9 +586,35 @@ def _apply_web_edits(data: dict, counts: dict[str, int]) -> int:
                                 entity_type=table, entity_id=rid,
                                 new_value={
                                     "edited_on_web_at": edited,
-                                    **{f: row.get(f) for f in fields},
+                                    **{f: row.get(f) for f in present},
                                 },
                             )
+                for row in data.get("album_photos", []) or []:
+                    aid, pid = row.get("album_id"), row.get("photo_id")
+                    edited = row.get("edited_on_web_at")
+                    if not aid or not pid or is_web_origin(aid) or not edited:
+                        continue
+                    cur.execute("select 1 from photos where id = %s", (pid,))
+                    if cur.fetchone() is None:
+                        continue
+                    cur.execute("select 1 from albums where id = %s", (aid,))
+                    if cur.fetchone() is None:
+                        continue
+                    cur.execute(_WEB_EDIT_ALBUM_PHOTO, (
+                        aid, pid, row.get("position"), bool(row.get("is_deleted")),
+                        row.get("deleted_at"), edited,
+                    ))
+                    if cur.rowcount:
+                        counts["album_photos"] += 1
+                        seen += 1
+                        db.audit(
+                            conn, actor="web", action="correction.pull",
+                            entity_type="album_photos", entity_id=aid,
+                            new_value={
+                                "photo_id": pid, "edited_on_web_at": edited,
+                                **{f: row.get(f) for f in _WEB_EDIT_JOIN_FIELDS},
+                            },
+                        )
             if seen:
                 db.audit(conn, actor="web", action="sync.pull.web_edits",
                          entity_type="sync", entity_id=None, new_value=counts)

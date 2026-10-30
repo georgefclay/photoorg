@@ -96,6 +96,8 @@ function extractCsrf(body) {
 
 module.exports = {
   pool,
+  // For child processes (tools/zip-worker.js): same database, same schema.
+  testDbUrl: withSearchPath(TEST_URL, TEST_SCHEMA),
   makeApp,
   truncateAll,
   insertUser,

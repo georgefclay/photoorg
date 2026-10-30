@@ -160,6 +160,15 @@ class WebSyncClient:
         )
         return _decode(r, f"mark contribution {contribution_id} pulled")
 
+    def export_web_only(self, table: str, offset: int = 0, limit: int = 1000) -> dict:
+        """Phase 12: one page of a web-only table for the full export."""
+        r = self._session.get(
+            f"{self._base}/sync/export/web_only",
+            headers=self._hdr(), params={"table": table, "offset": offset, "limit": limit},
+            timeout=self._timeout,
+        )
+        return _decode(r, f"export/web_only {table}")
+
     def status(self) -> dict:
         r = self._session.get(f"{self._base}/sync/status", headers=self._hdr(), timeout=self._timeout)
         return _decode(r, "status")

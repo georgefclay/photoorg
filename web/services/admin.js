@@ -629,7 +629,9 @@ async function monthlyReport(pool, month) {
        count(*) filter (where a.action = 'suggestion.create')     as suggestions_made,
        count(*) filter (where a.action = 'suggestion.accept')     as suggestions_accepted,
        count(*) filter (where a.action = 'suggestion.reject')     as suggestions_rejected,
-       count(*) filter (where a.action = 'photo.capture_date.set') as dates_confirmed
+       count(*) filter (where a.action = 'photo.capture_date.set') as dates_confirmed,
+       count(*) filter (where a.action = 'download.fetched')      as downloads,
+       coalesce(sum((a.new_value->>'bytes')::bigint) filter (where a.action = 'download.fetched'), 0) as download_bytes
      from users u
 left join in_month a on a.user_id = u.id
     group by u.id, u.display_name, u.email
@@ -655,6 +657,8 @@ left join in_month a on a.user_id = u.id
       suggestions_accepted: Number(r.suggestions_accepted),
       suggestions_rejected: Number(r.suggestions_rejected),
       dates_confirmed: Number(r.dates_confirmed),
+      downloads: Number(r.downloads),
+      download_bytes: Number(r.download_bytes),
     })),
     total_likes_in_month: totalLikes,
   };
@@ -671,7 +675,13 @@ async function monthlyExtras(pool, month) {
        (select count(*)::int from comments
          where created_at >= $1::date and created_at < ($1::date + interval '1 month')) as comments,
        (select count(*)::int from suggestions
-         where source = 'human' and created_at >= $1::date and created_at < ($1::date + interval '1 month')) as suggestions`,
+         where source = 'human' and created_at >= $1::date and created_at < ($1::date + interval '1 month')) as suggestions,
+       (select count(*)::int from audit_log
+         where action = 'download.fetched'
+           and created_at >= $1::date and created_at < ($1::date + interval '1 month')) as downloads,
+       (select coalesce(sum((new_value->>'bytes')::bigint), 0)::bigint from audit_log
+         where action = 'download.fetched'
+           and created_at >= $1::date and created_at < ($1::date + interval '1 month')) as download_bytes`,
     [`${month}-01`],
   );
   return rows[0];

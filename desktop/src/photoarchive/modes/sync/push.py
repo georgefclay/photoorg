@@ -809,15 +809,20 @@ _META_STAGES = [
         "album_photos",
         """
         select ap.album_id, ap.photo_id, ap.position,
-               ap.is_deleted, ap.deleted_at, ap.updated_at
+               ap.is_deleted, ap.deleted_at, ap.updated_at, ap.edited_on_desktop_at
           from album_photos ap
           join photos p on p.id = ap.photo_id
          where p.is_private = false and p.triage_status <> 'junk'
+           and ap.album_id < %(web_id_floor)s
         """,
+        # Phase 12: a web-born album's memberships are the web's (the route
+        # 400s on them), and `edited_on_desktop_at` lets the web settle a
+        # re-order or removal made on both sides by the Phase 15 rule.
         lambda r: {
             "album_id": r["album_id"], "photo_id": r["photo_id"], "position": r["position"],
             "is_deleted": r["is_deleted"], "deleted_at": _iso(r["deleted_at"]),
             "updated_at": _iso(r["updated_at"]),
+            "edited_on_desktop_at": _iso(r["edited_on_desktop_at"]),
         },
     ),
     (

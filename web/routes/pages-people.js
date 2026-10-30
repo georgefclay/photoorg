@@ -9,7 +9,7 @@ const { requireUser } = require('../middleware/require-user');
 const { getScope } = require('../services/scope');
 const { listPhotos, parseFilters, SORTS } = require('../services/photos');
 const { listPeople, getPerson } = require('../services/people');
-const { listAlbums, getAlbum } = require('../services/albums');
+const { listAlbums, getAlbum, deletedAlbums } = require('../services/albums');
 const { search, SEARCH_SORTS } = require('../services/search');
 const pp = require('../services/people-pages');
 
@@ -168,7 +168,8 @@ module.exports = function peoplePageRoutes({ pool }) {
     try {
       const { scope } = await getScope(req, pool);
       const albums = await listAlbums(pool, req.user, scope);
-      res.render('albums', { albums, groupScope: scope });
+      const deleted = req.user.role === 'admin' ? await deletedAlbums(pool) : [];
+      res.render('albums', { albums, deleted, removed: req.query.removed === '1', groupScope: scope });
     } catch (err) { next(err); }
   });
 

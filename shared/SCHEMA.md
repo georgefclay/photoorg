@@ -28,8 +28,9 @@ need no range; `photos`, `photo_masters`, `photo_backs` are desktop-only.
 ## Human-edit timestamps (Phase 15)
 
 `edited_on_desktop_at` and `edited_on_web_at` (both `timestamptz`, null
-until a human edits the row) sit on the five tables the web can edit:
-`suggestions`, `people`, `person_name_variants`, `places`, `albums`.
+until a human edits the row) sit on the tables the web can edit:
+`suggestions`, `people`, `person_name_variants`, `places`, `albums`, and
+since Phase 12 `album_photos` (membership and order).
 
 They exist because **`updated_at` cannot mean what a cross-tier
 last-writer-wins needs it to mean.** Every `/sync/*` upsert sets
@@ -94,14 +95,15 @@ web-authoritative and never travel to the laptop.
 
 - **`places`** — `name` unique on `lower(name)`, optional `latitude`/`longitude`, `notes`, `is_deleted`. Plus the Phase 15 human-edit pair.
 - **`photo_places`** — PK `(photo_id, place_id)`, `confirmed` bool. Confirmed by admin promotion of a place suggestion. **Soft-delete since Phase 15** (`is_deleted / deleted_at / deleted_by / updated_at` + `set_updated_at`, live partial index): it was insert-or-update-only and the push only upserts, so a desktop "take this photo off this place" never reached the VM. Syncs by LWW on `updated_at`, like `photo_groups`. Every reader filters `is_deleted = false`, including the search vector.
-- **`albums`** — `name`, `description`, `created_by`, `source` (`manual|import`), `is_deleted`. Named scan folders become `source='import'` albums at ingest. Plus the Phase 15 human-edit pair. Desktop-authoritative: the web cannot create, rename or re-order albums yet (PROJECT-PLAN §5 item 11), though a web *name* edit would be carried down by `/sync/pull/web_edits` if one existed.
-- **`album_photos`** — PK `(album_id, photo_id)`, `position` for ordering. **Soft-delete since Phase 15**, same shape and same reason as `photo_places` above.
+- **`albums`** — `name`, `description`, `created_by`, `source` (`manual|import`), `is_deleted`. Named scan folders become `source='import'` albums at ingest. Plus the Phase 15 human-edit pair. **Editable on the web by admins since Phase 12** (create, rename, describe, remove / restore). A desktop-born album (id < floor) is edited on both tiers: `name`, `description` and `is_deleted` are in `WEB_EDITABLE` and settled by `sync_web_edit_wins`. A web-born album (id ≥ floor; `albums` is in `shared/id-ranges.json`) comes down through `/sync/pull/web_origin` and is read-only on the desktop.
+- **`album_photos`** — PK `(album_id, photo_id)`, `position` for ordering. **Soft-delete since Phase 15**, same shape and same reason as `photo_places` above. **Phase 12** adds the human-edit pair `edited_on_desktop_at` / `edited_on_web_at` (add, remove and re-order stamp it; a job never does) and guards `position`, `is_deleted`, `deleted_at` with it on `/sync/album_photos` (`WEB_EDITABLE.album_photos`); `/sync/pull/web_edits` returns desktop-born albums' rows on a `<iso>|<album_id>|<photo_id>` cursor (partial index `album_photos_web_edit_idx`). A web-born album's rows travel only in `/sync/pull/web_origin`; the desktop push excludes them and the route 400s on them.
 
 ### Users, access, sessions
 
 - **`users`** — `email` unique, stored lower-cased (check constraint). `role` (`admin|contributor`), `status` (`active|suspended`), `is_service` for the desktop app's service account. Suspending kills sessions but keeps contributions.
 - **`access_requests`** — pending signups. `token` + `token_expires_at` for the Approve/Deny magic link in the admin email. All expiries are computed in SQL (`now() + interval`), never in Node.
-- **`magic_links`** — hashed one-time login tokens per user. Same SQL-computed expiry rule.
+- **`magic_links`** — hashed one-time login tokens per user. Same SQL-computed expiry rule. `return_to` (Phase 12): a local path to land on after the link is used (a signed-out reader of a "download ready" email); never part of the emailed URL.
+- **`download_jobs`** (Phase 12, web only) — one background download: `user_id`, `selection` jsonb (the filter, never a list of ids; plus its `label`), `status` `queued|running|done|failed|expired`, `photo_count`, `missing_count`, `bytes_estimate` (sum of `file_size` over photos whose file is on the server — `MISSING.txt` entries add nothing), `zip_path` (`PHOTO_DIR/downloads/<id>.zip`), `zip_bytes`, `error` (one line), `worker_pid` (the zip worker; the sweep fails a `running` job whose pid is gone), `created_at`, `started_at`, `finished_at`, `expires_at` (`now() + interval '72 hours'` at finish, in SQL). One queued-or-running row per user (admins exempt), enforced in `services/downloads.js` under an advisory lock. The sweep deletes an expired zip and sets `expired`; the row is never deleted. `down` refuses while rows exist.
 - **`session`** — the exact schema `connect-pg-simple` expects: `sid varchar collate "default" pk`, `sess json`, `expire timestamp(6)`, index on `expire`. Do not "normalise" this; the middleware installs no schema of its own.
 
 ### Contributions

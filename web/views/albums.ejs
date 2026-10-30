@@ -8,6 +8,20 @@ const scoped = groupScope && groupScope.kind !== 'all';
 <div class="page-head">
   <h1>Albums</h1>
 </div>
+<% const isAdmin = user && user.role === 'admin'; %>
+<% if (locals.removed) { %><div class="notice ok">Album removed. It can be restored below.</div><% } %>
+<% if (isAdmin) { %>
+  <details class="card album-new">
+    <summary>New album</summary>
+    <form method="post" action="/albums">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <div class="field"><label for="new-album-name">Name</label><input id="new-album-name" name="name" required maxlength="200"></div>
+      <div class="field"><label for="new-album-desc">Description</label><textarea id="new-album-desc" name="description" rows="2" maxlength="4000"></textarea></div>
+      <div class="actions"><button class="button" type="submit">Create album</button></div>
+    </form>
+    <p class="muted small-text">Then add photos from each photo&rsquo;s page.</p>
+  </details>
+<% } %>
 <% if (scoped && albums.length) { %>
   <p class="muted small-text">Photo counts are for <strong><%= groupScope.label %></strong>.</p>
 <% } %>
@@ -26,4 +40,18 @@ const scoped = groupScope && groupScope.kind !== 'all';
       </a></li>
     <% }) %>
   </ul>
+<% } %>
+<% if (isAdmin && locals.deleted && deleted.length) { %>
+  <details class="album-removed">
+    <summary>Removed albums (<%= deleted.length %>)</summary>
+    <ul class="list">
+      <% deleted.forEach(function (a) { %>
+        <li class="row"><span><%= a.name %></span>
+          <form method="post" action="/albums/<%= a.id %>/restore" class="inline-form">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+            <button class="btn secondary" type="submit">Restore</button>
+          </form></li>
+      <% }) %>
+    </ul>
+  </details>
 <% } %>

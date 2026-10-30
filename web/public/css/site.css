@@ -217,6 +217,8 @@ legend { font-weight: 600; padding: 0 var(--s1); }
   background: transparent; border: 0; color: inherit; cursor: pointer; border-radius: var(--radius-sm);
 }
 .link-button { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; min-height: var(--tap); }
+.download-btn { display: inline-flex; align-items: center; gap: var(--s1); min-height: 44px; }
+.download-btn .icon { width: 20px; height: 20px; }
 .actions { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin-top: var(--s3); }
 
 /* ---- surfaces -------------------------------------------------------- */

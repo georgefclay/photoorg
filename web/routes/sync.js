@@ -36,11 +36,14 @@
 //   POST /sync/photo_groups            batch upsert (soft-delete rows sync as-is)
 //   GET  /sync/pull/groups             groups + memberships + photo_groups since cursor
 //   GET  /sync/pull/confirmed          accepted-suggestion facts + updates since cursor
-//   GET  /sync/pull/web_origin         web-born people/places/relationships/faces since cursor
-//   GET  /sync/pull/web_edits          web *text edits* to desktop-born rows since cursor
+//   GET  /sync/pull/web_origin         web-born people/places/relationships/faces/albums
+//                                      (+ the web-born albums' album_photos) since cursor
+//   GET  /sync/pull/web_edits          web *human edits* to desktop-born rows since cursor
+//                                      (incl. album_photos position / removal, Phase 12)
 //   GET  /sync/pull/contributions      status=approved, pulled=false
 //   GET  /sync/pull/contributions/:id/files/:file_id
 //   POST /sync/pull/contributions/:id/pulled
+//   GET  /sync/export/web_only         Phase 12: what only the web holds, for the full export
 //   GET  /sync/status
 //
 // Batch cap: 500 rows per metadata batch (200 for /sync/photos to keep
@@ -86,7 +89,10 @@ function toArr(x) { return Array.isArray(x) ? x : []; }
 // `pull_web_edits` applier, and `/sync/pull/web_edits`'s select — so the
 // three cannot drift into disagreeing about what "the text" is.
 const WEB_EDITABLE = {
-  albums:               ['name', 'description'],
+  // Phase 12: admins can remove (and restore) an album on the web, so for
+  // albums the soft-delete is a human edit either side could make, like a
+  // name variant's (fix-up 1) and unlike a person's.
+  albums:               ['name', 'description', 'is_deleted'],
   places:               ['name', 'latitude', 'longitude', 'notes'],
   people:               ['given_name', 'middle_name', 'surname', 'maiden_name',
                          'nickname', 'suffix', 'birth_year', 'death_year', 'notes'],
@@ -99,7 +105,33 @@ const WEB_EDITABLE = {
   // lists.
   person_name_variants: ['variant', 'kind', 'is_deleted', 'deleted_at'],
   suggestions:          ['payload'],
+  // Phase 12: membership and order of a desktop-born album, edited by an
+  // admin on the web. Keyed (album_id, photo_id), not `id`, so
+  // /sync/pull/web_edits pages it on its own composite cursor. `deleted_at`
+  // travels with the flag it belongs to.
+  album_photos:         ['position', 'is_deleted', 'deleted_at'],
 };
+
+// The web_edits cursor's timestamp, to the microsecond. A JS Date keeps
+// only milliseconds, so a cursor built from one sits just *before* the row
+// it came from and the next pull hands that row back again — re-applied
+// and re-audited on the laptop on every push (found in Phase 12).
+const CURSOR_TS = `to_char(edited_on_web_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+// Phase 12: /sync/export/web_only — table → columns, filter, stable order.
+const WEB_ONLY_EXPORT = {
+  comments:           { cols: '*', order: 'id' },
+  likes:              { cols: '*', order: 'photo_id, user_id' },
+  groups:             { cols: '*', order: 'id' },
+  group_members:      { cols: '*', order: 'group_id, user_id' },
+  users:              { cols: 'id, email, display_name, role, status, last_login_at, created_at, updated_at', order: 'id' },
+  contributions:      { cols: '*', order: 'id' },
+  contribution_files: { cols: '*', order: 'id' },
+  suggestions:        { cols: '*', where: `id >= ${WEB_ID_FLOOR}`, order: 'id' },
+};
+
+// Tables in WEB_EDITABLE whose key is not `id`.
+const JOIN_KEYS = { album_photos: ['album_id', 'photo_id'] };
 
 // `col = <stored> when the web's edit is the newer human one, else <incoming>`.
 // Spelled once rather than nine times in the people upsert.
@@ -119,8 +151,8 @@ function bad(res, msg, code = 400, extra) { return res.status(code).json({ error
 
 // 400 when a desktop batch carries an id in the web-origin range.
 // Returns true when it responded.
-function refuseWebOriginIds(res, table, rows) {
-  const ids = idsAtOrAboveFloor(rows);
+function refuseWebOriginIds(res, table, rows, key = 'id') {
+  const ids = idsAtOrAboveFloor(rows, key);
   if (ids.length === 0) return false;
   bad(res, `${table}: ids >= ${WEB_ID_FLOOR} are web-origin and cannot be pushed`, 400, {
     web_id_floor: WEB_ID_FLOOR, ids: ids.slice(0, 20),
@@ -373,7 +405,7 @@ module.exports = function syncRoutes({ pool }) {
       const rows = toArr(req.body && req.body.items);
       if (rows.length > META_BATCH) return bad(res, `too many items (max ${META_BATCH})`);
       if (rows.length === 0) return res.json({ upserted: 0 });
-      if (opts.webOriginIds && refuseWebOriginIds(res, name, rows)) return;
+      if (opts.webOriginIds && refuseWebOriginIds(res, name, rows, opts.webOriginKey)) return;
       const client = await pool.connect();
       try {
         await client.query('begin');
@@ -553,7 +585,6 @@ module.exports = function syncRoutes({ pool }) {
      on conflict (id) do update set
        ${keepWebEdits('albums')},
        source = excluded.source,
-       is_deleted = excluded.is_deleted,
        edited_on_desktop_at = excluded.edited_on_desktop_at,
        updated_at = now()
      where albums.id < ${WEB_ID_FLOOR}`,
@@ -562,17 +593,23 @@ module.exports = function syncRoutes({ pool }) {
     { webOriginIds: true },
   ));
 
+  // Phase 12: the web edits desktop-born albums' membership and order too,
+  // so position / is_deleted are guarded by the human-edit pair exactly
+  // like a name (WEB_EDITABLE.album_photos). A web-born album's rows
+  // (album_id ≥ floor) never come up from the desktop: 400.
   router.post('/album_photos', batchUpsert('album_photos',
-    `insert into album_photos (album_id, photo_id, position, is_deleted, deleted_at, updated_at)
-     values ($1, $2, $3, $4, $5, now())
+    `insert into album_photos (album_id, photo_id, position, is_deleted, deleted_at,
+                               edited_on_desktop_at, updated_at)
+     values ($1, $2, $3, $4, $5, $7, now())
      on conflict (album_id, photo_id) do update set
-       position = excluded.position,
-       is_deleted = excluded.is_deleted,
-       deleted_at = excluded.deleted_at,
+       ${keepWebEdits('album_photos')},
+       edited_on_desktop_at = excluded.edited_on_desktop_at,
        updated_at = now()
      where album_photos.updated_at <= coalesce($6::timestamptz, album_photos.updated_at)`,
     (r) => [Number(r.album_id), Number(r.photo_id), r.position,
-            !!r.is_deleted, r.deleted_at || null, r.updated_at || null],
+            !!r.is_deleted, r.deleted_at || null, r.updated_at || null,
+            r.edited_on_desktop_at || null],
+    { webOriginIds: true, webOriginKey: 'album_id' },
   ));
 
   // `place_aliases` keys on (place_id, alias), so the desktop sends each
@@ -1018,12 +1055,22 @@ module.exports = function syncRoutes({ pool }) {
       }
       const out = { cursors: {}, has_more: {} };
       for (const [table, cols] of Object.entries(WEB_EDITABLE)) {
+        if (JOIN_KEYS[table]) {
+          const r = await joinEdits(table, cols, given[table]);
+          if (r.error) return bad(res, r.error);
+          out[table] = r.rows;
+          out.has_more[table] = r.has_more;
+          out.cursors[table] = r.cursor;
+          continue;
+        }
         const [rawTs, rawId] = String(given[table] || '').split('|');
-        const ts = rawTs ? new Date(rawTs) : new Date(0);
-        if (isNaN(ts.getTime())) return bad(res, `bad cursor for ${table}`);
+        // Validated as a date, but handed to Postgres as the string: a JS
+        // Date would drop the microseconds the cursor carries.
+        if (rawTs && isNaN(new Date(rawTs).getTime())) return bad(res, `bad cursor for ${table}`);
+        const ts = rawTs || '1970-01-01T00:00:00Z';
         const afterId = Number(rawId) || 0;
         const { rows } = await pool.query(
-          `select id, ${cols.join(', ')}, edited_on_web_at
+          `select id, ${cols.join(', ')}, edited_on_web_at, ${CURSOR_TS} as cursor_ts
              from ${table}
             where id < $1
               and edited_on_web_at is not null
@@ -1036,12 +1083,37 @@ module.exports = function syncRoutes({ pool }) {
         out.has_more[table] = rows.length === META_BATCH;
         const last = rows[rows.length - 1];
         out.cursors[table] = last
-          ? `${new Date(last.edited_on_web_at).toISOString()}|${last.id}`
+          ? `${last.cursor_ts}|${last.id}`
           : (given[table] || null);
+        for (const r of rows) delete r.cursor_ts;
       }
       res.json(out);
     } catch (err) { next(err); }
   });
+
+  // A join table's web edits: cursor `<iso>|<album_id>|<photo_id>`, and
+  // only rows of desktop-born albums (a web-born album's rows come down
+  // whole through /pull/web_origin).
+  async function joinEdits(table, cols, raw) {
+    const [k1, k2] = JOIN_KEYS[table];
+    const [rawTs, raw1, raw2] = String(raw || '').split('|');
+    if (rawTs && isNaN(new Date(rawTs).getTime())) return { error: `bad cursor for ${table}` };
+    const ts = rawTs || '1970-01-01T00:00:00Z';
+    const { rows } = await pool.query(
+      `select ${k1}, ${k2}, ${cols.join(', ')}, edited_on_web_at, ${CURSOR_TS} as cursor_ts
+         from ${table}
+        where ${k1} < $1
+          and edited_on_web_at is not null
+          and (edited_on_web_at, ${k1}, ${k2}) > ($2::timestamptz, $3::bigint, $4::bigint)
+        order by edited_on_web_at, ${k1}, ${k2}
+        limit ${META_BATCH}`,
+      [WEB_ID_FLOOR, ts, Number(raw1) || 0, Number(raw2) || 0],
+    );
+    const last = rows[rows.length - 1];
+    const cursor = last ? `${last.cursor_ts}|${last[k1]}|${last[k2]}` : (raw || null);
+    for (const r of rows) delete r.cursor_ts;
+    return { rows, has_more: rows.length === META_BATCH, cursor };
+  }
 
   // /sync/pull/web_origin?since=<ts>
   //   Rows the web created itself (ids ≥ WEB_ID_FLOOR) in the tables the
@@ -1049,7 +1121,10 @@ module.exports = function syncRoutes({ pool }) {
   //   since the cursor. The desktop inserts them with the same ids
   //   (web-authoritative) before applying /pull/confirmed facts, so a
   //   face.assign on a contributor-drawn face has a row to land on.
-  //   Suggestions, albums and name variants born on the web don't travel.
+  //   Phase 12: web-born albums travel too, with every album_photos row of
+  //   those albums (membership, order, removals) changed since the cursor;
+  //   the desktop shows them read-only. Suggestions and name variants born
+  //   on the web still don't travel.
   router.get('/pull/web_origin', async (req, res, next) => {
     try {
       const since = req.query.since ? new Date(req.query.since) : new Date(0);
@@ -1079,10 +1154,22 @@ module.exports = function syncRoutes({ pool }) {
           where f.id >= $1 and f.updated_at > $2 and p.is_private = false
           order by f.id`, [WEB_ID_FLOOR, since],
       )).rows;
+      const albums = (await pool.query(
+        `select id, name, description, source, is_deleted, created_at, updated_at
+           from albums where id >= $1 and updated_at > $2 order by id`, [WEB_ID_FLOOR, since],
+      )).rows;
+      const albumPhotos = (await pool.query(
+        `select ap.album_id, ap.photo_id, ap.position, ap.is_deleted, ap.deleted_at,
+                ap.created_at, ap.updated_at
+           from album_photos ap
+           join photos p on p.id = ap.photo_id
+          where ap.album_id >= $1 and ap.updated_at > $2 and p.is_private = false
+          order by ap.album_id, ap.photo_id`, [WEB_ID_FLOOR, since],
+      )).rows;
       res.json({
         cursor: new Date(cursor).toISOString(),
         web_id_floor: WEB_ID_FLOOR,
-        people, places, relationships, faces,
+        people, places, relationships, faces, albums, album_photos: albumPhotos,
       });
     } catch (err) { next(err); }
   });
@@ -1181,6 +1268,31 @@ module.exports = function syncRoutes({ pool }) {
     } finally {
       client.release();
     }
+  });
+
+  // /sync/export/web_only?table=<name>&offset=<n>&limit=<n>
+  //   Phase 12 answer Q2: the desktop's full export also carries what only
+  //   the web holds — comment bodies (hidden ones too, with their flags),
+  //   likes, groups and memberships, users (name, email, role, status:
+  //   never tokens, sessions or hashes — those live in other tables and
+  //   are never read here), contributions and their files' metadata, and
+  //   web-born suggestions (pending family text never comes down any other
+  //   way). Read-only, paged by offset over a stable key: these tables are
+  //   family-sized.
+  router.get('/export/web_only', async (req, res, next) => {
+    try {
+      const table = String(req.query.table || '');
+      const spec = WEB_ONLY_EXPORT[table];
+      if (!spec) return bad(res, 'unknown table', 400, { tables: Object.keys(WEB_ONLY_EXPORT) });
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const limit = Math.max(1, Math.min(Number(req.query.limit) || 1000, 5000));
+      const { rows } = await pool.query(
+        `select ${spec.cols} from ${table} ${spec.where ? `where ${spec.where}` : ''}
+          order by ${spec.order} offset $1 limit $2`,
+        [offset, limit],
+      );
+      res.json({ table, rows, next_offset: rows.length === limit ? offset + limit : null });
+    } catch (err) { next(err); }
   });
 
   // /sync/status — light snapshot. Also reports which database this

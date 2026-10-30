@@ -5,7 +5,7 @@ const monthName = `${fmt.MONTHS[mm - 1]} ${yy}`;
 const cols = [
   ['logins', 'Sign-ins'], ['faces_tagged', 'Faces tagged'], ['comments', 'Comments'], ['likes_toggled', 'Likes'],
   ['suggestions_made', 'Suggested'], ['suggestions_accepted', 'Accepted'], ['suggestions_rejected', 'Rejected'],
-  ['dates_confirmed', 'Dates set'],
+  ['dates_confirmed', 'Dates set'], ['downloads', 'Downloads'],
 ];
 const totals = {};
 cols.forEach(function (c) { totals[c[0]] = report.per_user.reduce(function (a, u) { return a + u[c[0]]; }, 0); });
@@ -28,6 +28,7 @@ cols.forEach(function (c) { totals[c[0]] = report.per_user.reduce(function (a, u
   <li><span class="stat"><span class="stat-n"><%= extras.suggestions %></span><span class="stat-label">Family suggestions</span></span></li>
   <li><span class="stat"><span class="stat-n"><%= extras.files_uploaded %></span><span class="stat-label">Files uploaded</span></span></li>
   <li><span class="stat"><span class="stat-n"><%= extras.people_approved %></span><span class="stat-label">New people let in</span></span></li>
+  <li><span class="stat"><span class="stat-n"><%= extras.downloads %></span><span class="stat-label">Downloads (<%= fmt.bytes(extras.download_bytes) %>)</span></span></li>
 </ul>
 
 <% if (!report.per_user.length) { %>

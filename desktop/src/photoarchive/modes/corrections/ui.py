@@ -358,9 +358,11 @@ class AlbumsTab(QWidget):
 
         outer = QVBoxLayout(self)
         note = QLabel(
-            "Albums are edited here only — the web stays read-only for albums "
-            "until the album pull-back exists. Changes reach the site on the "
-            "next push."
+            "Albums are edited here and, by an admin, on the website. Changes "
+            "made here reach the site on the next push; changes made there come "
+            "down on the next pull. If both sides edit the same thing, the later "
+            "edit wins (a tie goes to the website). Albums made on the website "
+            "are edited there and are read-only here."
         )
         note.setWordWrap(True)
         outer.addWidget(note)
@@ -420,6 +422,11 @@ class AlbumsTab(QWidget):
         self.status.setWordWrap(True)
         ed.addWidget(self.status)
 
+        self.web_born_note = QLabel(albums_repo.WEB_BORN_REASON)
+        self.web_born_note.setWordWrap(True)
+        self.web_born_note.setVisible(False)
+        ed.insertWidget(0, self.web_born_note)
+
         splitter.addWidget(editor)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
@@ -439,6 +446,8 @@ class AlbumsTab(QWidget):
             label = f"{a.name}  · {a.photo_count} photo(s)"
             if a.is_deleted:
                 label += "  · deleted"
+            if a.web_born:
+                label += "  · made on the website"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, a.id)
             self.list.addItem(item)
@@ -465,8 +474,16 @@ class AlbumsTab(QWidget):
         self.delete_btn.setText(
             "Restore album" if (album and album.is_deleted) else "Delete album"
         )
+        editable = album is not None and not album.web_born
         for w in (self.save_btn, self.delete_btn, self.save_order_btn, self.remove_photo_btn):
-            w.setEnabled(album is not None)
+            w.setEnabled(editable)
+            w.setToolTip(albums_repo.WEB_BORN_REASON if album is not None and album.web_born else "")
+        self.f_name.setReadOnly(not editable)
+        self.f_description.setReadOnly(not editable)
+        self.photos.setDragDropMode(
+            QAbstractItemView.InternalMove if editable else QAbstractItemView.NoDragDrop
+        )
+        self.web_born_note.setVisible(album is not None and album.web_born)
         self.photos.clear()
         if album is None:
             return

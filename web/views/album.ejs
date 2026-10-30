@@ -11,6 +11,10 @@ const scoped = groupScope && groupScope.kind !== 'all';
   <h1><%= album.name %></h1>
   <% if (album.description) { %><p class="album-desc"><%= album.description %></p><% } %>
   <p class="muted small-text"><%= fmt.plural(photoCount, 'photo') %><% if (scoped) { %> in <%= groupScope.label %><% } %></p>
+  <p class="actions">
+    <% if (photoCount) { %><a class="btn secondary download-btn" href="/download?kind=album&amp;id=<%= album.id %>"><%- include('partials/icon', { name: 'download' }) %> Download</a><% } %>
+    <% if (user && user.role === 'admin') { %><a class="btn secondary" href="/albums/<%= album.id %>/edit"><%- include('partials/icon', { name: 'edit' }) %> Edit album</a><% } %>
+  </p>
 </header>
 
 <% if (isContinuation) { %><p class="small-text"><a href="/albums/<%= album.id %>">Back to the start</a></p><% } %>

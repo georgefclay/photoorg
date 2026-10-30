@@ -6,6 +6,12 @@ page.js.push('/js/grid.js');
 %>
 <div class="page-head">
   <h1><%= heading %></h1>
+  <% { const dq = new URLSearchParams({ kind: 'browse' });
+       if (filters.has_no_date) dq.set('has_no_date', '1');
+       if (filters.has_untagged_faces) dq.set('has_untagged_faces', '1');
+       if (filters.has_unknown_faces) dq.set('has_unknown_faces', '1'); %>
+  <a class="btn secondary download-btn" href="/download?<%= dq %>"><%- include('partials/icon', { name: 'download' }) %> Download</a>
+  <% } %>
   <form class="sort-form" method="get" action="/">
     <% if (filters.has_no_date) { %><input type="hidden" name="has_no_date" value="1"><% } %>
     <% if (filters.has_untagged_faces) { %><input type="hidden" name="has_untagged_faces" value="1"><% } %>

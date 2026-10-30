@@ -2,6 +2,7 @@ const express = require('express');
 const { newToken, sha256Hex } = require('../services/tokens');
 const { audit } = require('../services/audit');
 const { send } = require('../services/email');
+const { safeReturnTo } = require('../services/scope');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -13,12 +14,17 @@ module.exports = function loginRoutes({ pool, authLimiter }) {
   const router = express.Router();
 
   router.get('/login', (req, res) => {
-    res.render('login', { error: null, values: { email: '' } });
+    // Phase 12: where to land after the emailed link is used (a download
+    // link opened while signed out). Kept on the magic_links row, never in
+    // the emailed URL.
+    const returnTo = safeReturnTo(req.query.return_to);
+    res.render('login', { error: null, values: { email: '' }, returnTo: returnTo === '/' ? '' : returnTo });
   });
 
   router.post('/login', authLimiter, async (req, res, next) => {
     const email = String(req.body.email || '').trim().toLowerCase();
     const honeypot = String(req.body.website || '').trim();
+    const returnTo = safeReturnTo(req.body.return_to);
 
     if (honeypot) {
       console.log(`[login] honeypot tripped ip=${req.ip}`);
@@ -29,6 +35,7 @@ module.exports = function loginRoutes({ pool, authLimiter }) {
       return res.status(400).render('login', {
         error: 'Please enter a valid email address.',
         values: { email },
+        returnTo: returnTo === '/' ? '' : returnTo,
       });
     }
 
@@ -45,9 +52,9 @@ module.exports = function loginRoutes({ pool, authLimiter }) {
         const token = newToken();
         const tokenHash = sha256Hex(token);
         await client.query(
-          `insert into magic_links (user_id, token_hash, expires_at)
-           values ($1, $2, now() + interval '15 minutes')`,
-          [user.id, tokenHash],
+          `insert into magic_links (user_id, token_hash, expires_at, return_to)
+           values ($1, $2, now() + interval '15 minutes', $3)`,
+          [user.id, tokenHash, returnTo === '/' ? null : returnTo],
         );
         await audit(client, {
           actor: 'system',

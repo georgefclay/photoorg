@@ -13,4 +13,8 @@
 # --- photoorg ---
 # Nightly Postgres dump at 03:20 local (America/Chicago). 14-day retention.
 20 3 * * *  /home/ubuntu/photoorg/ops/pg_dump_photoorg.sh >> /var/log/photoorg-cron.log 2>&1
+# Phase 12: hourly download sweep — deletes zips past their 72 hours (the
+# download_jobs row stays, status `expired`) and fails any running job
+# whose worker is gone. Silent unless it did something.
+17 * * * *  cd /home/ubuntu/photoorg/web && /usr/local/bin/node tools/download-sweep.js >> /var/log/photoorg-cron.log 2>&1
 # --- END photoorg ---

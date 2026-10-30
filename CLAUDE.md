@@ -61,7 +61,8 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   every `/sync/<table>` push with an id ≥ floor is a 400 and upserts
   never update a row ≥ floor; the desktop push selects `id < floor`;
   `/sync/pull/web_origin` copies web-born people / places /
-  relationships / faces down with their web ids (faces: `source='human'`,
+  relationships / faces / albums (Phase 12, with those albums'
+  `album_photos`) down with their web ids (faces: `source='human'`,
   `embedding=null`, `embedding_stale=true`, crop cut at pull). Web-born
   rows are web-authoritative — a desktop edit to one is overwritten by
   the next pull and never pushed. After any VM restore, check
@@ -99,7 +100,8 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   by a human edit in a UI** (desktop Corrections / People / album / place
   editors; web admin editors) and never by a job, an upsert or a sweep, so
   the comparison is human-edit vs human-edit. They live on `suggestions`,
-  `people`, `person_name_variants`, `places` and `albums`. The rule is one
+  `people`, `person_name_variants`, `places`, `albums` and (Phase 12)
+  `album_photos`. The rule is one
   SQL function, `sync_web_edit_wins(web, desktop)` — the web has an edit
   and the desktop's is no newer — and **ties go to the web**, the copy a
   relative is looking at. `routes/sync.js`'s `WEB_EDITABLE` names the
@@ -112,7 +114,16 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   comes back. The one exception is **`person_name_variants.is_deleted`**,
   which fix-up 1 put *in* `WEB_EDITABLE`: the web's People editor can
   remove a variant, so there a removal really is a human edit either side
-  could make and the same rule should settle it.
+  could make and the same rule should settle it. Phase 12 added two more
+  on the same reasoning: **`albums.is_deleted`** (an admin can remove and
+  restore an album on the site) and **`album_photos.position / is_deleted
+  / deleted_at`** (an admin re-orders and removes photos in a desktop-born
+  album). `album_photos` keys on `(album_id, photo_id)`, so
+  `/sync/pull/web_edits` pages it on its own cursor
+  (`<iso>|<album_id>|<photo_id>`, routes/sync.js `JOIN_KEYS`). **Every
+  web_edits cursor carries microseconds and is handed to Postgres as a
+  string**: a JS `Date` keeps milliseconds, so a cursor built from one sat
+  just before its own row and every pull handed that row back again.
 - **A removal from a join table is a soft-delete, or it never leaves the
   laptop.** `album_photos` and `photo_places` were insert-or-update-only
   and the push only upserts, so "take this photo out of the album" never
@@ -1115,8 +1126,16 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   admin-only; a new name travels inside a `person` suggestion
   (`new_person`) and the person is created at accept (web id ≥ floor).
   A person suggestion's `face_id` must belong to that photo.
-- **Albums are read-only on the web** (no create / rename / add) until
-  album changes can be pulled back to the desktop.
+- **Albums are editable on the web by admins** (Phase 12, closes PROJECT-PLAN
+  §5 item 11): create, rename, describe, remove / restore, add and remove
+  photos, re-order — plain forms (`routes/albums-edit.js`, the album page's
+  **Edit album**, the photo page's album strip), so it works one-handed and
+  without JS. Contributors stay read-only; "this belongs in album X" is
+  still a suggestion. A web-born album (id ≥ floor) comes down whole
+  through `pull_web_origin` and is **read-only on the desktop** (answer
+  Q1) — every desktop album writer refuses one, the Corrections sweep
+  skips it, the Albums tab says why. An edit to a desktop-born album stamps
+  `edited_on_web_at` and rides `pull_web_edits` (see Inviolable).
 - **Normal browsing and uploading must never produce 4xx responses.** The
   VM's fail2ban `caddy-4xx-rate` jail (shared with George's other sites)
   bans an IP after 20 4xx in 10 minutes for an hour — it banned George on
@@ -1186,8 +1205,9 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
 - **Empty search, no hits, unknown filter value: all 200.** Unparseable
   filter values are ignored, never a 4xx (the fail2ban rule above). Slow
   queries (> 300 ms) log `[search] slow …` with the parsed form.
-- **`place_aliases` has no sync route yet** — like album edits, pulling it
-  back to the desktop is an open item for Phase 12.
+- **`place_aliases` syncs through `/sync/place_aliases`** (Phase 15), and
+  album edits come back through the Phase 12 pull-back; the Phase 11 note
+  that neither had a route is closed.
 
 ## Corrections (Phase 15)
 
@@ -1243,8 +1263,11 @@ The rule itself is in Inviolable. This is how it is built.
   photo; place name / notes / coordinates / aliases. A place rename that
   collides becomes a sentence on screen, not a traceback. `set_coords`
   distinguishes "clear the coordinates" from "leave them alone" — both
-  arrive as `None`. Albums stay desktop-authoritative and the tab says so;
-  the web's album pull-back is still open (PROJECT-PLAN §5 item 11).
+  arrive as `None`. Since Phase 12 the web edits albums too: a desktop-born
+  album's edits on either side are settled by the human-edit pair (the
+  album row, and each `album_photos` row — add / remove / re-order stamp
+  `edited_on_desktop_at`), and a web-born album is shown read-only with
+  the reason on screen.
 
 ### Web — `/admin/corrections` and the inline edits
 - **Admin only.** A moderator hides a comment; rewriting someone's words
@@ -1306,6 +1329,92 @@ Phase 15 guards reach the SQL through a `keepWebEdits()` interpolation, so
 the sweep now expands it with the route's own exported helper before
 parsing, and asserts nothing is left unexpanded. A sweep that cannot see
 through an interpolation is a blind spot, not a pass.
+
+## Downloads and export (Phase 12)
+
+"Everyone holds a copy, so the archive survives the server dying."
+
+### Web downloads (`services/downloads.js`, `routes/downloads.js`)
+- **A download is a selection, never a list of ids from the browser**:
+  one photo, an album, a person, a place, a search (words + filters),
+  Browse's filters under the current group scope, or "everything I can
+  see". It is re-evaluated through `middleware/visibility.js` and the
+  scope **every time it is used — including inside the worker**, so a zip
+  only ever holds what its owner can open at that moment. A search
+  download uses `search.selectionIdsSql`, the page's own match set without
+  ranking or a limit, so the zip holds exactly what the page counted.
+- **Two paths by size.** *Immediate* — ≤ `DOWNLOAD_SYNC_MAX_PHOTOS` (200)
+  files and ≤ `DOWNLOAD_SYNC_MAX_BYTES` (1 GB): `GET /download/zip`
+  streams a `store` zip straight to the response; nothing touches the disk
+  and no file is buffered. One photo (`GET /download/photo/:id`) is the
+  file itself under its zip name. *Background* — anything larger, and
+  "everything I can see" always: a `download_jobs` row, built by `node
+  tools/zip-worker.js <id>` (a child process, **one at a time**, claimed
+  under an advisory lock) into `PHOTO_DIR/downloads/<id>.zip` via a
+  `.part`, then a Postmark "ready" (or "failed", with the one-line reason)
+  email linking `/downloads/:id`. **One queued-or-running job per user**,
+  admins exempt. `expires_at = now() + interval '72 hours'` at finish, in
+  SQL.
+- **Sizes count only files on this server.** A visible photo with no file
+  (metadata-only push) goes into `MISSING.txt` with its id, date and scan
+  locator and adds **no bytes** (answer Q0) — it can never trip the guard.
+  Backs are never in a zip; their text is in the front's description.
+- **Disk guard before a job exists**: refuse when `bytes × 1.1 + 5 GB`
+  exceeds free space on `PHOTO_DIR`'s volume, with a plain sentence to
+  pick a smaller selection (admins also see the numbers) — a 200 page.
+- **The tree** is `services/zip-tree.js`, ported once to
+  `desktop/src/photoarchive/export_tree.py`, **both tested against
+  `shared/zip-tree-fixtures.json`** so they cannot drift. A date counts
+  only when confirmed: `exact`/`month` → `YYYY/MM/`, `year` → `YYYY/` (top
+  of the year folder — never an invented January), `decade` → `1960s/`,
+  anything else → `Unsorted/`. Names `{YYYY-MM-DD|YYYY-MM|YYYY|1960s|undated}
+  _{id:08d}.{ext}`. Optional `People/<common name>/` copies (Phase 13
+  keyword form; a collision gets ` (b. YYYY)`, else ` #id`; Windows-safe).
+  Every zip carries `README.txt` and `manifest.csv`; names come from live
+  rows only (`is_deleted = false` on every join table).
+- **Nothing on a download page answers 4xx in normal use** (the fail2ban
+  rule): not ready, expired, failed, too big, already one running, no image
+  yet — all 200 pages that say so. Someone else's job is 404, like a photo
+  you cannot see.
+- **Signed out on the emailed link**: `/downloads*` redirects to
+  `/login?return_to=…`; the path is stored on the `magic_links` row (never
+  in the emailed URL) and `POST /a/:token` lands there. Local paths only
+  (`safeReturnTo`).
+- **One sweep** (`downloads.sweep`): at server start (where every
+  `running` job is an orphan — the children died with the server), after
+  every worker exit, and hourly from cron (`tools/download-sweep.js`,
+  `ops/vm/cron-fragment.txt`). It fails orphaned `running` jobs (worker pid
+  gone) and tells the owner to ask again, and expires `done` jobs past
+  `expires_at`: **the zip is deleted (a derived file, like
+  `MANUAL_FIX_DIR`), the row stays** as `expired`.
+- **Audit:** `download.request`, `download.ready`, `download.fetched` (per
+  fetch, with bytes — the monthly report's downloads line sums these),
+  `download.failed`, `download.expired`, `download.refused` (disk guard).
+- Child processes have their own in-memory mail outbox, so the worker
+  writes a JSON copy when `MAIL_SINK_DIR` is set (tests), and `email.js`
+  never sends for real under `NODE_ENV=test` — the worker's dotenv would
+  otherwise load the Postmark key from `web/.env`.
+
+### Admin full export (desktop, `modes/export/archive.py`)
+- `python -m photoarchive.tools.export_archive --to <dir> [--masters]
+  [--people]`, or **Sync → Export → Export archive…** (the one job slot).
+  A desktop tool because `photoorg` is authoritative and `WORKING_DIR`
+  holds every working copy; the VM holds files only for grouped photos.
+- Layout: `images/` (the §A tree; **`images/Private/`** for private photos
+  and their backs), `backs/` (`{front:08d}_back{n}`, `orphan_{back:08d}`),
+  `masters/<root label>/<path>` (only with `--masters`; masters guard
+  first and in every chunk that copies one; read-only; junk's masters
+  included), `db/photoorg.sql` (`pg_dump --format=plain --no-owner
+  --no-privileges`, password via `PGPASSWORD`, never argv), `db/csv/` (13
+  tables), `db/web/` (`GET /sync/export/web_only`: comment bodies, likes,
+  groups, memberships, users without secrets, contributions, web-born
+  suggestions), `README.txt` with the migration head. Junk is out of
+  `images/` and in the dump.
+- **The site being down never fails the export**: `db/web/UNAVAILABLE.txt`
+  says why. README says: hand a relative `images/` minus `Private/`,
+  **never `db/`** (personal data).
+- Resumable and memory-safe: chunks of `EXPORT_CHUNK` (250) files in fresh
+  processes, same-size files skipped, every copy through `<dest>.part`.
 
 ## Metadata writer (Phase 13)
 
@@ -1464,6 +1573,9 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
 - `python -m photoarchive.tools.date_hygiene --report | --apply [--rules a,b]` —
   Phase 13 fix-up 1: ingest-sourced confirmed dates checked against rules a–d;
   report under `WORKING_DIR/_report/date-hygiene/`.
+- `python -m photoarchive.tools.export_archive --to DIR [--masters] [--people]
+  [--chunk N]` — Phase 12 full export (images tree, backs, masters, pg_dump,
+  CSVs, the web's own tables); resumable.
 - `python -m photoarchive.tools.check_working_files [--dry-run]` — working-file
   integrity (now `_versions/`-aware; see Cleanup).
 - `python -m photoarchive.tools.repair_face_boxes`,

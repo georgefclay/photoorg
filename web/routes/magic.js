@@ -1,6 +1,7 @@
 const express = require('express');
 const { sha256Hex } = require('../services/tokens');
 const { audit } = require('../services/audit');
+const { safeReturnTo } = require('../services/scope');
 
 async function findMagicLink(pg, token) {
   const hash = sha256Hex(token);
@@ -9,6 +10,7 @@ async function findMagicLink(pg, token) {
             ml.user_id       as user_id,
             ml.expires_at    as expires_at,
             ml.used_at       as used_at,
+            ml.return_to     as return_to,
             u.email          as email,
             u.status         as status
        from magic_links ml
@@ -96,7 +98,7 @@ module.exports = function magicRoutes({ pool }) {
         req.session.userId = row.user_id;
         req.session.save((err2) => {
           if (err2) return next(err2);
-          res.redirect('/');
+          res.redirect(safeReturnTo(row.return_to));
         });
       });
     } catch (err) {

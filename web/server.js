@@ -3,6 +3,7 @@ require('dotenv').config();
 const { createApp } = require('./app');
 const { makePool } = require('./db');
 const { checkIdFloor } = require('./services/id-floor');
+const downloads = require('./services/downloads');
 
 const PORT = process.env.PORT || 8090;
 
@@ -33,4 +34,19 @@ const pool = makePool();
   app.listen(PORT, () => {
     console.log(`Photo Archive web listening on http://localhost:${PORT}`);
   });
+
+  // Phase 12: this process's zip workers died with the last one, so any
+  // `running` download is an orphan — the sweep fails it and tells its
+  // owner (the same sweep cron runs hourly). Then start whatever is
+  // queued, and look again every few minutes in case a kick was missed.
+  try {
+    const r = await downloads.sweep(pool, { startup: true });
+    if (r.failed || r.expired) console.log(`[downloads] startup sweep ${JSON.stringify(r)}`);
+    await downloads.kick(pool);
+  } catch (err) {
+    console.error('[downloads] startup sweep failed', err);
+  }
+  setInterval(() => {
+    downloads.kick(pool).catch((e) => console.error('[downloads] kick', e));
+  }, 5 * 60 * 1000).unref();
 })();

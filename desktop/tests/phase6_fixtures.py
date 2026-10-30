@@ -68,6 +68,12 @@ def truncate_all(url: str) -> None:
         conn.execute(
             "truncate table " + ", ".join(PHASE6_TABLES) + " restart identity cascade"
         )
+        # `photoorg_test` is migrated as a WEB database, so `restart
+        # identity` puts every id-ranged sequence back at WEB_ID_FLOOR. Since
+        # Phase 12 a web-born album is read-only on the desktop, so an album a
+        # desktop test inserts must look like the laptop's own: low ids. (The
+        # web tests' own `restart identity` puts the floor back.)
+        conn.execute("select setval('albums_id_seq', 1, false)")
 
 
 @pytest.fixture

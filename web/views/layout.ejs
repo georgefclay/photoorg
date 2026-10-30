@@ -51,6 +51,8 @@
         <div class="menu-panel">
           <p class="menu-who"><strong><%= user.display_name || user.email %></strong><br><span class="muted"><%= user.email %></span></p>
           <a href="/upload/mine">My uploads</a>
+          <a href="/download?kind=everything">Download everything I can see</a>
+          <a href="/downloads">My downloads</a>
           <a href="/who-is-this">Who is this?</a>
           <% if (locals.isModerator) { %><a href="/admin">Admin</a><% } %>
           <form method="post" action="/logout">

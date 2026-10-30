@@ -163,12 +163,49 @@ function faceState(f) {
         <p class="caption-row caption-ref"><%- include('partials/icon', { name: 'folder' }) %><span><span class="muted">Print:</span> <%= ref %></span></p>
         <% } %>
 
-        <% if (photo.albums.length) { %>
+        <% if (photo.albums.length && !isAdmin) { %>
         <div class="caption-row">
           <%- include('partials/icon', { name: 'albums' }) %>
           <ul class="chips" aria-label="Albums">
             <% photo.albums.forEach(function (a) { %><li><a class="chip" href="/albums/<%= a.id %>"><%= a.name %></a></li><% }) %>
           </ul>
+        </div>
+        <% } %>
+        <% if (isAdmin) { %>
+        <div class="caption-row album-strip" id="albums">
+          <%- include('partials/icon', { name: 'albums' }) %>
+          <div>
+            <ul class="chips" aria-label="Albums">
+              <% photo.albums.forEach(function (a) { %>
+                <li class="chip-with-x"><a class="chip" href="/albums/<%= a.id %>"><%= a.name %></a>
+                  <form method="post" action="/albums/<%= a.id %>/photos/<%= photo.id %>/remove" class="inline-form">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                    <input type="hidden" name="return_to" value="/photos/<%= photo.id %>#albums">
+                    <button class="icon-btn small" type="submit" aria-label="Take out of <%= a.name %>"><%- include('partials/icon', { name: 'close' }) %></button>
+                  </form></li>
+              <% }) %>
+            </ul>
+            <details class="album-add">
+              <summary>Add to an album</summary>
+              <% const inAlbum = new Set(photo.albums.map(function (a) { return a.id; })); const choices = (albumChoices || []).filter(function (a) { return !inAlbum.has(a.id); }); %>
+              <% if (choices.length) { %>
+              <form method="post" action="/photos/<%= photo.id %>/albums" class="row">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                <label class="sr-only" for="add-album">Album</label>
+                <select id="add-album" name="album_id"><% choices.forEach(function (a) { %><option value="<%= a.id %>"><%= a.name %></option><% }) %></select>
+                <button class="btn" type="submit">Add</button>
+              </form>
+              <% } %>
+              <form method="post" action="/albums" class="row">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                <input type="hidden" name="photo_id" value="<%= photo.id %>">
+                <input type="hidden" name="return_to" value="/photos/<%= photo.id %>#albums">
+                <label class="sr-only" for="new-album">New album name</label>
+                <input id="new-album" name="name" placeholder="New album name" maxlength="200" required>
+                <button class="btn secondary" type="submit">Create</button>
+              </form>
+            </details>
+          </div>
         </div>
         <% } %>
 
@@ -182,6 +219,9 @@ function faceState(f) {
           <span class="like-word">Like</span>
           <span class="like-count" data-like-count aria-label="<%= fmt.plural(photo.likes.count, 'like') %>"><%= photo.likes.count %></span>
         </button>
+        <% if (photo.has_file) { %>
+          <a class="btn secondary download-btn" href="/download/photo/<%= photo.id %>" download><%- include('partials/icon', { name: 'download' }) %> Download</a>
+        <% } %>
 
         <div class="action-row" role="group" aria-label="Help with this photo" data-js-only>
           <button type="button" class="action-btn" data-action="tag" aria-pressed="false" aria-controls="photo-frame" <%= canTag ? "" : "disabled" %>>

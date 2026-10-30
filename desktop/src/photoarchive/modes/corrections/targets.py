@@ -35,6 +35,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from ...id_ranges import WEB_ID_FLOOR
+
 
 class Shape(str, Enum):
     COLUMN = "column"
@@ -97,13 +99,18 @@ def _column(
 
 TARGETS: list[Target] = [
     # ---- albums -----------------------------------------------------
+    # Phase 12: only desktop-born albums. One made on the website is the
+    # web's text (answer Q1) — a sweep here would be overwritten by the next
+    # pull and could never be pushed.
     _column(
         "album_name", "Album names", "albums", "album", "name",
-        display="'#' || t.id",
+        display="'#' || t.id", extra=f"t.id < {WEB_ID_FLOOR}",
+        note="Albums made on the website are corrected there.",
     ),
     _column(
         "album_description", "Album descriptions", "albums", "album", "description",
-        display="'#' || t.id || ' — ' || t.name",
+        display="'#' || t.id || ' — ' || t.name", extra=f"t.id < {WEB_ID_FLOOR}",
+        note="Albums made on the website are corrected there.",
     ),
 
     # ---- pending suggestions ----------------------------------------

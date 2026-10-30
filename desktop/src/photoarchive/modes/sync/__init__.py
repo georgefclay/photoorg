@@ -15,8 +15,8 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
-    QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QPushButton, QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ... import db
@@ -28,6 +28,7 @@ from .pull import (
     PullProgress, pull_confirmed, pull_contributions, pull_groups,
 )
 from .push import PushProgress, push
+from ..export import archive as export_archive
 from ..metadata.ui import MetadataRunner, count_due_job, due_text
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ class SyncPanel(QWidget):
         tabs.addTab(self._make_push_tab(), "Push")
         tabs.addTab(self._make_pull_tab(), "Pull")
         tabs.addTab(self._make_groups_tab(), "Groups")
+        tabs.addTab(self._make_export_tab(), "Export")
 
         # Phase 13: after every pull or push, offer to write the metadata of
         # the photos whose facts changed. Never automatic — George presses it.
@@ -159,6 +161,7 @@ class SyncPanel(QWidget):
         self._work_buttons = [
             self._btn_push, self._btn_pull_groups, self._btn_pull_confirmed,
             self._btn_pull_contribs, self._btn_add, self._btn_remove, self._btn_meta,
+            self._btn_export,
         ]
 
     # ------------------------------------------------------------------
@@ -395,6 +398,72 @@ class SyncPanel(QWidget):
     # ------------------------------------------------------------------
     # Wiring
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Export tab (Phase 12)
+    # ------------------------------------------------------------------
+    def _make_export_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        note = QLabel(
+            "Take the whole archive out of this system in open formats: every kept "
+            "photo in Year/Month folders (private ones under images/Private/), the "
+            "backs, the database as SQL and CSV, and what only the website holds. "
+            "Resumable: run it again into the same folder and it copies only what "
+            "is missing. Hand a relative images/ without Private/ — never db/."
+        )
+        note.setWordWrap(True)
+        v.addWidget(note)
+        row = QHBoxLayout()
+        self._export_to = QLineEdit()
+        self._export_to.setPlaceholderText("Folder to export into")
+        row.addWidget(self._export_to, stretch=1)
+        browse = QPushButton("Choose…")
+        browse.clicked.connect(self._choose_export_dir)
+        row.addWidget(browse)
+        v.addLayout(row)
+        self._chk_export_masters = QCheckBox("Also copy the master files (read-only copy; ~31 GB more)")
+        v.addWidget(self._chk_export_masters)
+        self._chk_export_people = QCheckBox("Also a People/ folder per person tagged")
+        v.addWidget(self._chk_export_people)
+        self._btn_export = QPushButton("Export archive…")
+        self._btn_export.clicked.connect(self._on_export)
+        v.addWidget(self._btn_export, alignment=Qt.AlignLeft)
+        self._export_log = QTextEdit()
+        self._export_log.setReadOnly(True)
+        v.addWidget(self._export_log)
+        return w
+
+    def _choose_export_dir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Export the archive into", self._export_to.text())
+        if d:
+            self._export_to.setText(d)
+
+    def _on_export(self) -> None:
+        if self._busy():
+            return
+        to = self._export_to.text().strip()
+        if not to:
+            self._choose_export_dir()
+            to = self._export_to.text().strip()
+            if not to:
+                self._status.setText("Pick a folder to export into first.")
+                return
+        settings = self._settings_lazy()
+        masters = bool(self._chk_export_masters.isChecked())
+        people = bool(self._chk_export_people.isChecked())
+        self._export_log.clear()
+
+        def do(status: Callable[[str], None]) -> dict:
+            s = export_archive.run(settings, Path(to), masters=masters, people_tree=people, out=status)
+            status("")
+            for line in s.report().splitlines():
+                status(line)
+            return {"copied": s.copied, "already_there": s.skipped, "missing": s.missing,
+                    "failed": s.failed, "failed_chunks": s.failed_chunks,
+                    "gb": round(s.total_bytes / 1024 ** 3, 1), "seconds": round(s.elapsed)}
+
+        self._run_worker("export", do, log_widget=self._export_log)
+
     def _settings_lazy(self) -> Settings:
         if self._settings is None:
             self._settings = load_settings()

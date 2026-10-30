@@ -16,7 +16,7 @@ const { pool, insertUser } = helpers;
 const ALL_TABLES = `
   photo_search, person_search, photo_search_dirty, person_search_dirty, place_aliases,
   photo_groups, group_members, groups,
-  audit_log, magic_links, access_requests, "session",
+  download_jobs, audit_log, magic_links, access_requests, "session",
   contribution_files, contributions,
   nickname_dictionary, suggestions, likes, comments, faces, photo_backs,
   album_photos, albums, photo_places, places, relationships,
@@ -140,7 +140,9 @@ async function seedWorld() {
      values ($1, 'D:/Scanned Photos/Batch 00012/0018.jpg', 'back-sha', 'b1.jpg', 'Peggy and Chuck, Easter 1962', 0.9)`, [clay1],
   );
   const album = Number((await pool.query(
-    `insert into albums (name, source) values ('Summer 1992 — Canada', 'import') returning id`,
+    // A desktop-born album (id below the web floor), as every album on the
+    // site was before Phase 12 — the sync tests push its memberships.
+    `insert into albums (id, name, source) values (77, 'Summer 1992 — Canada', 'import') returning id`,
   )).rows[0].id);
   await pool.query(`insert into album_photos (album_id, photo_id, position) values ($1, $2, 1), ($1, $3, 2)`, [album, clay2, clay1]);
   const place = Number((await pool.query(`insert into places (name) values ('Toronto') returning id`)).rows[0].id);

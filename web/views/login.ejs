@@ -8,6 +8,7 @@
 
 <form method="post" action="/login" class="card" autocomplete="off">
   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+  <% if (locals.returnTo) { %><input type="hidden" name="return_to" value="<%= returnTo %>" /><% } %>
   <div class="honeypot" aria-hidden="true">
     <label>Website<input type="text" name="website" tabindex="-1" autocomplete="off" /></label>
   </div>

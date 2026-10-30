@@ -1,5 +1,5 @@
-// /api/albums — read only (answer C5: no album editing on the web in
-// Phase 10). Albums are global; photo counts and the photo list are
+// /api/albums — read only. Admins edit albums through the plain forms in
+// routes/albums-edit.js (Phase 12). Albums are global; photo counts and the photo list are
 // visibility- and scope-filtered, so an album with nothing visible still
 // appears with count 0.
 

@@ -1,11 +1,22 @@
 """Albums: rename, soft-delete, reorder, remove a photo.
 
-Albums are desktop-authoritative — the web stays read-only for them
-until an album pull-back exists (PROJECT-PLAN §5 item 11), which is why
-the editor carries that sentence on screen. Everything here is an
-ordinary `update` that `/sync/albums` and `/sync/album_photos` assign in
-their `do update set`, so an edit reaches the VM on the next push with
-nothing else to remember (Phase 9 fix-up 2).
+Phase 12 made albums editable on the web too (PROJECT-PLAN §5 item 11,
+closed). Two kinds of album now live here:
+
+* **desktop-born** (id below WEB_ID_FLOOR) — edited here and on the web.
+  Every human edit stamps `edited_on_desktop_at` (the album row for name /
+  description / delete, the `album_photos` row for add / remove / order),
+  and the web's own edits come down through `pull_web_edits`; the two are
+  settled by `sync_web_edit_wins`, ties to the web — the Phase 15 rule.
+* **web-born** (id at or above the floor) — created by an admin on the
+  site and copied down by `pull_web_origin`. The web is authoritative for
+  them (Phase 12 answer Q1): a desktop edit would be overwritten by the
+  next pull and could never be pushed, so every writer below refuses one
+  and the tab shows it read-only with that reason on screen.
+
+Everything here is an ordinary `update` that `/sync/albums` and
+`/sync/album_photos` assign in their `do update set`, so an edit reaches
+the VM on the next push with nothing else to remember (Phase 9 fix-up 2).
 
 The one thing that needed a migration: **a removal has to be a
 soft-delete.** `album_photos` was insert-or-update-only and the push only
@@ -26,6 +37,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ... import db as dbmod
+from ...id_ranges import is_web_origin
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +50,25 @@ class AlbumRow:
     source: str
     is_deleted: bool
     photo_count: int
+
+    @property
+    def web_born(self) -> bool:
+        """Created on the website: read-only here (Phase 12 answer Q1)."""
+        return is_web_origin(self.id)
+
+
+#: Shown on screen for a web-born album, and logged when a writer refuses one.
+WEB_BORN_REASON = (
+    "This album was made on the website, so it is edited there. Changes made "
+    "on the site come down on the next Pull; an edit here would be overwritten."
+)
+
+
+def _refuse_web_born(album_id: int, what: str) -> bool:
+    if is_web_origin(album_id):
+        log.warning("album %s is web-born; %s refused", album_id, what)
+        return True
+    return False
 
 
 @dataclass
@@ -99,6 +130,8 @@ def update_album(
     actor: str = "desktop",
 ) -> bool:
     """Rename and/or re-describe. One audit row with previous and new."""
+    if _refuse_web_born(album_id, "rename"):
+        return False
     prev = conn.execute(
         "select name, description from albums where id = %s", (album_id,)
     ).fetchone()
@@ -129,6 +162,8 @@ def update_album(
 def set_album_deleted(
     conn: psycopg.Connection, album_id: int, deleted: bool, *, actor: str = "desktop",
 ) -> bool:
+    if _refuse_web_born(album_id, "delete/restore"):
+        return False
     prev = conn.execute(
         "select name, is_deleted from albums where id = %s", (album_id,)
     ).fetchone()
@@ -155,9 +190,11 @@ def set_photo_in_album(
     """Soft-remove (or restore) one photo's membership.
 
     Never a `delete`: the row carries the flags so the push can tell the
-    web the photo left the album. `updated_at` moves with it, which is
-    what the LWW on `/sync/album_photos` compares.
+    web the photo left the album. `edited_on_desktop_at` moves with it:
+    that is what the web weighs against an admin's edit of the same row.
     """
+    if _refuse_web_born(album_id, "membership change"):
+        return False
     prev = conn.execute(
         "select is_deleted from album_photos where album_id = %s and photo_id = %s",
         (album_id, photo_id),
@@ -166,7 +203,8 @@ def set_photo_in_album(
         if not present:
             return False
         conn.execute(
-            "insert into album_photos (album_id, photo_id) values (%s, %s)",
+            "insert into album_photos (album_id, photo_id, edited_on_desktop_at) "
+            "values (%s, %s, now())",
             (album_id, photo_id),
         )
     else:
@@ -177,7 +215,8 @@ def set_photo_in_album(
             update album_photos
                set is_deleted = %s,
                    deleted_at = case when %s then now() else null end,
-                   updated_at = now()
+                   updated_at = now(),
+                   edited_on_desktop_at = now()
              where album_id = %s and photo_id = %s
             """,
             (not present, not present, album_id, photo_id),
@@ -201,14 +240,16 @@ def reorder_album(
     Only rows that actually move are written, so the search triggers and
     the sync `updated_at` stay quiet on a no-op reorder.
     """
+    if _refuse_web_born(album_id, "reorder"):
+        return 0
     current = {r.photo_id: r.position for r in album_photos(conn, album_id)}
     moved = 0
     for index, photo_id in enumerate(ordered_photo_ids, start=1):
         if photo_id not in current or current[photo_id] == index:
             continue
         conn.execute(
-            "update album_photos set position = %s, updated_at = now() "
-            "where album_id = %s and photo_id = %s",
+            "update album_photos set position = %s, updated_at = now(), "
+            "edited_on_desktop_at = now() where album_id = %s and photo_id = %s",
             (index, album_id, photo_id),
         )
         moved += 1

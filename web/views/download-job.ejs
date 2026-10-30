@@ -1,0 +1,36 @@
+<%
+page.title = 'Download';
+page.css.push('/css/downloads.css');
+const sel = job.selection || {};
+const st = job.status === 'done' && !job.live ? 'expired' : job.status;
+%>
+<a class="back-link" href="/downloads"><%- include('partials/icon', { name: 'left' }) %> My downloads</a>
+<h1>Download</h1>
+<% if (already) { %><div class="notice info">You already have this download on the way — one at a time.</div><% } %>
+<section class="card download-card">
+  <p class="download-what"><strong><%= sel.label || 'Photos' %></strong></p>
+  <dl class="download-facts">
+    <dt>Status</dt>
+    <dd class="status status-<%= st %>">
+      <% if (st === 'queued') { %>Waiting its turn
+      <% } else if (st === 'running') { %>Being made now
+      <% } else if (st === 'done') { %>Ready
+      <% } else if (st === 'failed') { %>Could not be made
+      <% } else { %>Expired<% } %>
+    </dd>
+    <dt>Photos</dt><dd><%= job.photo_count %><% if (job.missing_count) { %> <span class="muted">(<%= job.missing_count %> listed in MISSING.txt)</span><% } %></dd>
+    <dt>Size</dt><dd><%= job.zip_bytes != null ? fmt.bytes(job.zip_bytes) : `about ${fmt.bytes(job.bytes_estimate)}` %></dd>
+    <dt>Asked for</dt><dd><%= fmt.relTime(job.created_at) %></dd>
+    <% if (job.expires_at) { %><dt><%= st === 'expired' ? 'Expired' : 'Available until' %></dt><dd><%= new Date(job.expires_at).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) %></dd><% } %>
+  </dl>
+  <% if (st === 'done') { %>
+    <div class="actions"><a class="button big" href="/downloads/<%= job.id %>/file"><%- include('partials/icon', { name: 'download' }) %> Download zip</a></div>
+  <% } else if (st === 'queued' || st === 'running') { %>
+    <p>We will email you when it is ready. You can close this page.</p>
+  <% } else if (st === 'failed') { %>
+    <p><%= job.error || 'Something went wrong.' %></p>
+    <p>Please ask for it again from the album, person or search you started from.</p>
+  <% } else { %>
+    <p>Zips are kept for 72 hours. Ask for it again from the album, person or search you started from.</p>
+  <% } %>
+</section>

@@ -1,0 +1,20 @@
+<%
+page.title = 'My downloads';
+page.css.push('/css/downloads.css');
+%>
+<h1>My downloads</h1>
+<p class="muted small-text">Small downloads arrive straight away and are not listed here. Big ones are made in the background, emailed to you, and kept for 72 hours.</p>
+<% if (!jobs.length) { %>
+  <%- include('partials/empty', { icon: 'download', title: 'No downloads yet', text: 'Every album, person and search page has a Download button. “Everything I can see” is in the account menu.', action: { href: '/download?kind=everything', label: 'Everything I can see' } }) %>
+<% } else { %>
+  <ul class="download-list">
+    <% for (const j of jobs) {
+         const st = j.status === 'done' && !j.live ? 'expired' : j.status; %>
+      <li class="card">
+        <a href="/downloads/<%= j.id %>"><strong><%= (j.selection && j.selection.label) || 'Photos' %></strong></a>
+        <span class="status status-<%= st %>"><%= { queued: 'Waiting', running: 'Being made', done: 'Ready', failed: 'Failed', expired: 'Expired' }[st] %></span>
+        <span class="muted small-text"><%= j.photo_count %> photos · <%= fmt.relTime(j.created_at) %></span>
+      </li>
+    <% } %>
+  </ul>
+<% } %>

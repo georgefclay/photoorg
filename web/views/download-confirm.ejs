@@ -1,0 +1,55 @@
+<%
+page.title = 'Download';
+page.css.push('/css/downloads.css');
+const s = g && g.summary;
+const isAdmin = user && user.role === 'admin';
+%>
+<h1>Download</h1>
+
+<% if (!sel || !g) { %>
+  <%- include('partials/empty', { icon: 'download', title: 'Nothing to download', text: 'Open an album, a person or a search and use its Download button.', action: { href: '/', label: 'Browse photos' } }) %>
+<% } else { %>
+  <section class="card download-card">
+    <p class="download-what"><strong><%= g.label %></strong></p>
+    <dl class="download-facts">
+      <dt>Photos</dt><dd><%= s.file_count %><% if (s.people_copies) { %> <span class="muted">(+<%= s.people_copies %> copies under People/)</span><% } %></dd>
+      <dt>Size</dt><dd>about <%= fmt.bytes(s.bytes) %></dd>
+      <% if (s.missing_count) { %>
+        <dt>Not on the server yet</dt>
+        <dd><%= s.missing_count %> <span class="muted">— listed by number in MISSING.txt inside the zip</span></dd>
+      <% } %>
+    </dl>
+
+    <% if (disk) { %>
+      <div class="notice error">
+        <p>That is too big for the server's free space right now. Please pick a smaller selection — an album, a person or a decade at a time.</p>
+        <% if (isAdmin) { %><p class="small-text">Needs <%= fmt.bytes(disk.need) %> (zip × 1.1 + 5 GB headroom); <%= fmt.bytes(disk.free) %> free on PHOTO_DIR's volume.</p><% } %>
+      </div>
+    <% } else if (!s.file_count && !s.missing_count) { %>
+      <p>There are no photos you can see in this selection.</p>
+    <% } else if (mode === 'immediate') { %>
+      <p>It downloads now, as one zip file sorted into year and month folders.</p>
+      <form method="get" action="/download/zip" class="download-form">
+        <% for (const [k, v] of new URLSearchParams(query)) { if (k === 'people_tree') continue; %>
+          <input type="hidden" name="<%= k %>" value="<%= v %>">
+        <% } %>
+        <label class="check"><input type="checkbox" name="people_tree" value="1" <%= sel.people_tree ? 'checked' : '' %>> Also a People folder (a copy under each person in the photo)</label>
+        <div class="actions"><button class="button big" type="submit"><%- include('partials/icon', { name: 'download' }) %> Download zip</button></div>
+      </form>
+    <% } else if (open) { %>
+      <p>You already have a download being made. When it is ready you can ask for another.</p>
+      <div class="actions"><a class="button" href="/downloads/<%= open.id %>">See that download</a></div>
+    <% } else { %>
+      <p>This one is big, so the server makes the zip in the background and <strong>emails you a link</strong> when it is ready. The link works for 72 hours.</p>
+      <form method="post" action="/download" class="download-form">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+        <% for (const [k, v] of new URLSearchParams(query)) { if (k === 'people_tree') continue; %>
+          <input type="hidden" name="<%= k %>" value="<%= v %>">
+        <% } %>
+        <label class="check"><input type="checkbox" name="people_tree" value="1" <%= sel.people_tree ? 'checked' : '' %>> Also a People folder (a copy under each person in the photo)</label>
+        <div class="actions"><button class="button big" type="submit"><%- include('partials/icon', { name: 'download' }) %> Email me a link</button></div>
+      </form>
+    <% } %>
+  </section>
+  <p class="small-text muted">Full resolution only. Each photo carries its people, date, places and the writing on its back inside the file. <a href="/downloads">My downloads</a></p>
+<% } %>

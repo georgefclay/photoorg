@@ -161,3 +161,40 @@ def test_push_stages_are_logged_with_memory(panel, monkeypatch, caplog):
     assert any("stage photos end" in m and "photos: 3/3" in m for m in msgs)
     assert any("stage files end" in m and "files: 2/2" in m for m in msgs)
     assert any("sync push: done" in m and "'files': 2" in m for m in msgs)
+
+
+def test_export_runs_in_the_one_slot_and_reports(panel, monkeypatch, tmp_path):
+    """Phase 12: Export archive… shares the slot, streams its progress lines
+    to the Export log on the GUI thread, and frees every button after."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class Summary:
+        copied, skipped, missing, failed, failed_chunks = 5, 2, 0, 0, []
+        total_bytes, elapsed = 3 * 1024 ** 3, 12.0
+
+        def report(self):
+            return "Export to X: 7 photos.\nFolder size 3.0 GB."
+
+    def fake_run(settings, to, *, masters, people_tree, out):
+        assert str(to) == str(tmp_path) and masters is True and people_tree is False
+        out("Chunk 1/1: 7/7 files")
+        started.set()
+        release.wait(5)
+        return Summary()
+
+    monkeypatch.setattr(sync_mod.export_archive, "run", fake_run)
+    monkeypatch.setattr(panel, "_settings_lazy", lambda: object())
+
+    panel._export_to.setText(str(tmp_path))
+    panel._chk_export_masters.setChecked(True)
+    panel._on_export()
+    _pump_until(started.is_set)
+    assert panel.running_job() == "export"
+    assert not panel._btn_push.isEnabled() and not panel._btn_export.isEnabled()
+    release.set()
+    _pump_until(lambda: panel._job is None)
+    assert panel._btn_export.isEnabled()
+    log_text = panel._export_log.toPlainText()
+    assert "Chunk 1/1" in log_text and "Folder size 3.0 GB." in log_text
+    assert "'gb': 3.0" in panel._status.text()

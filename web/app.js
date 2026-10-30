@@ -33,6 +33,8 @@ const photoPageRoutes = require('./routes/pages-photo');
 const contribPageRoutes = require('./routes/pages-contrib');
 const peoplePageRoutes = require('./routes/pages-people');
 const adminPageRoutes = require('./routes/pages-admin');
+const downloadRoutes = require('./routes/downloads');
+const albumEditRoutes = require('./routes/albums-edit');
 
 function createApp({ pool }) {
   const app = express();
@@ -91,7 +93,9 @@ function createApp({ pool }) {
   app.use('/admin', adminPageRoutes({ pool }));
   app.use('/', photoPageRoutes({ pool }));
   app.use('/', contribPageRoutes({ pool }));
+  app.use('/', albumEditRoutes({ pool }));
   app.use('/', peoplePageRoutes({ pool }));
+  app.use('/', downloadRoutes({ pool }));
   app.use('/media', mediaRoutes({ pool }));
   app.use('/api/csrf', apiCsrfRoutes());
   app.use('/api/photos', apiPhotosRoutes({ pool }));

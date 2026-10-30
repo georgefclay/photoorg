@@ -542,6 +542,34 @@ async function search(pool, user, {
   return out;
 }
 
+// Phase 12: the whole match set as `select p.id …` — no ranking, no page,
+// no limit — for a download of "this search". Same terms, same visibility,
+// same scope and filters as the page, so the zip holds exactly what the
+// page counted. Nothing to match (no words, no filters) is an empty set,
+// as the page's empty search is.
+async function selectionIdsSql(pool, user, { q = '', filters = {}, scope = null } = {}) {
+  const parsed = parseQuery(q);
+  const resolved = await resolveTerms(pool, parsed.terms);
+  const terms = resolved.filter(termHasLayers);
+  terms.forEach((t, i) => { t.ix = i; });
+  const hasFilters = filters.year_from != null || filters.year_to != null
+    || filters.person_id != null || filters.place_id != null || filters.album_id != null
+    || filters.has_no_date || filters.has_untagged_faces || filters.has_unknown_faces
+    || filters.completeness_below != null || filters.low_completeness;
+  const params = [];
+  if (!terms.length) {
+    if (!hasFilters) return { sql: 'select null::bigint as id where false', params };
+    const clauses = buildWhere(user, params, { scope, filters });
+    return { sql: `select p.id from photos p where ${clauses.join(' and ')}`, params };
+  }
+  const cte = hitsCte(terms, params);
+  const clauses = buildWhere(user, params, { scope, filters });
+  return {
+    sql: `${cte} select p.id from agg a join photos p on p.id = a.photo_id where ${clauses.join(' and ')}`,
+    params,
+  };
+}
+
 // People / places chips above the grid: each resolved person or place once,
 // with the plain-words reason it is here.
 function dedupeStrip(terms, key) {
@@ -647,7 +675,7 @@ async function resolvePeopleIds(pool, q) {
 }
 
 module.exports = {
-  search, countFiltered, autocompleteSearch, resolvePeopleIds, resolveTerms,
+  search, countFiltered, selectionIdsSql, autocompleteSearch, resolvePeopleIds, resolveTerms,
   parseQuery, describeQuery, snippet, whyText,
   SEARCH_SORTS, RELEVANCE, PERSON_SCORE, PLACE_SCORE, TEXT_SCORE, DATE_SCORE,
 };

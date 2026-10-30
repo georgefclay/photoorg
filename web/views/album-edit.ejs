@@ -1,0 +1,61 @@
+<%
+page.title = `Edit ${album.name}`;
+page.nav = 'albums';
+page.css.push('/css/people.css');
+page.css.push('/css/downloads.css');
+%>
+<a class="back-link" href="/albums/<%= album.id %>"><%- include('partials/icon', { name: 'left' }) %> <%= album.name %></a>
+<h1>Edit album</h1>
+<% if (saved === 'details') { %><div class="notice ok">Saved.</div><% } %>
+<% if (saved === 'removed') { %><div class="notice ok">Photo taken out of the album. It can be added back from its photo page.</div><% } %>
+<% if (error === 'name') { %><div class="notice error">An album needs a name.</div><% } %>
+
+<form method="post" action="/albums/<%= album.id %>/edit" class="card">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <div class="field">
+    <label for="album-name">Name</label>
+    <input id="album-name" name="name" required maxlength="200" value="<%= album.name %>">
+  </div>
+  <div class="field">
+    <label for="album-desc">Description</label>
+    <textarea id="album-desc" name="description" rows="3" maxlength="4000"><%= album.description || '' %></textarea>
+  </div>
+  <div class="actions"><button class="button" type="submit">Save</button></div>
+</form>
+
+<h2>Photos in order</h2>
+<% if (!rows.length) { %>
+  <p class="muted">No photos yet. Add one from any photo's page (“Albums” → Add).</p>
+<% } else { %>
+  <ol class="album-order">
+    <% rows.forEach(function (r, i) { %>
+      <li id="p<%= r.photo_id %>" class="album-order-row">
+        <a href="/photos/<%= r.photo_id %>" class="album-order-thumb">
+          <% if (r.has_file) { %><img src="/media/thumbs/<%= r.photo_id %>" alt="" loading="lazy" width="64" height="64"><% } else { %><span class="muted small-text">no image</span><% } %>
+        </a>
+        <span class="album-order-what">#<%= r.photo_id %><br><span class="muted small-text"><%= r.capture_date_confirmed ? fmt.dateLabel(r.capture_date, r.capture_date_precision) : 'undated' %></span></span>
+        <span class="album-order-btns">
+          <form method="post" action="/albums/<%= album.id %>/photos/<%= r.photo_id %>/move">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>"><input type="hidden" name="dir" value="up">
+            <button class="icon-btn" type="submit" aria-label="Move up" <%= i === 0 ? 'disabled' : '' %>>↑</button>
+          </form>
+          <form method="post" action="/albums/<%= album.id %>/photos/<%= r.photo_id %>/move">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>"><input type="hidden" name="dir" value="down">
+            <button class="icon-btn" type="submit" aria-label="Move down" <%= i === rows.length - 1 ? 'disabled' : '' %>>↓</button>
+          </form>
+          <form method="post" action="/albums/<%= album.id %>/photos/<%= r.photo_id %>/remove">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+            <button class="icon-btn" type="submit" aria-label="Take out of the album"><%- include('partials/icon', { name: 'close' }) %></button>
+          </form>
+        </span>
+      </li>
+    <% }) %>
+  </ol>
+<% } %>
+
+<h2>Remove the album</h2>
+<p class="muted small-text">The photos stay where they are; only the album goes. It can be restored from the Albums page.</p>
+<form method="post" action="/albums/<%= album.id %>/delete">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <button class="button danger" type="submit">Remove this album</button>
+</form>

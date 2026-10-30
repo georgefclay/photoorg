@@ -1,0 +1,23 @@
+/* Phase 12 — download confirmation, job status, my downloads. Phone first. */
+.download-card { display: grid; gap: var(--s3); }
+.download-what { font-size: 1.15rem; margin: 0; }
+.download-facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--s1) var(--s3); margin: 0; }
+.download-facts dt { font-weight: 600; }
+.download-facts dd { margin: 0; }
+.download-form .check { display: flex; gap: var(--s2); align-items: flex-start; min-height: 44px; }
+.download-form .check input { width: 22px; height: 22px; flex: none; margin-top: 2px; }
+.button.big { min-height: 52px; font-size: 1.05rem; width: 100%; justify-content: center; gap: var(--s2); }
+.button.big .icon { width: 22px; height: 22px; }
+.download-list { list-style: none; padding: 0; margin: var(--s3) 0 0; display: grid; gap: var(--s2); }
+.download-list li { display: grid; gap: var(--s1); }
+.download-list a { min-height: 44px; display: flex; align-items: center; }
+.status { font-weight: 600; }
+.status-done { color: var(--ok, inherit); }
+.status-failed { color: var(--danger); }
+.status-expired { color: var(--fg-mute); }
+.download-btn { display: inline-flex; align-items: center; gap: var(--s1); min-height: 44px; }
+.download-btn .icon { width: 20px; height: 20px; }
+@media (min-width: 720px) {
+  .button.big { width: auto; }
+  .download-list li { grid-template-columns: 1fr auto auto; align-items: center; }
+}

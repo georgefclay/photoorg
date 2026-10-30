@@ -7,6 +7,7 @@
 // the JSON API from public/js/{photo,tagger,like,datefield}.js.
 
 const express = require('express');
+const albumsSvc = require('../services/albums');
 const { requireUser } = require('../middleware/require-user');
 const { getScope } = require('../services/scope');
 const { getPhotoDetail, photoNeighbours } = require('../services/photos');
@@ -26,9 +27,11 @@ module.exports = function photoPageRoutes({ pool }) {
 
       const { scope } = await getScope(req, pool);
       const fromRaw = typeof req.query.from === 'string' ? req.query.from.slice(0, 40) : null;
-      const [neighbours, suggestions] = await Promise.all([
+      const isAdmin = req.user.role === 'admin';
+      const [neighbours, suggestions, albumChoices] = await Promise.all([
         photoNeighbours(pool, req.user, id, fromRaw, scope),
         describeSuggestions(pool, photo.suggestions_pending),
+        isAdmin ? albumsSvc.albumChoices(pool) : Promise.resolve(null),
       ]);
 
       const suggestedFaces = new Set(suggestions.filter((s) => s.kind === 'person' && s.mine && s.face_id).map((s) => s.face_id));
@@ -47,7 +50,8 @@ module.exports = function photoPageRoutes({ pool }) {
         fromQ: fromRaw ? `?from=${encodeURIComponent(neighbours.from)}` : '',
         back: fromRaw ? backLinkFor(neighbours.from) : { href: '/', label: 'Photos' },
         alt: altText(photo),
-        isAdmin: req.user.role === 'admin',
+        isAdmin,
+        albumChoices,
       });
     } catch (err) { next(err); }
   });

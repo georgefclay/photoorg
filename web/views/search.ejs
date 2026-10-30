@@ -109,6 +109,11 @@ const scoped = groupScope && groupScope.kind !== 'all';
       </nav>
     </div>
     <% if (photoCount != null) { %><p class="muted small-text"><%= fmt.plural(photoCount, 'photo') %> found<% if (scoped) { %> in <%= groupScope.label %><% } %></p><% } %>
+    <% if (photoCount) {
+         const dq = new URLSearchParams(startUrl.split('?')[1] || ''); dq.delete('sort'); dq.set('kind', filters.place_id != null && !searchQuery && dq.size === 1 ? 'place' : 'search');
+         if (dq.get('kind') === 'place') { dq.set('id', String(filters.place_id)); dq.delete('place_id'); } %>
+      <p><a class="btn secondary download-btn" href="/download?<%= dq %>"><%- include('partials/icon', { name: 'download' }) %> Download these</a></p>
+    <% } %>
     <% if (isContinuation) { %><p class="small-text"><a href="<%= startUrl %>">Back to the start</a></p><% } %>
     <% if (!photos.items.length) { %>
       <%- include('partials/empty', { icon: 'search', title: 'No photos matched', text: scoped ? `Nothing in ${groupScope.label} matched. Try fewer words, or switch the group at the top.` : 'Try fewer words, a different spelling, or just a year.', action: { href: '/search', label: 'Start a new search' } }) %>

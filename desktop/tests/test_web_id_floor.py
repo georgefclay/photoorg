@@ -83,6 +83,25 @@ def two_sided():
         pytest.skip("node or web/shared deps missing")
     base_env = {k: v for k, v in os.environ.items() if k != "PHOTOORG_DB_ROLE"}
 
+    # The `down` of a migration refuses while rows it would silently change
+    # exist (soft-deleted join rows, download_jobs) - "no real deletes"
+    # binds a migration too. This is a throwaway test database, so clear
+    # whatever an earlier test left behind before rebuilding it.
+    with _desk_conn() as c:
+        c.execute("""
+            do $$
+            declare t text;
+            begin
+              foreach t in array array['download_jobs', 'album_photos', 'photo_places',
+                                       'person_name_variants', 'place_aliases'] loop
+                if to_regclass('public.' || t) is not null then
+                  execute format('truncate table public.%I cascade', t);
+                end if;
+              end loop;
+            end
+            $$;
+        """)
+
     # Desktop side: public, no floor.
     for step in (["down", "0"], ["up"]):
         r = subprocess.run(MIGRATE + step, cwd=str(SHARED), capture_output=True, text=True,
@@ -292,5 +311,111 @@ def test_web_origin_ids_round_trip(two_sided):
 
         status = client.status()
         assert status["id_floor"]["ok"] is True
+    finally:
+        pdb.close_pool()
+
+
+def test_albums_round_trip(two_sided):
+    """Phase 12, verification 5 in miniature, through the real server.
+
+    A web-born album (create, add three, re-order, rename, remove one)
+    lands on the laptop through `pull_web_origin` and is read-only there;
+    a desktop-born album renamed on the laptop reaches the site; a web
+    rename / removal / re-order of that desktop-born album comes down
+    through `pull_web_edits` and survives the push that follows."""
+    from photoarchive import db as pdb
+    from photoarchive.id_ranges import WEB_ID_FLOOR
+    from photoarchive.modes.corrections import albums as albums_repo
+    from photoarchive.modes.sync.client import WebSyncClient
+    from photoarchive.modes.sync.push import push
+
+    base = two_sided["url"]
+    tmp = two_sided["tmp"] / "albums"
+    working_dir, thumbs_dir, state_dir = tmp / "working", tmp / "thumbs", tmp / "sync-state"
+    working_dir.mkdir(parents=True)
+    thumbs_dir.mkdir()
+    client = WebSyncClient(base, "test-service-token")
+
+    with _desk_conn() as c:
+        ids = [c.execute(
+            """insert into photos (sha256, mime, source_root, source_folder, source_filename,
+                                   triage_status, file_version, width, height)
+               values (%s, 'image/jpeg', 'photos', 'f', %s, 'keep', 1, 800, 600) returning id""",
+            (f"sha-album-{i}", f"al{i}.jpg")).fetchone()[0] for i in range(3)]
+        a6 = c.execute("insert into albums (name, source) values ('Album 6', 'import') returning id").fetchone()[0]
+        for pos, pid in enumerate(ids[:2], start=1):
+            c.execute("insert into album_photos (album_id, photo_id, position) values (%s, %s, %s)", (a6, pid, pos))
+    assert a6 < WEB_ID_FLOOR
+
+    def do_push():
+        return push(client, working_dir=working_dir, thumbs_dir=thumbs_dir, state_dir=state_dir,
+                    files_only_for_grouped=True, allow_shared_db=True)
+
+    pdb.close_pool()
+
+    class _S:
+        DATABASE_URL = TEST_DATABASE_URL
+    pdb.init_pool(_S(), min_size=1, max_size=3)  # type: ignore[arg-type]
+    try:
+        do_push()
+        with _web_conn() as w:
+            admin = w.execute(
+                """insert into users (email, role, status) values ('admin@example.com', 'admin', 'active')
+                   on conflict (email) do update set role = 'admin' returning id""").fetchone()[0]
+            s = _login(base, w, admin)
+
+        # ---- a web-born album ------------------------------------------
+        r = s.post(f"{base}/albums", data={"name": "Reunion"}, allow_redirects=False)
+        assert r.status_code == 303, r.text[:200]
+        web_album = int(r.headers["Location"].rsplit("/", 1)[1])
+        assert web_album >= WEB_ID_FLOOR
+        for pid in ids:
+            assert s.post(f"{base}/photos/{pid}/albums", data={"album_id": web_album},
+                          allow_redirects=False).status_code == 303
+        s.post(f"{base}/albums/{web_album}/photos/{ids[2]}/move", data={"dir": "up"}, allow_redirects=False)
+        s.post(f"{base}/albums/{web_album}/edit", data={"name": "Reunion 2026"}, allow_redirects=False)
+        do_push()
+
+        def desk_order(album_id):
+            with _desk_conn() as c:
+                return [r[0] for r in c.execute(
+                    """select photo_id from album_photos where album_id = %s and is_deleted = false
+                        order by position""", (album_id,)).fetchall()]
+
+        with _desk_conn() as c:
+            assert c.execute("select name from albums where id = %s", (web_album,)).fetchone()[0] == "Reunion 2026"
+        assert desk_order(web_album) == [ids[0], ids[2], ids[1]]
+
+        s.post(f"{base}/albums/{web_album}/photos/{ids[0]}/remove", data={}, allow_redirects=False)
+        do_push()
+        assert desk_order(web_album) == [ids[2], ids[1]], "a web removal reaches the laptop"
+
+        # Read-only on the laptop.
+        with _desk_conn() as c:
+            assert albums_repo.update_album(c, web_album, name="Desk rename") is False
+            assert albums_repo.set_photo_in_album(c, web_album, ids[0], True) is False
+            assert c.execute("select name from albums where id = %s", (web_album,)).fetchone()[0] == "Reunion 2026"
+
+        # ---- a desktop-born album, edited on both sides ------------------
+        with _desk_conn() as c:
+            assert albums_repo.update_album(c, a6, name="Album 6 — Clay family") is True
+        do_push()
+        with _web_conn() as w:
+            assert w.execute("select name from albums where id = %s", (a6,)).fetchone()[0] == "Album 6 — Clay family"
+
+        s.post(f"{base}/albums/{a6}/edit", data={"name": "Album Six"}, allow_redirects=False)
+        s.post(f"{base}/albums/{a6}/photos/{ids[1]}/move", data={"dir": "up"}, allow_redirects=False)
+        s.post(f"{base}/photos/{ids[2]}/albums", data={"album_id": a6}, allow_redirects=False)
+        s.post(f"{base}/albums/{a6}/photos/{ids[0]}/remove", data={}, allow_redirects=False)
+        do_push()
+        with _desk_conn() as c:
+            assert c.execute("select name from albums where id = %s", (a6,)).fetchone()[0] == "Album Six"
+        assert desk_order(a6) == [ids[1], ids[2]]
+        with _web_conn() as w:
+            assert w.execute("select name from albums where id = %s", (a6,)).fetchone()[0] == "Album Six"
+            web_rows = w.execute(
+                """select photo_id from album_photos where album_id = %s and is_deleted = false
+                    order by position""", (a6,)).fetchall()
+            assert [r[0] for r in web_rows] == [ids[1], ids[2]], "the push that followed kept the web's edits"
     finally:
         pdb.close_pool()
