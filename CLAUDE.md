@@ -1024,6 +1024,18 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   neither list the folder nor read its files, so George could not open
   his own upload. An elevated process goes straight through these
   denies, so `test_contrib_pull_acl.py` asserts the ACL entries.
+- **A contributed photo is filed where it was approved** (2026-11-05).
+  The web can't do it — there is no `photos` row until the desktop
+  ingests one — so ingest reads the batch's `manifest.json`
+  (`files[].approved_group_ids`; the file is `<file id>.<ext>`) and
+  writes `photo_groups` with a `photo_group.contribution` audit row
+  (`modes/ingest/contrib_groups.py`). Before this the first four
+  uploads came in unfiled: admin-only, and the push sent no bytes for
+  them. Ingest also skips a contrib root's `_incoming/` — a staged batch
+  isn't committed, and the next pull moves it out from under
+  `master_path`. `python -m photoarchive.tools.contrib_groups [--apply]`
+  files anything ingested unfiled (no `photo_groups` row at all — a
+  removed row is a decision and is left alone).
 - **Web `PHOTO_DIR` on the laptop must differ from desktop `WORKING_DIR`**
   — if the same path, a push copies files onto themselves.
 - **Two facts writers set directly, no promotion needed** (repeated
@@ -1586,6 +1598,8 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
 - `python -m photoarchive.tools.export_archive --to DIR [--masters] [--people]
   [--chunk N]` — Phase 12 full export (images tree, backs, masters, pg_dump,
   CSVs, the web's own tables); resumable.
+- `python -m photoarchive.tools.contrib_groups [--apply]` — file contributed
+  photos ingested unfiled into their approved groups; push afterwards.
 - `python -m photoarchive.tools.check_working_files [--dry-run]` — working-file
   integrity (now `_versions/`-aware; see Cleanup).
 - `python -m photoarchive.tools.repair_face_boxes`,

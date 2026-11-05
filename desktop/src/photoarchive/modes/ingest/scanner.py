@@ -52,8 +52,13 @@ def walk_root(root: MasterRoot) -> Iterator[ScannedFile]:
         return
     # Group by directory so scan_sequence is assigned per-folder.
     by_folder: dict[Path, list[str]] = defaultdict(list)
-    for dirpath, _, filenames in os.walk(root.path):
+    for dirpath, dirnames, filenames in os.walk(root.path):
         d = Path(dirpath)
+        # A contrib root's `_incoming/` is the pull's staging area: a batch
+        # there is not committed yet and the next pull moves it, so a photo
+        # ingested from it would keep a master_path that no longer exists.
+        if root.kind == "contrib" and d == root.path and "_incoming" in dirnames:
+            dirnames.remove("_incoming")
         for name in filenames:
             if name.startswith("._photoarchive_write_probe"):
                 continue

@@ -17,7 +17,7 @@ from ... import db
 from ...config import MasterRoot, Settings
 from ...workers import CancelToken, Cancelled
 from ..dates import rules as date_rules
-from . import back_detect, paths, staging
+from . import back_detect, contrib_groups, paths, staging
 from .exif import ExifData, read_exif
 from .guard import GuardResult, remediation_message, run_masters_guard
 from .hasher import perceptual_hashes, sha256_file
@@ -500,6 +500,9 @@ def _record_folder_hints(conn, *, root, f, photo_id, has_exif: bool) -> None:
                         "evidence": f"export folder _{year:04d}-{month:02d}",
                     },
                 )
+    elif root.kind == "contrib":
+        cid, group_ids = contrib_groups.approved_groups(root.path, f.source_folder, f.source_filename)
+        contrib_groups.apply_groups(conn, photo_id, group_ids, contribution_id=cid)
     elif root.kind == "scan":
         top = f.source_folder.split("/", 1)[0] if f.source_folder else ""
         if top and not is_batch_folder(top):
