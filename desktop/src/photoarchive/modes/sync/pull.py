@@ -907,10 +907,10 @@ class ContribLockError(RuntimeError):
 
 ROOT_DENY = "(WD,DC)"                  # contrib root: no new files, no deletes
 UPLOADER_DENY = "(WD,DC)"              # <uploader>/: later batches may still arrive
-# <uploader>/<cid>/: D:\Photos's deny plus D. DC on a folder stops deletes
-# made through it, but each file's own inherited Modify still grants DELETE,
-# so without D a committed upload could simply be deleted.
-COMMITTED_DENY = "(OI)(CI)(WD,AD,DC,D)"
+# <uploader>/<cid>/: exactly D:\Photos's deny. Never add D (delete): on
+# 2026-11-04 it locked George out of his own upload — a non-elevated process
+# could neither list the folder nor read its files, only an admin could.
+COMMITTED_DENY = "(OI)(CI)(WD,AD,DC)"
 
 
 def _deny_cmd(path: Path, rights: str) -> list[str]:

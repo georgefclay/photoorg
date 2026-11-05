@@ -82,14 +82,15 @@ def test_pull_into_a_locked_root_commits_and_locks(contrib_root):
     assert not _try_write(target)
     with pytest.raises(PermissionError):
         (target / "1.jpg").write_bytes(b"changed")
-    # Deletes can't be tried here: an elevated process (how this suite often
-    # runs) deletes straight through a deny. So check the deny itself is on
-    # the folder and inherited by every file.
+    # The deny is D:\Photos's, on the folder and inherited by every file —
+    # and never D (delete), which stopped a non-admin reading the folder at all.
     for path in (target, target / "1.jpg", target / "manifest.json"):
         acl = _icacls(path).stdout
-        mine = [ln for ln in acl.splitlines() if f"\{USER}:" in ln and "(DENY)" in ln]
-        assert mine, acl
-        assert "(DENY)(D,WD,AD,DC)" in mine[0], mine[0]
+        mine = [ln for ln in acl.splitlines() if f"\\{USER}:" in ln and "(DENY)" in ln]
+        assert len(mine) == 1, acl
+        assert "(DENY)(S,WD,AD,DC)" in mine[0], mine[0]
+    # Inheritance stays on: the parent's read entries must still be there.
+    assert ":(I)" in _icacls(target).stdout
     # And the masters guard — what ingest actually checks — agrees.
     guard = run_masters_guard([MasterRoot(label="contrib", path=contrib_root, kind="contrib")])
     assert guard.all_read_only, remediation_message(guard)
