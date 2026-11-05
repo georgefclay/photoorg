@@ -284,6 +284,37 @@ test('background job: child process builds the zip, the API keeps answering, ema
   await new Promise((r) => setTimeout(r, 300));
 });
 
+test('DOWNLOAD_DIR puts zips on another disk; the worker and the guard follow it', async () => {
+  // The VM keeps photos on their own 40 GB volume and builds zips on the
+  // root disk, which has room for an "everything" zip.
+  const elsewhere = fs.mkdtempSync(path.join(require('os').tmpdir(), 'photoarchive-test-zips-'));
+  process.env.DOWNLOAD_DIR = elsewhere;
+  try {
+    assert.equal(dl.downloadsDir(), elsewhere);
+    assert.ok(dl.diskCheck(1).free > 0);
+    const a = await agentFor(app, w.admin);
+    const post = await a.post('/download').type('form').send({ _csrf: a.csrf, kind: 'everything' });
+    assert.equal(post.status, 303);
+    const jobId = Number(post.headers.location.split('/').pop());
+    fs.writeFileSync(path.join(HOLDS, `hold-${jobId}`), '');
+    const job = await waitFor(async () => {
+      const r = (await pool.query(`select * from download_jobs where id = $1`, [jobId])).rows[0];
+      return r.status === 'done' || r.status === 'failed' ? r : null;
+    });
+    assert.equal(job.status, 'done', job.error);
+    assert.equal(path.dirname(job.zip_path), elsewhere, 'the child process built it in DOWNLOAD_DIR');
+    assert.ok(fs.existsSync(job.zip_path));
+    assert.ok(!fs.existsSync(path.join(PHOTO_DIR, 'downloads', `${jobId}.zip`)));
+    const fetched = await a.get(`/downloads/${jobId}/file`).buffer(true).parse(binary);
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.body.length, Number(job.zip_bytes));
+    await new Promise((r) => setTimeout(r, 300));
+  } finally {
+    delete process.env.DOWNLOAD_DIR;
+    fs.rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
 test('one queued-or-running job per user; admins exempt', async () => {
   const realKick = dl.kick;
   dl.kick = async () => null; // keep the jobs queued

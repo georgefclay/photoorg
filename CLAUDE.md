@@ -1372,7 +1372,9 @@ through an interpolation is a blind spot, not a pass.
   file itself under its zip name. *Background* — anything larger, and
   "everything I can see" always: a `download_jobs` row, built by `node
   tools/zip-worker.js <id>` (a child process, **one at a time**, claimed
-  under an advisory lock) into `PHOTO_DIR/downloads/<id>.zip` via a
+  under an advisory lock) into `DOWNLOAD_DIR/<id>.zip` (default
+  `PHOTO_DIR/downloads`; on the VM the root disk, since the photos have
+  their own 40 GB volume) via a
   `.part`, then a Postmark "ready" (or "failed", with the one-line reason)
   email linking `/downloads/:id`. **One queued-or-running job per user**,
   admins exempt. `expires_at = now() + interval '72 hours'` at finish, in
@@ -1382,7 +1384,7 @@ through an interpolation is a blind spot, not a pass.
   locator and adds **no bytes** (answer Q0) — it can never trip the guard.
   Backs are never in a zip; their text is in the front's description.
 - **Disk guard before a job exists**: refuse when `bytes × 1.1 + 5 GB`
-  exceeds free space on `PHOTO_DIR`'s volume, with a plain sentence to
+  exceeds free space on `DOWNLOAD_DIR`'s volume, with a plain sentence to
   pick a smaller selection (admins also see the numbers) — a 200 page.
 - **The tree** is `services/zip-tree.js`, ported once to
   `desktop/src/photoarchive/export_tree.py`, **both tested against

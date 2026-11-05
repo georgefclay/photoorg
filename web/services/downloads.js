@@ -55,7 +55,11 @@ function photoDir() {
   if (!dir) throw new Error('PHOTO_DIR not configured');
   return dir;
 }
-function downloadsDir() { return path.join(photoDir(), 'downloads'); }
+// DOWNLOAD_DIR may sit on another disk from PHOTO_DIR: on the VM the photos
+// have their own 40 GB volume and zips are built on the root disk, which has
+// the room for an "everything" zip. diskCheck measures this directory's own
+// volume, so the guard follows it.
+function downloadsDir() { return process.env.DOWNLOAD_DIR || path.join(photoDir(), 'downloads'); }
 function zipPathFor(jobId) { return path.join(downloadsDir(), `${jobId}.zip`); }
 
 function toInt(v) {
