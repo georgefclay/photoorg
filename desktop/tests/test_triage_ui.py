@@ -267,6 +267,46 @@ def test_empty_untriaged_filter_shows_helpful_message(monkeypatch, tmp_path):
     db.close_pool()
 
 
+def test_coming_back_to_triage_shows_photos_added_meanwhile(monkeypatch, tmp_path):
+    """2026-11-04: four uploads were ingested while the app was open and
+    Triage still said "There are no untriaged photos left" — the panel
+    loaded once at start. Switch modes the way MainWindow does (a
+    QStackedWidget page change) and the new photos must be there."""
+    from PySide6.QtWidgets import QStackedWidget, QWidget
+    from photoarchive.modes.triage import ui as triage_ui
+
+    _app()
+    settings = _test_settings(tmp_path, TEST_DATABASE_URL)
+    _init_pool(TEST_DATABASE_URL, settings)
+    pids = _reset_and_seed(TEST_DATABASE_URL, settings, n=3)
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        conn.execute("update photos set triage_status = 'keep' where id = any(%s)", (pids,))
+
+    monkeypatch.setattr(triage_ui, "load_config", lambda: settings)
+    stack = QStackedWidget()
+    panel = triage_ui.TriagePanel()
+    other = QWidget()
+    stack.addWidget(panel)
+    stack.addWidget(other)
+    stack.resize(900, 600)
+    stack.show()
+    _pump(150)
+    assert panel._grid_model.rowCount() == 0
+    assert "no untriaged photos left" in panel._empty_state.text()
+
+    stack.setCurrentWidget(other)  # e.g. off to Sync to pull and ingest
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        conn.execute("update photos set triage_status = 'untriaged' where id = %s", (pids[0],))
+    stack.setCurrentWidget(panel)
+    _pump(150)
+
+    assert panel._grid_model.rowCount() == 1
+    assert panel._grid_stack.currentIndex() == 0
+
+    stack.close()
+    db.close_pool()
+
+
 def test_decision_under_non_untriaged_filter_leaves_item_in_place(
     monkeypatch, tmp_path,
 ):

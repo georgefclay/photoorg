@@ -939,6 +939,22 @@ class TriagePanel(QWidget):
             self._presort_btn.setText("Compute hints  (all up to date)")
             self._presort_btn.setEnabled(True)  # allow re-run for burst pass
 
+    def showEvent(self, event) -> None:
+        # The panel is built at app start and outlives everything that adds
+        # photos (ingest, a contributions pull), so coming back to it must
+        # re-query: on 2026-11-04 four freshly ingested uploads sat behind a
+        # stale "There are no untriaged photos left". The first show is the
+        # constructor's own load.
+        super().showEvent(event)
+        if event.spontaneous():
+            return  # window restored from minimise: nothing new
+        if getattr(self, "_shown_once", False):
+            self._populate_filter_options()
+            self._refresh_pending_count()
+            self._refresh_rows()
+            self._refresh_presort_button()
+        self._shown_once = True
+
     def _on_filter_changed(self) -> None:
         self._refresh_rows()
 
