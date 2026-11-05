@@ -1012,8 +1012,15 @@ prompts (add answers to the prompt file's `## Answers` section, wait for "go").
   `_incoming/` when probing subfolders. The pull writer snapshots
   the committed area, streams files into `_incoming/<cid>/`,
   verifies the snapshot didn't change, then renames to
-  `<uploader>/<cid>/` and calls
-  `POST /sync/pull/contributions/:id/pulled`.
+  `<uploader>/<cid>/`, **locks it** (`pull.lock_committed`:
+  `<uploader>/` deny `(WD,DC)`, `<uploader>/<cid>/` deny
+  `(OI)(CI)(WD,AD,DC,D)`, proved with the guard's own probe) and only
+  then calls `POST /sync/pull/contributions/:id/pulled`. The root's
+  deny is `(WD,DC)` — **never `AD`**, which refuses every new
+  uploader's folder (the first real pull failed that way, 2026-11-04;
+  no test had pulled into a locked root). An elevated process goes
+  straight through these denies, so `test_contrib_pull_acl.py`
+  asserts the ACL entries rather than attempting deletes.
 - **Web `PHOTO_DIR` on the laptop must differ from desktop `WORKING_DIR`**
   — if the same path, a push copies files onto themselves.
 - **Two facts writers set directly, no promotion needed** (repeated

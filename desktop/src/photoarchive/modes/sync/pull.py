@@ -12,13 +12,20 @@
       with `triage_status` pre-set to `keep` and provenance
       `uploaded_by`.
 
-The append-only invariant is enforced by two things:
+The append-only invariant is enforced by three things:
   - the masters guard, which for kind='contrib' roots requires the
-    root itself + every committed subfolder to be read-only, and only
-    `<root>/_incoming/<contribution_id>/` may be created;
+    root itself + every committed subfolder to be read-only (no new
+    files), and skips `_incoming/`;
   - the pull writer, which stages files under `_incoming` first and
     then renames to `<root>/<uploader>/<contribution_id>/` only after
-    a manifest confirms nothing existing changed.
+    a manifest confirms nothing existing changed;
+  - `lock_committed`, which denies the current user writes on what the
+    rename just committed, before the web is told it was pulled.
+
+The root's own deny is `(WD,DC)` — no new files, no deletes — and NOT
+`AD`: a new uploader's folder is a new subfolder of the root, so a root
+that also denied AD refused every first upload from anyone ("Access is
+denied: D:\\Contributed\\<uploader>", the first real pull, 2026-11-04).
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +47,7 @@ from psycopg.rows import dict_row
 from ... import db
 from ...id_ranges import is_web_origin
 from ..dates import repo as date_repo
+from ..ingest.guard import _try_write
 from ..ingest.paths import resolve_working_path
 from .client import WebSyncClient
 
@@ -891,6 +901,54 @@ def _uploader_folder(uploader_email: str | None, uploader_display: str | None) -
     return safe or "unknown"
 
 
+class ContribLockError(RuntimeError):
+    """A committed contribution folder could not be made read-only."""
+
+
+ROOT_DENY = "(WD,DC)"                  # contrib root: no new files, no deletes
+UPLOADER_DENY = "(WD,DC)"              # <uploader>/: later batches may still arrive
+# <uploader>/<cid>/: D:\Photos's deny plus D. DC on a folder stops deletes
+# made through it, but each file's own inherited Modify still grants DELETE,
+# so without D a committed upload could simply be deleted.
+COMMITTED_DENY = "(OI)(CI)(WD,AD,DC,D)"
+
+
+def _deny_cmd(path: Path, rights: str) -> list[str]:
+    return ["icacls", str(path), "/deny", f"{os.environ.get('USERNAME', '%USERNAME%')}:{rights}"]
+
+
+def lock_committed(uploader_dir: Path, target: Path) -> None:
+    """Deny the current user writes on a just-committed contribution, then
+    prove it with the masters guard's own probe. Windows only — elsewhere
+    the contrib root is not locked by ACLs and this is a no-op."""
+    if sys.platform != "win32":
+        return
+    for path, rights in ((uploader_dir, UPLOADER_DENY), (target, COMMITTED_DENY)):
+        cmd = _deny_cmd(path, rights)
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise ContribLockError(
+                f"Could not lock {path}: {(res.stderr or res.stdout).strip()}\n"
+                f"Run: {subprocess.list2cmdline(cmd)}")
+    for path in (uploader_dir, target):
+        if _try_write(path):
+            raise ContribLockError(
+                f"{path} is still writable after icacls. Run: "
+                f"{subprocess.list2cmdline(_deny_cmd(path, COMMITTED_DENY if path == target else UPLOADER_DENY))}")
+
+
+def _root_fix_message(contrib_root: Path) -> str:
+    user = os.environ.get("USERNAME", "%USERNAME%")
+    return (
+        f"Can't create a folder in {contrib_root}: its deny still includes AD "
+        f"(no new folders), so a new uploader's folder can never be made. Change "
+        f"it to {ROOT_DENY} — no new files, no deletes — and pull again:\n"
+        f'  icacls "{contrib_root}" /remove:d {user}\n'
+        f'  icacls "{contrib_root}" /deny "{user}:{ROOT_DENY}"\n'
+        f"The files already fetched are safe under _incoming/ and the web still "
+        f"lists the contribution as not pulled.")
+
+
 def pull_contributions(
     client: WebSyncClient,
     contrib_root: Path,
@@ -948,7 +1006,10 @@ def pull_contributions(
 
         # Rename staged/<cid> → <root>/<uploader>/<cid>
         target = contrib_root / _uploader_folder(c.get("user_email"), c.get("user_display_name")) / str(cid)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError as e:
+            raise ContribLockError(_root_fix_message(contrib_root)) from e
         if target.exists():
             # A retry of an already-pulled contribution — allow it if the
             # existing folder is the same set of files.
@@ -961,6 +1022,10 @@ def pull_contributions(
             staged.rmdir()
         else:
             shutil.move(str(staged), str(target))
+
+        # Read-only before the web hears it was pulled: a lock failure
+        # leaves it un-pulled, so the next pull retries the lock.
+        lock_committed(target.parent, target)
 
         # Tell the web the contribution is pulled.
         client.mark_contribution_pulled(cid)

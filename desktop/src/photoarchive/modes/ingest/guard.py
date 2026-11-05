@@ -22,6 +22,7 @@ class RootGuardResult:
     sub_writable: bool
     sub_path: Path | None
     error: str | None = None
+    kind: str = "digital"
 
     @property
     def writable(self) -> bool:
@@ -90,7 +91,8 @@ def run_masters_guard(roots: Sequence[MasterRoot]) -> GuardResult:
 
 def _probe_root(root: MasterRoot) -> RootGuardResult:
     r = RootGuardResult(label=root.label, path=root.path,
-                        root_writable=False, sub_writable=False, sub_path=None)
+                        root_writable=False, sub_writable=False, sub_path=None,
+                        kind=root.kind)
     if not root.path.exists() or not root.path.is_dir():
         r.error = f"Root does not exist or is not a directory: {root.path}"
         return r
@@ -155,6 +157,14 @@ def remediation_message(result: GuardResult) -> str:
             "",
         ]
         for r in writable:
+            if r.kind == "contrib":
+                # Never inherited, and never AD on the root: the pull must
+                # still create `_incoming/<cid>/` and a new uploader's folder.
+                if r.root_writable:
+                    lines.append(f'  icacls "{r.path}" /deny "%USERNAME%:(WD,DC)"')
+                if r.sub_writable and r.sub_path is not None:
+                    lines.append(f'  icacls "{r.sub_path}" /deny "%USERNAME%:(WD,DC)"')
+                continue
             cmd = f'icacls "{r.path}" /deny "%USERNAME%:(OI)(CI)(WD,AD,DC)"'
             lines.append(f"  {cmd}")
         lines += [
