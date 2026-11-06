@@ -537,3 +537,80 @@ trims the AI text first.
 This fix-up is pre-approved — **GO** — but if anything above does not match
 the code's reality, append your questions under `### Questions (fix-up 2)`
 here and stop instead.
+
+## Phase 13 fix-up 3 — the caption a person actually sees (2026-11-06)
+
+George checked a photo's Properties in Windows and the verdict was blunt: the
+metadata is not stored in any way that is useful to a person looking at it.
+He is right, twice over. Explorer's Title / Subject / Comments boxes read the
+Microsoft `XP*` EXIF fields, which we have never written, and the standards
+caption we do write leads with bookkeeping (`Albums:` / `People:` / `Date:`)
+so the one readable sentence is buried fourth. Two changes, one rewrite.
+Read the Phase 13 sections of `CLAUDE.md` (Embedded metadata) and
+`modes/metadata/payload.py` / `exiftool.py`. Work in `desktop/`. Start with
+`git pull`. **Run before George's next push and before the group
+bulk-assignment** — the payload change rewrites every file, which is ~40
+minutes and a 143-file re-push now, versus a ~30 GB re-upload later.
+
+### A. The Windows set (new owned tags: `IFD0:XPTitle`, `IFD0:XPSubject`, `IFD0:XPComment`)
+George approved this box-by-box mapping:
+- **Title** (`XPTitle`, and `XMP-dc:Title` with the same value): the photo's
+  live album names joined with `; `; a scan with no album gets its physical
+  locator (`Batch 00020 #32`); a digital photo with no album gets no title —
+  an empty box beats noise.
+- **Subject** (`XPSubject`): the AI description sentence, plain.
+- **Comments** (`XPComment`): the human notes — back-of-print lines (with the
+  unverified marker where it applies) and the partial-date note
+  (`Date: about 1962`); empty when there are none.
+The `XP*` trio joins the owned tags (replaced wholesale, UTF-16 — exiftool
+handles the encoding). The dry-run census must report pre-existing `XP*`
+values the same way the Phase 13 census reported the standards fields, before
+anything is overwritten (working copies only; masters untouched as ever).
+
+### B. The standards caption, reordered (same fields as today)
+New fixed order — the sentence leads, bookkeeping follows:
+1. the AI description sentence with an ` (AI-generated)` suffix (the
+   `AI-generated description: ` prefix goes away);
+2. `Back of print: ` lines as today;
+3. the partial-date note;
+4. `People: ` line;
+5. `Albums: ` line.
+PM call, George can override: the caption keeps all the lines (reordered)
+rather than dropping People/Albums, because downloaded copies land in unknown
+tools and the caption is the lowest common denominator; the burying problem
+is fixed by the order. The 2,000-character cap and "AI text trimmed first"
+rule stay. **Albums additionally join the keywords** (`XMP-dc:Subject`,
+`IPTC:Keywords`) next to the people names, so Windows Tags and any DAM can
+filter by event.
+
+### C. Mechanics
+Bump `PAYLOAD_VERSION` — every photo's hash changes and the next run rewrites
+the archive by design. Chunked, memory-safe, resumable, idempotent (second
+run 0 due), audited, `exiftool -m` past faulty XMP as before.
+
+### Tests
+Title from albums, locator fallback for scans, empty for album-less digital;
+dc:Title matches XPTitle; Subject carries the plain sentence; Comments carry
+back lines + date note and are absent when empty; caption order is
+sentence-first with the ` (AI-generated)` suffix; albums appear in keywords
+beside people; the cap still trims the AI text first; XP* values survive an
+exiftool read-back as UTF-16; payload hash changes exactly once per photo
+(idempotence).
+
+### Verification, then stop
+1. `pytest` green.
+2. Dry-run census over the whole scope: counts, and the pre-existing `XP*`
+   values report.
+3. The full write: files written / skipped / failed and elapsed; second run
+   0 due; `check_working_files --dry-run` clean.
+4. Tell George which three photos to check in Explorer Properties: one scan
+   with a back and an album, one scan with neither, one digital photo — he
+   confirms Title / Subject / Comments / Tags read right. Paste the exiftool
+   dump of one of them.
+5. No VM deploy (desktop-only). `CLAUDE.md` (the Embedded-metadata tag table
+   and caption order), `PROJECT-PLAN.md` (Progress entry), commit:
+   `Phase 13 fix-up 3: Windows fields and sentence-first caption`.
+
+This fix-up is pre-approved — **GO** — but if anything above does not match
+the code's reality, append questions under `### Questions (fix-up 3)` here
+and stop instead.

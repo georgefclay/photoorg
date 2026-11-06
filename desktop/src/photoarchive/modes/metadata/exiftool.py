@@ -44,6 +44,13 @@ CONFIG_PATH = Path(__file__).with_name("photoarchive.config")
 
 DESCRIPTION_TAGS = ("XMP-dc:Description", "IPTC:Caption-Abstract", "IFD0:ImageDescription")
 KEYWORD_TAGS = ("XMP-dc:Subject", "IPTC:Keywords")
+# Explorer's Title / Subject / Comments boxes (fix-up 3). They read the
+# Microsoft XP* fields first — UTF-16 in IFD0, exiftool converts — so each
+# box shows one plain thing even though ImageDescription carries the caption.
+# `XMP-dc:Title` holds the same title for every other tool.
+TITLE_TAGS = ("IFD0:XPTitle", "XMP-dc:Title")
+SUBJECT_TAG = "IFD0:XPSubject"
+COMMENT_TAG = "IFD0:XPComment"
 PERSON_TAG = "XMP-iptcExt:PersonInImage"
 MWG_TAG = "XMP-mwg-rs:RegionInfo"
 MP_TAG = "XMP-MP:RegionInfoMP"
@@ -61,16 +68,23 @@ ARCHIVE_TAGS = {
     "source_filename": "XMP-photoarchive:SourceFilename",
 }
 HASH_TAG = "XMP-photoarchive:PayloadHash"
+VERSION_TAG = "XMP-photoarchive:PayloadVersion"
 WROTE_EXIF_TAG = "XMP-photoarchive:WroteExif"
+
+# Tags the archive took ownership of in a later payload version: a file
+# written before that version may hold someone else's value in them (a
+# camera's XPTitle, a Lightroom dc:title), which the census must still list.
+OWNED_SINCE: dict[str, int] = {t: 2 for t in (*TITLE_TAGS, SUBJECT_TAG, COMMENT_TAG)}
 
 EXIF_DATE_TAG = "ExifIFD:DateTimeOriginal"
 GPS_TAGS = ("GPS:GPSLatitude", "GPS:GPSLatitudeRef", "GPS:GPSLongitude", "GPS:GPSLongitudeRef")
 
 OWNED_TAGS: tuple[str, ...] = (
-    *DESCRIPTION_TAGS, *KEYWORD_TAGS, PERSON_TAG, MWG_TAG, MP_TAG,
+    *DESCRIPTION_TAGS, *KEYWORD_TAGS, *TITLE_TAGS, SUBJECT_TAG, COMMENT_TAG,
+    PERSON_TAG, MWG_TAG, MP_TAG,
     *DATE_TAGS, LOCATION_TAG,
     *(t for pair in CITY_TAGS.values() for t in pair),
-    *ARCHIVE_TAGS.values(), HASH_TAG, WROTE_EXIF_TAG,
+    *ARCHIVE_TAGS.values(), HASH_TAG, VERSION_TAG, WROTE_EXIF_TAG,
 )
 # Read alongside the owned tags: the camera fields we may add to, and the
 # marker that tells ours from the camera's.
@@ -249,6 +263,10 @@ def desired_tags(
     desc = payload.get("description")
     for tag in DESCRIPTION_TAGS:
         t[tag] = desc
+    for tag in TITLE_TAGS:
+        t[tag] = payload.get("title")
+    t[SUBJECT_TAG] = payload.get("subject")
+    t[COMMENT_TAG] = payload.get("comment")
 
     for tag in KEYWORD_TAGS:
         t[tag] = list(payload.get("keywords") or []) or None
@@ -300,6 +318,7 @@ def desired_tags(
         v = payload.get(key)
         t[tag] = None if v is None else str(v)
     t[HASH_TAG] = payload_hash
+    t[VERSION_TAG] = str(payload.get("v")) if payload.get("v") is not None else None
 
     # The two camera fields: only where the camera left none, or where we
     # wrote them last time.
@@ -353,12 +372,12 @@ def struct_string(v: Any) -> str:
 _STRUCT_TAGS = {MWG_TAG, MP_TAG, LOCATION_TAG}
 
 
-def write_args(tags: dict[str, Any], *, text_file: Path | None) -> list[str]:
+def write_args(tags: dict[str, Any], *, text_files: dict[str, Path] | None) -> list[str]:
     """exiftool arguments for `desired_tags`' output.
 
-    A value with a newline is read from `text_file` (`-TAG<=file`); the
-    caller writes it there first (`multiline_value`). Every other value is
-    one argument.
+    A value with a newline is read from its file (`-TAG<=file`):
+    `text_files` maps each distinct multi-line value (`multiline_values`) to
+    the file the caller wrote it to. Every other value is one argument.
     """
     args: list[str] = []
     iptc_values = False
@@ -373,9 +392,10 @@ def write_args(tags: dict[str, Any], *, text_file: Path | None) -> list[str]:
         elif isinstance(v, list):
             args.extend(f"-{tag}={x}" for x in v)
         elif isinstance(v, str) and ("\n" in v or "\r" in v):
-            if text_file is None:
+            path = (text_files or {}).get(v)
+            if path is None:
                 raise ValueError(f"{tag} has a multi-line value and no text file")
-            args.append(f"-{tag}<={text_file}")
+            args.append(f"-{tag}<={path}")
         else:
             args.append(f"-{tag}={v}")
     if iptc_values:
@@ -383,13 +403,11 @@ def write_args(tags: dict[str, Any], *, text_file: Path | None) -> list[str]:
     return args
 
 
-def multiline_value(tags: dict[str, Any]) -> str | None:
-    """The one multi-line value (the description), if any. Every tag that
-    carries it carries the same text, so one file serves them all."""
-    vals = {v for v in tags.values() if isinstance(v, str) and "\n" in v}
-    if len(vals) > 1:
-        raise ValueError("more than one distinct multi-line value")
-    return next(iter(vals), None)
+def multiline_values(tags: dict[str, Any]) -> list[str]:
+    """The distinct multi-line values (the caption; since fix-up 3 the
+    Comments notes too), in a stable order. Tags carrying the same text
+    share one file."""
+    return sorted({v for v in tags.values() if isinstance(v, str) and "\n" in v})
 
 
 # --------------------------------------------------------------------------
@@ -456,12 +474,19 @@ def foreign_values(current: dict[str, Any]) -> dict[str, Any]:
 
     A file the writer has never touched (no `PayloadHash`) — every non-empty
     owned tag is someone else's: a camera's caption, Picasa keywords, a
-    Lightroom face region. Once we have written, the owned tags are ours.
+    Lightroom face region. Once we have written, the owned tags are ours —
+    except those we took over in a later payload version (`OWNED_SINCE`),
+    which stay someone else's until a write at that version.
     """
-    if current.get(HASH_TAG):
-        return {}
-    return {tag: current[tag] for tag in OWNED_TAGS
-            if _norm(current.get(tag)) is not None}
+    if not current.get(HASH_TAG):
+        return {tag: current[tag] for tag in OWNED_TAGS
+                if _norm(current.get(tag)) is not None}
+    try:
+        written_at = int(str(current.get(VERSION_TAG) or "1").strip())
+    except ValueError:
+        written_at = 1
+    return {tag: current[tag] for tag, since in OWNED_SINCE.items()
+            if written_at < since and _norm(current.get(tag)) is not None}
 
 
 def named_regions(current: dict[str, Any]) -> list[str]:

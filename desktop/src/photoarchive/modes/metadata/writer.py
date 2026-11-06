@@ -208,7 +208,10 @@ def write_one(
 
     ext = src.suffix.lstrip(".").lower()
     tmp = assert_working_target(settings, tmp_dir(settings) / f"{pid}.{ext}")
-    text_file = assert_working_target(settings, tmp_dir(settings) / f"{pid}.description.txt")
+    text_files: dict[str, Path] = {
+        text: assert_working_target(settings, tmp_dir(settings) / f"{pid}.text{i}.txt")
+        for i, text in enumerate(et_mod.multiline_values(desired), start=1)
+    }
     version_target = assert_working_target(
         settings, cpaths.version_path(settings, pid, cand.file_version, ext))
     if version_target.exists():
@@ -220,12 +223,11 @@ def write_one(
     if tmp.exists():
         tmp.unlink()  # a stray temp file from a crashed run; ours to replace
     try:
-        text = et_mod.multiline_value(desired)
-        if text is not None:
+        for text, text_file in text_files.items():
             # newline="\n": Windows would otherwise store CRLF in the file,
             # and what exiftool reads back would not be what the dry run said.
             text_file.write_text(text, encoding="utf-8", newline="\n")
-        args = et_mod.write_args(desired, text_file=text_file)
+        args = et_mod.write_args(desired, text_files=text_files)
         try:
             _write_and_check(et, src, tmp, args, (sw, sh), cand.hash)
         except _MinorFault as first:
@@ -279,8 +281,9 @@ def write_one(
         res.error = str(e)
         return res
     finally:
-        if text_file.exists():
-            text_file.unlink()
+        for text_file in text_files.values():
+            if text_file.exists():
+                text_file.unlink()
 
     res.status = "written"
     res.new_version = new_version

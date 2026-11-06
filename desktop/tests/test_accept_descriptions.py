@@ -133,7 +133,7 @@ def test_writer_due_count_equals_accepted_and_file_carries_the_line(mw):
     _write(mw)
     assert _due_ids() == []
     assert _read(mw, _wp(ids[0]))["XMP-dc:Description"] == \
-        f"AI-generated description: Photo {ids[0]} at the lake."
+        f"Photo {ids[0]} at the lake. (AI-generated)"
     assert "XMP-dc:Description" not in _read(mw, _wp(ids[2]))
 
 
@@ -167,7 +167,7 @@ def test_a_pulled_web_description_marks_the_photo_writer_due(mw, monkeypatch, tm
     assert prev == {"description_ai": "A porch."} and new["description_ai"] == "A porch in Ohio."
     assert _due_ids() == [pid]
     _write(mw)
-    assert _read(mw, _wp(pid))["XMP-dc:Description"] == "AI-generated description: A porch in Ohio."
+    assert _read(mw, _wp(pid))["XMP-dc:Description"] == "A porch in Ohio. (AI-generated)"
 
     # An emptied description removes the line from the file.
     pull("   ")

@@ -118,15 +118,26 @@ def test_description_order_and_markers():
                faces=(pl.FaceFacts(10, 1, {"x": 1, "y": 1, "w": 10, "h": 10}),),
                backs=(pl.BackFacts(1, "Lake  Louise\n1962", False),
                       pl.BackFacts(2, "Peggy", True)))
-    lines = pl.compose(f)["description"].split("\n")
-    assert lines == [
-        "Albums: Summer 1992 - Canada",
-        "People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie, Meg)",
-        "Date: about 1962",
-        "AI-generated description: A picnic.",
+    p = pl.compose(f)
+    # Fix-up 3: the sentence leads, bookkeeping follows.
+    assert p["description"].split("\n") == [
+        "A picnic. (AI-generated)",
         "Back of print (unverified transcription): Lake Louise 1962",
         "Back of print: Peggy",
+        "Date: about 1962",
+        "People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie, Meg)",
+        "Albums: Summer 1992 - Canada",
     ]
+    # The Windows boxes: one plain thing each.
+    assert p["title"] == "Summer 1992 - Canada"
+    assert p["subject"] == "A picnic."
+    assert p["comment"].split("\n") == [
+        "Back of print (unverified transcription): Lake Louise 1962",
+        "Back of print: Peggy",
+        "Date: about 1962",
+    ]
+    # Albums join the keywords, after the people.
+    assert p["keywords"] == ["Peggy Clay", "Summer 1992 - Canada"]
 
 
 def test_over_the_limit_the_ai_text_is_cut_first():
@@ -134,9 +145,11 @@ def test_over_the_limit_the_ai_text_is_cut_first():
         albums=["A"], people_lines=["Peggy"], date_note=None,
         ai_text="x" * 5000, backs=[("the back", True)], limit=300)
     assert len(text) <= 300
-    assert text.endswith("Back of print: the back"), "the back survives intact"
-    ai = [ln for ln in text.split("\n") if ln.startswith(pl.AI_PREFIX)][0]
-    assert ai.endswith(pl.ELLIPSIS)
+    lines = text.split("\n")
+    assert "Back of print: the back" in lines, "the back survives intact"
+    assert lines[-2:] == ["People: Peggy", "Albums: A"], "bookkeeping survives intact"
+    ai = lines[0]
+    assert ai.endswith(pl.ELLIPSIS + pl.AI_SUFFIX), "cut, and still marked as the AI's"
 
 
 def test_people_read_left_to_right():
@@ -218,7 +231,7 @@ def test_an_empty_value_clears_the_tag_and_text_goes_through_a_file(tmp_path):
     args = et_mod.write_args({"XMP-dc:Subject": None,
                               "XMP-dc:Description": "a\nb",
                               "IPTC:Keywords": ["A", "B"]},
-                             text_file=tmp_path / "t.txt")
+                             text_files={"a\nb": tmp_path / "t.txt"})
     assert "-XMP-dc:Subject=" in args
     assert f"-XMP-dc:Description<={tmp_path / 't.txt'}" in args
     assert args[:3] == ["-charset", "iptc=UTF8", "-IPTC:CodedCharacterSet=UTF8"]
@@ -263,3 +276,37 @@ def test_two_people_with_the_same_names_are_both_listed():
     assert out["persons_in_image"] == ["George Frederick Clay"] * 2
     assert out["keywords"] == ["George Clay"] * 2
     assert len(out["regions"]) == 2
+
+
+# ---- the Windows boxes (fix-up 3) ------------------------------------------
+
+def test_title_is_the_albums_else_a_scans_locator_else_nothing():
+    two = pl.compose(_facts(albums=("Zoo 1971", "Christmas 1970")))
+    assert two["title"] == "Christmas 1970; Zoo 1971"
+    scan = pl.compose(_facts(is_scan=True, scan_batch="Batch 00020", scan_sequence=32))
+    assert scan["title"] == "Batch 00020 #032"
+    digital = pl.compose(_facts(is_scan=False))
+    assert digital["title"] is None, "an empty box beats noise"
+
+
+def test_subject_is_the_plain_sentence_and_comment_absent_without_notes():
+    p = pl.compose(_facts(description_ai="  Two  children on a porch. "))
+    assert p["subject"] == "Two children on a porch."
+    assert p["comment"] is None
+    assert p["description"] == "Two children on a porch. (AI-generated)"
+    bare = pl.compose(_facts())
+    assert bare["subject"] is None and bare["comment"] is None and bare["description"] is None
+
+
+def test_an_exact_date_adds_no_note_to_comments():
+    p = pl.compose(_facts(capture_date=date(1962, 3, 1), capture_date_precision="exact",
+                          capture_date_confirmed=True))
+    assert p["comment"] is None
+
+
+def test_the_hash_is_stable_and_differs_from_version_1():
+    f = _facts(albums=("A",), description_ai="A picnic.")
+    p = pl.compose(f)
+    assert pl.payload_hash(p) == pl.payload_hash(pl.compose(f)), "idempotent"
+    assert p["v"] == 2
+    assert pl.payload_hash({**p, "v": 1}) != pl.payload_hash(p)

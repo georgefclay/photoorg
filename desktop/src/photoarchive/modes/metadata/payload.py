@@ -15,8 +15,12 @@ The five non-negotiables this module is responsible for:
   `decade` → description line only; `unknown` → nothing. EXIF
   `DateTimeOriginal` needs a time of day, and is offered only when the DB
   holds one for that same day (`exif_taken_at`) — no fabricated midnight.
-* The description is composed in a fixed order and kept under
+* The description is composed in a fixed order — the sentence a person
+  reads first, bookkeeping after (fix-up 3) — and kept under
   `DESCRIPTION_MAX` characters, the AI text truncated first.
+* The three Windows boxes (fix-up 3) each get one plain thing: Title the
+  albums (or a scan's locator), Subject the AI sentence, Comments the human
+  notes — back of print and the partial-date note.
 """
 from __future__ import annotations
 
@@ -28,10 +32,10 @@ from typing import Any, Sequence
 
 # Bump when the payload's shape or wording changes: every photo's hash then
 # differs and the next run rewrites the archive.
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
 
 DESCRIPTION_MAX = 2000
-AI_PREFIX = "AI-generated description: "
+AI_SUFFIX = " (AI-generated)"
 BACK_PREFIX = "Back of print: "
 BACK_UNVERIFIED_PREFIX = "Back of print (unverified transcription): "
 ELLIPSIS = "…"
@@ -260,51 +264,75 @@ def _truncate(text: str, limit: int) -> str:
     return text[: max(0, limit - len(ELLIPSIS))].rstrip() + ELLIPSIS
 
 
+def back_lines(backs: Sequence[tuple[str, bool]]) -> list[str]:
+    return [(BACK_PREFIX if confirmed else BACK_UNVERIFIED_PREFIX) + " ".join(text.split())
+            for text, confirmed in backs if text and text.strip()]
+
+
 def compose_description(
     *, albums: Sequence[str], people_lines: Sequence[str],
     date_note: str | None, ai_text: str | None,
     backs: Sequence[tuple[str, bool]], limit: int = DESCRIPTION_MAX,
 ) -> str:
-    """Fixed order: albums, people, date note, AI description, back text.
+    """Fixed order (fix-up 3): the AI sentence with its ` (AI-generated)`
+    suffix, back-of-print lines, the date note, people, albums. The sentence
+    leads because it is the one line a person reads; the rest is bookkeeping.
 
-    Over `limit`: the AI text is cut first, then the back text, then the
-    whole thing (which only a pathological album list could need).
+    Over `limit`: the AI text is cut first (the suffix stays, so the cut text
+    is still marked as the AI's), then the back text, then the whole thing
+    (which only a pathological album list could need).
     """
-    head: list[str] = []
-    if albums:
-        head.append("Albums: " + "; ".join(albums))
-    if people_lines:
-        head.append("People: " + ", ".join(people_lines))
+    tail: list[str] = []
     if date_note:
-        head.append(date_note)
+        tail.append(date_note)
+    if people_lines:
+        tail.append("People: " + ", ".join(people_lines))
+    if albums:
+        tail.append("Albums: " + "; ".join(albums))
 
-    ai_line = (AI_PREFIX + _clean(ai_text)) if _clean(ai_text) else None
-    back_lines = [(BACK_PREFIX if confirmed else BACK_UNVERIFIED_PREFIX)
-                  + " ".join(text.split())
-                  for text, confirmed in backs if text and text.strip()]
+    sentence = _clean(ai_text)
+    bl = back_lines(backs)
 
-    def build(ai: str | None, bl: list[str]) -> str:
-        return "\n".join(head + ([ai] if ai else []) + bl)
+    def ai_line(text: str) -> str | None:
+        return (text + AI_SUFFIX) if text else None
 
-    text = build(ai_line, back_lines)
+    def build(ai: str | None, backs_: list[str]) -> str:
+        return "\n".join(([ai] if ai else []) + backs_ + tail)
+
+    text = build(ai_line(sentence), bl)
     if len(text) <= limit:
         return text
 
-    if ai_line:
-        fixed = len(build(None, back_lines)) + 1  # +1 for the newline
-        room = limit - fixed
-        ai_line = _truncate(ai_line, room) if room > len(AI_PREFIX) + 1 else None
-        text = build(ai_line, back_lines)
+    if sentence:
+        room = limit - len(build(None, bl)) - 1 - len(AI_SUFFIX)  # -1: newline
+        cut = _truncate(sentence, room) if room > 1 else ""
+        text = build(ai_line(cut), bl)
         if len(text) <= limit:
             return text
+        sentence = cut
 
-    if back_lines:
-        room = limit - len(build(ai_line, [])) - 1
-        joined = "\n".join(back_lines)
-        cut = _truncate(joined, room)
-        back_lines = [cut] if cut else []
-        text = build(ai_line, back_lines)
+    if bl:
+        ai = ai_line(sentence)
+        room = limit - len(build(ai, [])) - 1
+        joined = _truncate("\n".join(bl), room)
+        text = build(ai, [joined] if joined else [])
     return _truncate(text, limit)
+
+
+def windows_fields(f: PhotoFacts, *, albums: Sequence[str],
+                   date_note: str | None) -> dict[str, str | None]:
+    """Explorer's Title / Subject / Comments (fix-up 3).
+
+    Title: the live album names; a scan with no album gets its locator, a
+    digital photo with no album gets nothing — an empty box beats noise.
+    Subject: the AI sentence, plain. Comments: the human notes."""
+    title = "; ".join(albums) or (scan_locator(f) if f.is_scan else None)
+    subject = _truncate(_clean(f.description_ai), DESCRIPTION_MAX) or None
+    notes = back_lines([(b.text, b.confirmed) for b in sorted(f.backs, key=lambda b: b.id)])
+    if date_note:
+        notes.append(date_note)
+    comment = _truncate("\n".join(notes), DESCRIPTION_MAX) or None
+    return {"title": title or None, "subject": subject, "comment": comment}
 
 
 # --------------------------------------------------------------------------
@@ -362,8 +390,11 @@ def compose(f: PhotoFacts) -> dict[str, Any]:
     people = _ordered_people(f)
     # One entry per person, never de-duplicated by text: a father and son
     # can share every name, and merging them drops a person from the file.
-    keywords = [keyword_name(p) for p in people]
     persons = [formal_name(p) for p in people]
+    albums = sorted({_clean(a) for a in f.albums if _clean(a)})
+    # People, then the albums (fix-up 3): Windows Tags and any DAM can then
+    # filter by event as well as by person.
+    keywords = [keyword_name(p) for p in people] + albums
 
     dates = date_fields(f)
     places = []
@@ -374,10 +405,11 @@ def compose(f: PhotoFacts) -> dict[str, Any]:
     gps = next(({"lat": p["lat"], "lon": p["lon"]} for p in places
                 if p["lat"] is not None and p["lon"] is not None), None)
 
+    date_note = dates["note"] if dates else None
     description = compose_description(
-        albums=sorted({_clean(a) for a in f.albums if _clean(a)}),
+        albums=albums,
         people_lines=[full_name_line(p) for p in people],
-        date_note=dates["note"] if dates else None,
+        date_note=date_note,
         ai_text=f.description_ai,
         backs=[(b.text, b.confirmed) for b in sorted(f.backs, key=lambda b: b.id)],
     )
@@ -394,6 +426,7 @@ def compose(f: PhotoFacts) -> dict[str, Any]:
         # Camera GPS is never touched; ours goes in only where there is none.
         "gps": gps if not f.has_exif_gps else None,
         "description": description or None,
+        **windows_fields(f, albums=albums, date_note=date_note),
         "scan_locator": scan_locator(f),
         "physical_ref": _clean(f.physical_ref_note) or None,
         "source_folder": f.source_folder or None,
@@ -414,10 +447,15 @@ def summary(payload: dict[str, Any]) -> dict[str, Any]:
     """What the `metadata.write` audit row carries: enough to see what went
     in, not a second copy of the archive."""
     d = payload.get("date") or {}
+    # Keywords are the people (one per person, like persons_in_image) and
+    # then, since fix-up 3, the albums.
+    kw = payload.get("keywords") or []
+    n_people = len(payload.get("persons_in_image") or [])
     return {
         "hash": payload_hash(payload),
         "date": d.get("xmp") or d.get("note"),
-        "people": payload.get("keywords") or [],
+        "people": kw[:n_people],
+        "albums": kw[n_people:],
         "regions": len(payload.get("regions") or []),
         "places": [p["name"] for p in payload.get("locations") or []],
         "description_chars": len(payload.get("description") or ""),

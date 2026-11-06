@@ -1597,6 +1597,31 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
   desktop edit path for an accepted description, on purpose (George edits on
   the site); PROJECT-PLAN §5 records it.
 
+### Windows fields and the caption order (fix-up 3)
+- **What a person sees in Explorer → Properties → Details is the test**
+  (George, 2026-11-06: the AI text was buried at the end of Title). Explorer's
+  Title / Subject / Comments read the Microsoft `IFD0:XP*` fields first —
+  verified through the Windows shell itself, not just exiftool — so each box
+  gets one plain thing: **Title** (`XPTitle` + `XMP-dc:Title`) the albums, or
+  a scan's locator, or nothing for an album-less digital photo; **Subject**
+  (`XPSubject`) the AI sentence; **Comments** (`XPComment`) back-of-print
+  lines and the partial-date note. `ImageDescription` still carries the full
+  caption for every other tool, and Explorer does not show it while `XP*` is
+  set.
+- **The caption leads with the sentence**: `… (AI-generated)`, back of
+  print, date note, `People:`, `Albums:`. The prefix `AI-generated
+  description: ` is gone; the suffix survives the 2,000-character cut.
+  Albums are keywords too, after the people.
+- **A field taken over later is someone else's until we write it**:
+  `XMP-photoarchive:PayloadVersion` records the version a file was written
+  at, and `exiftool.OWNED_SINCE` makes the census list a pre-existing value
+  in a newly owned tag (a camera's `XPTitle`) even in a file we have written
+  before. A new owned tag goes into `OWNED_SINCE` with the version that took
+  it over.
+- Several multi-line values per write (caption and Comments): the writer
+  writes each distinct one to its own `_tmp/{id}.textN.txt` (`write_args(…,
+  text_files=…)`).
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site

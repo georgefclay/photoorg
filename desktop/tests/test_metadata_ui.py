@@ -51,7 +51,7 @@ def test_whats_embedded_reads_the_file_and_marks_our_tags(mw, monkeypatch):
     rows = {panel._table.item(i, 0).text(): panel._table.item(i, 1).text()
             for i in range(panel._table.rowCount())}
     assert rows["XMP-photoarchive:PhotoId"] == str(pid)
-    assert rows["XMP-dc:Description"] == "AI-generated description: A porch."
+    assert rows["XMP-dc:Description"] == "A porch. (AI-generated)"
     first = panel._table.item(0, 0)
     assert first.font().bold(), "the archive's own tags are listed first, in bold"
     assert "metadata current" in panel._status_right.text()

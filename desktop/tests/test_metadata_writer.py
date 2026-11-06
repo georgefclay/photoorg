@@ -260,16 +260,17 @@ def test_day_precise_date_people_back_and_identity_read_back(mw):
     assert str(t["XMP-photoshop:DateCreated"]).replace(":", "-")[:10] == "2001-06-12"
     assert "ExifIFD:DateTimeOriginal" not in t, "no time of day is held: none invented"
     assert str(t["XMP-xmp:CreateDate"]).replace(":", "-")[:10] == "2001-06-12"
-    assert _as_list(t["XMP-dc:Subject"]) == ["Peggy Clay", "George Clay Jr."]
-    assert _as_list(t["IPTC:Keywords"]) == ["Peggy Clay", "George Clay Jr."]
+    # People left to right, then the albums (fix-up 3).
+    assert _as_list(t["XMP-dc:Subject"]) == ["Peggy Clay", "George Clay Jr.", "Summer 1992 - Canada"]
+    assert _as_list(t["IPTC:Keywords"]) == ["Peggy Clay", "George Clay Jr.", "Summer 1992 - Canada"]
     assert _as_list(t["XMP-iptcExt:PersonInImage"]) == \
         ["Margaret Jane Clay (née Schmidt)", "George Clay Jr."]
     desc = t["XMP-dc:Description"]
     assert desc == t["IPTC:Caption-Abstract"] == t["IFD0:ImageDescription"]
     assert desc.split("\n") == [
-        "Albums: Summer 1992 - Canada",
-        "People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie), George Clay Jr.",
         "Back of print (unverified transcription): Peggy & George, June 2001",
+        "People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie), George Clay Jr.",
+        "Albums: Summer 1992 - Canada",
     ]
     assert "Margret" not in desc, "a misspelling is a search aid, not a name"
     assert t["XMP-photoarchive:PhotoId"] == pid
@@ -335,7 +336,7 @@ def test_ai_description_only_as_the_fact_and_always_prefixed(mw):
        (pending,))
     _write(mw)
     assert _read(mw, _wp(fact))["XMP-dc:Description"] == \
-        "AI-generated description: Three children on a porch."
+        "Three children on a porch. (AI-generated)"
     t = _read(mw, _wp(pending))
     assert "XMP-dc:Description" not in t, "a pending suggestion is never written"
 

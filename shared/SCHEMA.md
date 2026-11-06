@@ -311,8 +311,11 @@ exposure, the camera's GPS and `DateTimeOriginal` — is never touched.
 
 | What | Tags | Value |
 |---|---|---|
-| Description | `XMP-dc:Description`, `IPTC:Caption-Abstract`, `IFD0:ImageDescription` | Lines in fixed order: `Albums: A; B` · `People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie), George Clay Jr.` · `Date: March 1962` / `Date: about 1962` / `Date: 1960s` (only when not day-precise) · `AI-generated description: …` · `Back of print: …` or `Back of print (unverified transcription): …`. Under 2,000 characters; the AI text is cut first. |
-| Keywords | `XMP-dc:Subject`, `IPTC:Keywords` | Each person's common name: nickname-or-given + surname + suffix (`Peggy Clay`, `George Clay Jr.`); `display_name` if that yields nothing. Left to right. |
+| Windows Title | `IFD0:XPTitle`, `XMP-dc:Title` | (Fix-up 3.) The live album names, `; `-joined; a scan with no album gets its locator (`Batch 00020 #032`); a digital photo with no album gets none. Explorer's **Title** box reads `XPTitle`. |
+| Windows Subject | `IFD0:XPSubject` | (Fix-up 3.) The AI description sentence, plain — Explorer's **Subject** box. |
+| Windows Comments | `IFD0:XPComment` | (Fix-up 3.) The human notes: `Back of print: …` / `Back of print (unverified transcription): …` lines, then the partial-date note; absent when there are none. Explorer's **Comments** box. The `XP*` fields are UTF-16; exiftool converts. |
+| Description | `XMP-dc:Description`, `IPTC:Caption-Abstract`, `IFD0:ImageDescription` | The caption every other tool shows. Lines in fixed order, sentence first (fix-up 3): `… (AI-generated)` · `Back of print: …` or `Back of print (unverified transcription): …` · `Date: March 1962` / `Date: about 1962` / `Date: 1960s` (only when not day-precise) · `People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie), George Clay Jr.` · `Albums: A; B`. Under 2,000 characters; the AI text is cut first and keeps its ` (AI-generated)` suffix. |
+| Keywords | `XMP-dc:Subject`, `IPTC:Keywords` | Each person's common name: nickname-or-given + surname + suffix (`Peggy Clay`, `George Clay Jr.`); `display_name` if that yields nothing. Left to right, then (fix-up 3) the album names, so Windows **Tags** and any DAM can filter by event. |
 | Full names | `XMP-iptcExt:PersonInImage` | Formal name: given middle surname suffix (née maiden). |
 | Face regions | `XMP-mwg-rs:RegionInfo`, `XMP-MP:RegionInfoMP` | Named faces only, labelled with the common name. **In the stored pixel frame**: `faces.bbox` is display-frame, so each box goes through the inverse of the file's EXIF orientation; `AppliedToDimensions` is the file's stored size. Skipped (and noted) when the file's display size differs from `photos.width/height`. |
 | Date | `XMP-photoshop:DateCreated` | `exact` → `YYYY-MM-DD` (with the time when the DB holds the camera's time for that day); `month` → `YYYY-MM`; `year` → `YYYY`; `decade` / `unknown` → nothing. |
@@ -322,7 +325,7 @@ exposure, the camera's GPS and `DateTimeOriginal` — is never touched.
 | Archive identity | `XMP-photoarchive:PhotoId`, `MasterSha256` | `photos.id`; the preferred master's file hash (for a split child, the scan it was cut from). |
 | Physical reference | `XMP-photoarchive:ScanLocator`, `PhysicalRef` | `Batch 00012 #017` (`, print 2 of 3` for a split child); `physical_ref_note`. |
 | Provenance | `XMP-photoarchive:SourceFolder`, `SourceFilename` | Faithful records of the master path — folder typos and all, which is why they are here and not in the description. |
-| Bookkeeping | `XMP-photoarchive:PayloadHash`, `WroteExif` | The payload hash (read back from the temp file before every swap); which EXIF fields the archive itself wrote. |
+| Bookkeeping | `XMP-photoarchive:PayloadHash`, `PayloadVersion`, `WroteExif` | The payload hash (read back from the temp file before every swap); the payload version the file was written at (fix-up 3 — the census uses it to list someone else's value in a field the archive took over later, e.g. a camera's `XPTitle`); which EXIF fields the archive itself wrote. |
 
 The `photoarchive` namespace is
 `https://cyberdinosaurs.com/ns/photoarchive/1.0/`, defined in

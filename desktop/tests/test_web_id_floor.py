@@ -496,7 +496,7 @@ def test_description_loop_round_trip(two_sided, monkeypatch):
     pdb.init_pool(_S(), min_size=1, max_size=3)  # type: ignore[arg-type]
     try:
         writer.run_chunk(settings, [pid], dry_run=False)
-        assert due() == [] and file_desc() == "AI-generated description: Two children on a porch."
+        assert due() == [] and file_desc() == "Two children on a porch. (AI-generated)"
         do_push()
         with _web_conn() as w:
             admin = w.execute(
@@ -532,7 +532,7 @@ def test_description_loop_round_trip(two_sided, monkeypatch):
         assert due() == [pid], "the pulled fact makes the photo writer-due"
         [res] = writer.run_chunk(settings, [pid], dry_run=False)
         assert due() == []
-        assert file_desc() == "AI-generated description: Peggy and Chuck on the porch in Ohio."
+        assert file_desc() == "Peggy and Chuck on the porch in Ohio. (AI-generated)"
         with _desk_conn() as c:
             fv = c.execute("select file_version from photos where id = %s", (pid,)).fetchone()[0]
         stats = do_push()
@@ -552,7 +552,7 @@ def test_description_loop_round_trip(two_sided, monkeypatch):
                 (pid,)).fetchone()[0] == 1
         assert due() == [pid]
         writer.run_chunk(settings, [pid], dry_run=False)
-        assert file_desc() == "AI-generated description: Peggy and Chuck on the porch in Toledo, Ohio."
+        assert file_desc() == "Peggy and Chuck on the porch in Toledo, Ohio. (AI-generated)"
         with _desk_conn() as c:
             fv = c.execute("select file_version from photos where id = %s", (pid,)).fetchone()[0]
         do_push()
