@@ -419,3 +419,143 @@ def test_albums_round_trip(two_sided):
             assert [r[0] for r in web_rows] == [ids[1], ids[2]], "the push that followed kept the web's edits"
     finally:
         pdb.close_pool()
+
+
+def test_description_loop_round_trip(two_sided, monkeypatch):
+    """Phase 13 fix-up 2, verification 4 in miniature, through the real server.
+
+    A member suggests a new description on the site; the admin accepts it
+    (409 first: the photo already has the bulk-accepted AI text; then
+    `force`). The push pulls first, so the laptop takes the new
+    `description_ai`, the photo becomes writer-due, the writer re-writes
+    the file, and the next push carries the new `file_version` up while the
+    site keeps the member's text. Then an admin's direct edit travels the
+    same way with no queue."""
+    from PIL import Image
+
+    from photoarchive import db as pdb
+    from photoarchive.modes.ingest.paths import working_path
+    from photoarchive.modes.metadata import repo as meta_repo, writer
+    from photoarchive.modes.metadata.exiftool import ExifTool
+    from photoarchive.modes.sync.client import WebSyncClient
+    from photoarchive.modes.sync.push import push
+    from tests.phase6_fixtures import phase6_settings
+    from tests.test_metadata_writer import EXIFTOOL
+
+    if not EXIFTOOL or not Path(EXIFTOOL).is_file():
+        pytest.skip("exiftool not installed")
+
+    class _Guard:
+        all_read_only = True
+    monkeypatch.setattr(writer, "run_masters_guard", lambda roots: _Guard())
+
+    base = two_sided["url"]
+    tmp = two_sided["tmp"] / "descriptions"
+    settings = phase6_settings(tmp, TEST_DATABASE_URL).model_copy(update={"EXIFTOOL_PATH": EXIFTOOL})
+    thumbs_dir, state_dir = settings.THUMBS_DIR, tmp / "sync-state"
+    client = WebSyncClient(base, "test-service-token")
+
+    with _desk_conn() as c:
+        sha = "d" * 64
+        pid = c.execute(
+            """insert into photos (sha256, mime, source_root, source_folder, source_filename,
+                                   triage_status, file_version, width, height, description_ai)
+               values (%s, 'image/jpeg', 'm1', 'f', 'desc.jpg', 'keep', 1, 400, 300,
+                       'Two children on a porch.') returning id""", (sha,)).fetchone()[0]
+        wp = working_path(settings, pid, sha, "jpg")
+        Image.new("RGB", (400, 300), (120, 90, 60)).save(wp, "JPEG", quality=92)
+        c.execute("update photos set working_path = %s where id = %s", (str(wp), pid))
+        c.execute("""insert into photo_masters (photo_id, master_path, sha256, mime, is_preferred)
+                     values (%s, 'M:/desc.jpg', %s, 'image/jpeg', true)""", (pid, sha))
+
+    def do_push():
+        return push(client, working_dir=settings.WORKING_DIR, thumbs_dir=thumbs_dir,
+                    state_dir=state_dir, files_only_for_grouped=True, allow_shared_db=True)
+
+    def due():
+        with pdb.connection() as conn:
+            conn.autocommit = True
+            return [x.photo_id for x in meta_repo.due(meta_repo.load_candidates(conn, photo_ids=[pid]))]
+
+    def file_desc():
+        with pdb.connection() as conn:
+            conn.autocommit = True
+            path = conn.execute("select working_path from photos where id = %s", (pid,)).fetchone()[0]
+        with ExifTool(EXIFTOOL) as et:
+            return et.read(Path(path)).get("XMP-dc:Description")
+
+    def web_row():
+        with _web_conn() as w:
+            return w.execute("select description_ai, file_version, synced_file_version from photos where id = %s",
+                             (pid,)).fetchone()
+
+    pdb.close_pool()
+
+    class _S:
+        DATABASE_URL = TEST_DATABASE_URL
+    pdb.init_pool(_S(), min_size=1, max_size=3)  # type: ignore[arg-type]
+    try:
+        writer.run_chunk(settings, [pid], dry_run=False)
+        assert due() == [] and file_desc() == "AI-generated description: Two children on a porch."
+        do_push()
+        with _web_conn() as w:
+            admin = w.execute(
+                """insert into users (email, role, status) values ('admin@example.com', 'admin', 'active')
+                   on conflict (email) do update set role = 'admin' returning id""").fetchone()[0]
+            member = w.execute(
+                """insert into users (email, role, status) values ('member@example.com', 'contributor', 'active')
+                   on conflict (email) do update set status = 'active' returning id""").fetchone()[0]
+            g = w.execute("insert into groups (name) values ('Description Loop') returning id").fetchone()[0]
+            w.execute("insert into group_members (group_id, user_id) values (%s, %s)", (g, member))
+            w.execute("insert into photo_groups (photo_id, group_id) values (%s, %s)", (pid, g))
+            member_s = _login(base, w, member)
+            admin_s = _login(base, w, admin)
+
+        # ---- member suggests, admin accepts from the queue -------------
+        s = member_s.post(f"{base}/api/photos/{pid}/suggestions",
+                          json={"kind": "description", "text": "Peggy and Chuck on the porch in Ohio."})
+        assert s.status_code == 201, s.text
+        r = admin_s.post(f"{base}/api/admin/suggestions/{s.json()['id']}/accept", json={})
+        assert r.status_code == 409 and r.json()["current"]["description_ai"] == "Two children on a porch."
+        r = admin_s.post(f"{base}/api/admin/suggestions/{s.json()['id']}/accept", json={"force": True})
+        assert r.status_code == 200, r.text
+
+        do_push()  # pulls first
+        with _desk_conn() as c:
+            assert c.execute("select description_ai from photos where id = %s", (pid,)).fetchone()[0] == \
+                "Peggy and Chuck on the porch in Ohio."
+            prev, new = c.execute(
+                """select previous_value, new_value from audit_log
+                    where action = 'photo.description.set' and actor = 'web' and entity_id = %s""",
+                (pid,)).fetchone()
+            assert prev == {"description_ai": "Two children on a porch."}
+        assert due() == [pid], "the pulled fact makes the photo writer-due"
+        [res] = writer.run_chunk(settings, [pid], dry_run=False)
+        assert due() == []
+        assert file_desc() == "AI-generated description: Peggy and Chuck on the porch in Ohio."
+        with _desk_conn() as c:
+            fv = c.execute("select file_version from photos where id = %s", (pid,)).fetchone()[0]
+        stats = do_push()
+        assert stats.files_uploaded >= 1, stats
+        assert web_row() == ("Peggy and Chuck on the porch in Ohio.", fv, fv), \
+            "the site keeps the member's text and holds the re-written file"
+
+        # ---- admin direct edit, no queue --------------------------------
+        e = admin_s.patch(f"{base}/api/admin/photos/{pid}/description",
+                          json={"text": "Peggy and Chuck on the porch in Toledo, Ohio."})
+        assert e.status_code == 200 and e.json()["changed"] is True, e.text
+        do_push()
+        with _desk_conn() as c:
+            assert c.execute(
+                """select count(*) from audit_log
+                    where action = 'photo.description.edit' and actor = 'web' and entity_id = %s""",
+                (pid,)).fetchone()[0] == 1
+        assert due() == [pid]
+        writer.run_chunk(settings, [pid], dry_run=False)
+        assert file_desc() == "AI-generated description: Peggy and Chuck on the porch in Toledo, Ohio."
+        with _desk_conn() as c:
+            fv = c.execute("select file_version from photos where id = %s", (pid,)).fetchone()[0]
+        do_push()
+        assert web_row() == ("Peggy and Chuck on the porch in Toledo, Ohio.", fv, fv)
+    finally:
+        pdb.close_pool()

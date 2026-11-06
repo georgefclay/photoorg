@@ -112,6 +112,7 @@ module.exports = function apiContribRoutes({ pool }) {
     } else if (kind === 'description') {
       const text = String(b.text || '').trim();
       if (!text) return res.status(400).json({ error: 'need description text' });
+      if (text.length > 2000) return res.status(400).json({ error: 'description is too long (max 2000 characters)' });
       payload = { text };
     } else {
       return res.status(400).json({ error: 'bad kind (date|person|place|description)' });

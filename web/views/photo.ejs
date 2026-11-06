@@ -233,6 +233,9 @@ function faceState(f) {
           <button type="button" class="action-btn" data-open-panel="place" aria-expanded="false" aria-controls="panel-place">
             <%- include('partials/icon', { name: 'pin' }) %><span>Suggest a place</span>
           </button>
+          <button type="button" class="action-btn" data-open-panel="description" aria-expanded="false" aria-controls="panel-description">
+            <%- include('partials/icon', { name: 'edit' }) %><span><%= isAdmin ? 'Edit description' : 'Suggest a description' %></span>
+          </button>
           <% if (isAdmin) { %>
           <button type="button" class="action-btn" data-rescan data-url="/api/photos/<%= photo.id %>/rescan_wanted"
             aria-pressed="<%= photo.rescan_wanted ? 'true' : 'false' %>">
@@ -241,7 +244,7 @@ function faceState(f) {
           <% } %>
         </div>
       </div>
-      <noscript><p class="notice info">Turn on JavaScript to like, comment, tag faces or suggest a date or place.</p></noscript>
+      <noscript><p class="notice info">Turn on JavaScript to like, comment, tag faces or suggest a date, place or description.</p></noscript>
 
       <section class="card action-panel" id="panel-date" data-panel="date" hidden aria-labelledby="panel-date-h">
         <h2 id="panel-date-h">Suggest a date</h2>
@@ -276,6 +279,30 @@ function faceState(f) {
           <p class="notice error" role="alert" data-form-error hidden></p>
           <div class="actions">
             <button class="btn" type="submit" data-place-submit disabled>Suggest this place</button>
+            <button class="btn ghost" type="button" data-close-panel>Cancel</button>
+          </div>
+        </form>
+        <div class="thanks" data-thanks hidden tabindex="-1">
+          <p class="notice ok" data-thanks-text></p>
+          <button type="button" class="btn secondary small" data-again>Suggest another</button>
+        </div>
+      </section>
+
+      <section class="card action-panel" id="panel-description" data-panel="description" hidden aria-labelledby="panel-description-h">
+        <h2 id="panel-description-h"><%= isAdmin ? 'Edit the description' : 'Suggest a description' %></h2>
+        <form data-desc-form novalidate
+          <% if (isAdmin) { %>data-admin data-url="/api/admin/photos/<%= photo.id %>/description"<% } else { %>data-post-url="/api/photos/<%= photo.id %>/suggestions"<% } %>>
+          <div class="field">
+            <label for="desc-text"><%= isAdmin ? 'Description (saved straight to the photo; empty removes it)' : 'What should the description say?' %></label>
+            <textarea id="desc-text" name="text" rows="4" maxlength="2000" data-desc-input
+              aria-describedby="desc-hint"><%= photo.description_ai || '' %></textarea>
+            <span class="hint" id="desc-hint"><%= isAdmin
+              ? 'This goes into the photo file on the next metadata write.'
+              : 'Fix what the computer got wrong, or add who, where and when. Someone will check it before it changes.' %></span>
+          </div>
+          <p class="notice error" role="alert" data-form-error hidden></p>
+          <div class="actions">
+            <button class="btn" type="submit" data-desc-submit><%= isAdmin ? 'Save description' : 'Suggest this description' %></button>
             <button class="btn ghost" type="button" data-close-panel>Cancel</button>
           </div>
         </form>

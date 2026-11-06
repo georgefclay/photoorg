@@ -441,3 +441,99 @@ was refused by the auto-mode classifier — check #2693 on the site: "No date
 yet"). The new Qt handler also caught one thing on its first day: the 07:20
 `--smoke` exit logged `QThread: Destroyed while thread '' is still running` —
 another mode's startup job, not Sync; PROJECT-PLAN §5 item 22.
+
+## Phase 13 fix-up 2 — bulk-accept the AI descriptions (2026-11-05)
+
+George's decision (PROJECT-PLAN §5 item 19): **the AI descriptions go into the
+files, all of them; corrections happen on the site afterwards.** Run this
+BEFORE the group bulk-assignment, so every file is pushed once already
+carrying its description. Start with `git pull`; read the Phase 13 sections of
+`CLAUDE.md` (Embedded metadata; the description line composition and the
+2,000-character cut) and `shared/SCHEMA.md` (`photos.description_ai` is the
+fact column; FTS weight A).
+
+### A. Bulk accept (desktop)
+- Promote every **pending `description` suggestion with `source = 'ai'`** on a
+  kept, non-deleted photo: `photos.description_ai` = the payload text, the
+  suggestion `accepted`, audit in the corrections shape (one row per photo +
+  one batch row). Chunked, memory-safe, resumable, idempotent — a second run
+  finds 0 due. Expect ~12,677; report the exact counts.
+- The ~256 **`source = 'import'`** description suggestions are **not**
+  accepted: resolve them `rejected` with a resolution note ("event name
+  already carried by the import album and SourceFolder XMP") so the queues go
+  quiet — roughly 200 of their photos also hold an ai suggestion, and the
+  album line already names the event in the file. If a photo somehow holds
+  two ai description suggestions, accept the newest and reject the rest with
+  a note.
+- FTS: the accepted text moves from weight C (pending) to weight A
+  (`description_ai`) — make sure `photo_search` refreshes for every touched
+  photo, and spot-check one search. Run `refresh_completeness` if the
+  description feeds the score.
+
+### B. Writer re-write (desktop)
+- Mark the touched photos due for the metadata writer the same way other fact
+  edits do, and run the full write (~12,677 files): chunked, resumable,
+  `exiftool -m` past faulty XMP as in the first full write, audited. Second
+  run 0 due. The `file_version` bumps mean: with `files_only_for_grouped` on,
+  only the 139 grouped files re-push now — every other file rides up later as
+  George assigns groups. That is expected, not a fault.
+
+### C. Description edits on the site (George's stated correction route)
+The loop George wants: **any signed-in family member proposes a description
+change; George approves; the file gets the new text.** Map it onto what
+already exists and close every gap:
+1. **Member proposes:** `POST /api/photos/:id/suggestions` — confirm
+   `description` is an accepted kind there (add it if not). It lands as a
+   pending web-born suggestion carrying the member's user id, rate-limited as
+   that route already is, and the photo page shows the pending state.
+2. **George approves on the site:** the admin suggestions queue
+   (`/api/admin/suggestions/:id/accept` / `reject`) must handle
+   `description` — accept writes `photos.description_ai` on the web with an
+   audit row (previous and new), reject resolves it. Approval works from the
+   phone; no desktop step is needed.
+3. **It reaches the file:** the changed `description_ai` comes down with
+   `pull_confirmed`'s fact updates (verify it covers `description_ai`; add it
+   if not) and **marks the photo writer-due on the laptop**, so the next
+   writer run re-writes the file and the next push carries the new
+   `file_version` up.
+4. **George's own edits skip the queue:** an admin edits the description
+   directly on the web photo page (add if missing) — audit
+   `photo.description.edit` with previous and new — and it travels down by
+   the same route as 3. An emptied description removes the line from the
+   file (the writer replaces owned tags wholesale, so this should fall out).
+5. The web-born **pending** suggestion row itself stays web-only, as Phase 12
+   established — that is fine, because approval happens on the site. Do not
+   build a web-born-suggestion pull into the desktop queue for this.
+If the desktop has no edit path for an accepted description either, say so in
+the report and add the cheapest one or record it as an explicit open item;
+George prefers to edit on the site.
+
+### Tests
+Accept is idempotent; import suggestions rejected with the note; promote
+writes `description_ai` + audit; FTS moves C → A; writer due count equals the
+accepted count and a second run is 0; a member's description suggestion, accepted by an admin on the site,
+pulls down, marks the photo writer-due, re-writes the file and pushes
+back; an admin direct edit does the same without the queue; the 2,000-character description cut still
+trims the AI text first.
+
+### Verification, then stop
+1. `pytest` and `npm test` green.
+2. Counts: ai accepted, import rejected, writer files written / skipped /
+   failed, elapsed; second runs 0 due.
+3. Open one scan and one digital photo in Windows and paste the description
+   block, "AI-generated description:" line included.
+4. The full loop on the live site: as the test-contributor account, suggest a
+   change to one photo's description; as admin, accept it from the
+   suggestions queue (on the phone if convenient); pull on the laptop, paste
+   the audit rows, show the re-written file, push — the site keeps the new
+   text and the file carries it. Then one admin direct edit (fix one word)
+   through the same pull-and-re-write path, no queue.
+5. If C changed the web, deploy (usual runbook; if C needs a migration, stop
+   and ask first under Questions below).
+6. `CLAUDE.md` (bulk-accept tool; description edit path), `shared/SCHEMA.md`
+   if anything changed shape, `PROJECT-PLAN.md` (§5 item 19 closed, Progress
+   entry), commit: `Phase 13 fix-up 2: bulk-accept AI descriptions`.
+
+This fix-up is pre-approved — **GO** — but if anything above does not match
+the code's reality, append your questions under `### Questions (fix-up 2)`
+here and stop instead.

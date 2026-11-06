@@ -1,4 +1,4 @@
-// Photo page glue: action panels (date / place), pending-suggestion list,
+// Photo page glue: action panels (date / place / description), pending-suggestion list,
 // comments (post, hide/unhide), moderator "remove from my group", admin
 // "rescan wanted", missing-image placeholders, and prev/next by keyboard
 // arrows and horizontal swipe. Like → like.js, date field → datefield.js,
@@ -65,7 +65,7 @@
     if (CD.tagger && CD.tagger.active()) CD.tagger.stop();
     resetPanel(p);
     p.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    const input = p.querySelector('input');
+    const input = p.querySelector('input, textarea');
     if (input) input.focus({ preventScroll: true });
   }
   function closePanels() {
@@ -89,9 +89,9 @@
   $$('[data-again]').forEach((b) => b.addEventListener('click', () => {
     const p = b.closest('[data-panel]');
     resetPanel(p);
-    p.querySelector('input').focus();
+    p.querySelector('input, textarea').focus();
   }));
-  if (location.hash === '#panel-date' || location.hash === '#panel-place') openPanel(location.hash.slice(7));
+  if (/^#panel-(date|place|description)$/.test(location.hash)) openPanel(location.hash.slice(7));
 
   // ---- pending suggestions + thank-you -----------------------------------
   page.addEventListener('cd:suggested', (e) => {
@@ -144,6 +144,42 @@
         showError(placeForm, errorText(err));
         submit.disabled = false;
       } finally {
+        submit.removeAttribute('aria-busy');
+      }
+    });
+  }
+
+  // ---- suggest (or, for an admin, edit) the description ---------------------
+  // A member's text becomes a pending `description` suggestion; an admin's is
+  // saved straight to the photo (`photo.description.edit`) and reaches the
+  // file through the desktop's next pull and metadata write.
+  const descForm = $('[data-desc-form]');
+  if (descForm) {
+    const input = $('[data-desc-input]', descForm);
+    const submit = $('[data-desc-submit]', descForm);
+    const original = input.value.trim();
+    descForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      const admin = descForm.hasAttribute('data-admin');
+      if (!admin && !text) { showError(descForm, 'Write the description you would like to see.'); return; }
+      if (text === original) { showError(descForm, 'That is the description it already has.'); return; }
+      submit.disabled = true;
+      submit.setAttribute('aria-busy', 'true');
+      try {
+        if (admin) {
+          await CD.api(descForm.dataset.url, { method: 'PATCH', body: { text } });
+          CD.toast(text ? 'Description saved.' : 'Description removed.');
+          window.location.reload();
+          return;
+        }
+        await CD.api(descForm.dataset.postUrl, { method: 'POST', body: { kind: 'description', text } });
+        const short = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+        descForm.dispatchEvent(new CustomEvent('cd:suggested', { bubbles: true, detail: { kind: 'description', text: `the description “${short}”` } }));
+      } catch (err) {
+        showError(descForm, errorText(err));
+      } finally {
+        submit.disabled = false;
         submit.removeAttribute('aria-busy');
       }
     });

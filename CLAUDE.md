@@ -1571,6 +1571,32 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
   folder) / d (after ingest or before 1826), and clears the chosen rules'
   rows through `unconfirm` in one transaction. Never SQL.
 
+### Descriptions (fix-up 2)
+- **The AI descriptions are facts now** (PROJECT-PLAN §5 item 19, George's
+  call, 2026-11-05): `python -m photoarchive.tools.accept_descriptions
+  --report | --apply` promoted every pending `source='ai'` description on a
+  kept, live photo into `photos.description_ai` — one `photo.description.set`
+  audit row per photo (previous and new) under one `batch_id`, plus a
+  `description.bulk_accept.batch` summary — and rejected the folder-name
+  `source='import'` descriptions with the note "event name already carried by
+  the import album and SourceFolder XMP". Commits per chunk; re-runs find 0
+  due. It **never overwrites** a photo whose `description_ai` already holds
+  other text (a person wrote it) and leaves AI rows on junk photos pending.
+  New AI descriptions from a later `describe` run stay suggestions until this
+  tool (or a person) accepts them.
+- **The correction route is the site.** A signed-in member uses **Suggest a
+  description** on the photo page (a pending web-born `description`
+  suggestion, prefilled with the current text); an admin accepts it from the
+  queue — a 409 with both texts because the photo already has one, then
+  **Replace** (`force`). An admin's own fix is **Edit description** on the
+  photo page: `PATCH /api/admin/photos/:id/description`, audit
+  `photo.description.edit` with previous and new; empty text clears it (NULL).
+  Both actions are in `/sync/pull/confirmed`'s fact list; the desktop's
+  `_apply_description` writes the fact, the payload hash makes the photo
+  writer-due, and the next write + push carries the new file up. There is no
+  desktop edit path for an accepted description, on purpose (George edits on
+  the site); PROJECT-PLAN §5 records it.
+
 ## Ops notes
 - `GC.md` (gitignored) at the repo root holds per-machine paths, DB
   passwords, service URLs, deploy steps. Same convention as every other site
@@ -1597,6 +1623,9 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
 - `python -m photoarchive.tools.date_hygiene --report | --apply [--rules a,b]` —
   Phase 13 fix-up 1: ingest-sourced confirmed dates checked against rules a–d;
   report under `WORKING_DIR/_report/date-hygiene/`.
+- `python -m photoarchive.tools.accept_descriptions --report | --apply [--chunk N]` —
+  Phase 13 fix-up 2: pending AI descriptions → `description_ai`, import ones
+  rejected; run the metadata writer afterwards.
 - `python -m photoarchive.tools.export_archive --to DIR [--masters] [--people]
   [--chunk N]` — Phase 12 full export (images tree, backs, masters, pg_dump,
   CSVs, the web's own tables); resumable.

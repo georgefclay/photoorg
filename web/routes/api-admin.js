@@ -17,6 +17,7 @@
 //   GET  /api/admin/corrections/batches        recent correction batches
 //   POST /api/admin/corrections/undo           undo one batch
 //   POST /api/admin/photos/:id/capture_date/clear   clear a confirmed date (old value → suggestion)
+//   PATCH /api/admin/photos/:id/description         edit the description directly (no queue)
 
 const express = require('express');
 const { requireAdmin } = require('../middleware/require-user');
@@ -25,6 +26,10 @@ const { parseListQuery } = require('../services/pagination');
 const adminSvc = require('../services/admin');
 const corrections = require('../services/corrections');
 const { clearConfirmedDate } = require('../services/dates');
+
+// The writer cuts the whole description block at 2,000 characters (AI text
+// first); a hand-written description longer than that never reaches a file.
+const DESCRIPTION_MAX = 2000;
 
 function toInt(v) { const n = parseInt(v, 10); return Number.isInteger(n) ? n : null; }
 
@@ -107,6 +112,50 @@ module.exports = function apiAdminRoutes({ pool }) {
       if (r.notFound) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
       await client.query('commit');
       res.json({ ok: true, ...r });
+    } catch (err) {
+      await client.query('rollback').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
+    }
+  });
+
+  // -----------------------------------------------------------------
+  //  Edit a photo's description directly (Phase 13 fix-up 2). George's
+  //  own corrections skip the queue; the desktop applies the
+  //  `photo.description.edit` row via /sync/pull/confirmed, which makes the
+  //  photo writer-due. An empty text clears the description (NULL), so the
+  //  line leaves the file.
+  // -----------------------------------------------------------------
+  router.patch('/photos/:id(\\d+)/description', async (req, res, next) => {
+    const id = Number(req.params.id);
+    const raw = req.body && req.body.text != null ? String(req.body.text) : null;
+    if (raw == null) return res.status(400).json({ error: 'need text (empty clears the description)' });
+    const text = raw.trim() || null;
+    if (text && text.length > DESCRIPTION_MAX) {
+      return res.status(400).json({ error: `description is too long (max ${DESCRIPTION_MAX} characters)` });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const photo = (await client.query(
+        `select description_ai from photos
+          where id = $1 and is_deleted = false and is_private = false for update`, [id],
+      )).rows[0];
+      if (!photo) { await client.query('rollback'); return res.status(404).json({ error: 'not found' }); }
+      if ((photo.description_ai || null) === text) {
+        await client.query('rollback');
+        return res.json({ ok: true, changed: false, description_ai: text });
+      }
+      await client.query(`update photos set description_ai = $1 where id = $2`, [text, id]);
+      await audit(client, {
+        actor: req.user.email, action: 'photo.description.edit',
+        entityType: 'photo', entityId: id, userId: req.user.id,
+        previousValue: { description_ai: photo.description_ai },
+        newValue: { description_ai: text, via: 'web.admin' },
+      });
+      await client.query('commit');
+      res.json({ ok: true, changed: true, description_ai: text });
     } catch (err) {
       await client.query('rollback').catch(() => {});
       next(err);

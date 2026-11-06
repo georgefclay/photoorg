@@ -982,6 +982,7 @@ module.exports = function syncRoutes({ pool }) {
               'photo.capture_date.set',
               'photo.capture_date.unconfirm',
               'photo.description.set',
+              'photo.description.edit',
               'photo.place.set',
               'photo.has_no_people.set',
               'photo.rescan_wanted',

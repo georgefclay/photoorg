@@ -672,8 +672,11 @@ def pull_confirmed(
                                            actor="web", via="sync.pull.confirmed",
                                            keep_as_suggestion=False) is not None:
                         applied += 1
-                elif action == "photo.description.set" and eid:
-                    _apply_description(conn, eid, new_value)
+                elif action in ("photo.description.set", "photo.description.edit") and eid:
+                    # .set is an accepted suggestion, .edit an admin's direct
+                    # edit on the photo page; either way the fact changes and
+                    # the payload hash makes the photo writer-due.
+                    _apply_description(conn, eid, new_value, action)
                     applied += 1
                 elif action == "photo.place.set" and eid:
                     _apply_place(conn, eid, new_value)
@@ -732,12 +735,20 @@ def _apply_date_set(conn, photo_id: int, nv: dict) -> None:
              new_value={"capture_date": cd, "capture_date_precision": cp, "source": "web"})
 
 
-def _apply_description(conn, photo_id: int, nv: dict) -> None:
-    text = nv.get("description_ai")
+def _apply_description(conn, photo_id: int, nv: dict,
+                       action: str = "photo.description.set") -> None:
+    # An emptied description is no description: NULL, so the writer drops
+    # the line from the file rather than writing an empty prefix.
+    text = str(nv.get("description_ai") or "").strip() or None
     with conn.cursor() as cur:
+        cur.execute("select description_ai from photos where id = %s for update", (photo_id,))
+        row = cur.fetchone()
+        if row is None:
+            return
         cur.execute("update photos set description_ai = %s where id = %s", (text, photo_id))
-    db.audit(conn, actor="web", action="photo.description.set",
+    db.audit(conn, actor="web", action=action,
              entity_type="photo", entity_id=photo_id,
+             previous_value={"description_ai": row[0]},
              new_value={"description_ai": text, "source": "web"})
 
 
