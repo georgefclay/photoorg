@@ -311,7 +311,7 @@ exposure, the camera's GPS and `DateTimeOriginal` — is never touched.
 
 | What | Tags | Value |
 |---|---|---|
-| Windows Title | `IFD0:XPTitle`, `XMP-dc:Title` | (Fix-up 3.) The live album names, `; `-joined; a scan with no album gets its locator (`Batch 00020 #032`); a digital photo with no album gets none. Explorer's **Title** box reads `XPTitle`. |
+| Windows Title | `IFD0:XPTitle`, `XMP-dc:Title` | (Fix-up 3.) The live album names, `; `-joined; a scan with no album gets its locator (`Batch 00020 #032`); a digital photo with no album gets none — and Explorer then shows the caption in its **Title** box (its fallback; accepted). Explorer's **Title** box reads `XPTitle` first. |
 | Windows Subject | `IFD0:XPSubject` | (Fix-up 3.) The AI description sentence, plain — Explorer's **Subject** box. |
 | Windows Comments | `IFD0:XPComment` | (Fix-up 3.) The human notes: `Back of print: …` / `Back of print (unverified transcription): …` lines, then the partial-date note; absent when there are none. Explorer's **Comments** box. The `XP*` fields are UTF-16; exiftool converts. |
 | Description | `XMP-dc:Description`, `IPTC:Caption-Abstract`, `IFD0:ImageDescription` | The caption every other tool shows. Lines in fixed order, sentence first (fix-up 3): `… (AI-generated)` · `Back of print: …` or `Back of print (unverified transcription): …` · `Date: March 1962` / `Date: about 1962` / `Date: 1960s` (only when not day-precise) · `People: Margaret Jane 'Peggy' Clay (née Schmidt; also Maggie), George Clay Jr.` · `Albums: A; B`. Under 2,000 characters; the AI text is cut first and keeps its ` (AI-generated)` suffix. |

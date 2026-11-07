@@ -1608,6 +1608,11 @@ archive survives this software. Tag-by-tag list: `shared/SCHEMA.md` →
   lines and the partial-date note. `ImageDescription` still carries the full
   caption for every other tool, and Explorer does not show it while `XP*` is
   set.
+- **An empty Title box is impossible in Explorer while a caption exists**:
+  with no `XPTitle` (or a blank one) it falls back to any of the three caption
+  fields. So an album-less digital photo (8,575 of them) shows the AI
+  sentence in Title as well as Subject — George accepted that (2026-11-06);
+  the sentence leads the caption, so it reads cleanly.
 - **The caption leads with the sentence**: `… (AI-generated)`, back of
   print, date note, `People:`, `Albums:`. The prefix `AI-generated
   description: ` is gone; the suffix survives the 2,000-character cut.
