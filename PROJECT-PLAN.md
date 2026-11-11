@@ -592,6 +592,8 @@ this is harmless.
 
 25. **No desktop edit path for an accepted description** (Phase 13 fix-up 2, by design for now). George corrects descriptions on the site (Edit description / accepting a member's suggestion), and both come down through `pull_confirmed`. The desktop shows `description_ai` but cannot change it, and Corrections' find & replace does not cover it (its description target is pending suggestions only). If a typo ever spans many descriptions (a Canaca-style bulk fix), add `photos.description_ai` as a Corrections target. It must stamp the photo so the push and the next pull agree; `photos` has no `edited_on_*` pair today.
 
+26. **Sync tab UI: one Pull button, plain results** (George, 2026-11-10: "this UI is horrible"). Three pull buttons whose names don't say what they bring (he pressed *Pull approved contributions* waiting for an accepted description), results shown as raw dicts (`done: {'contributions': 0, 'files': 0}`), and a *Write metadata* button that silently hides at 0. Written as **Phase 9 fix-up 4** in `prompts/phase-09-web-core-sync.md`, **not yet approved** (George reviews with Cowork, then GO). The prompt file also holds George's uncommitted fix-up 3 (the Groups cascade); commit them together.
+
 ## 6. Risks
 
 - Volume: ~17k files means every review UI must be keyboard-first and resumable, or George will not finish. Triage exists to shrink the set before faces and cleanup run.
