@@ -164,3 +164,159 @@ GO.
   - **Step 3 — private-photo test** (`tools/verify_private.py`, photo id=1): baseline files present; after `is_private=true`, a full push's wire batches (n=13 256) do **not** include id=1; `POST /sync/photos` synthesised with `is_private=true` returns 400; `/media/thumbs/1` returns 404 to an admin session; `/api/photos` list omits it; after unmark, a push re-includes it and files remain on the web. **VERIFY-PRIVATE: PASS**.
   - Verification scripts committed under `desktop/tools/`: `run_push.py`, `verify_private.py`.
 
+
+## Phase 9 fix-up 3 — Groups panel: assign by people, in priority order (2026-11-05)
+
+George starts the group bulk-assignment (PROJECT-PLAN §5 item 6) and his
+workflow is a cascade of person rules: *"photos with any of THESE people go to
+Arbuckle; then photos with any of THOSE people go to Clay Family — unless a
+photo is already in Arbuckle."* The Sync → Groups tab cannot say that today:
+one numeric `person_id` at a time, no way to keep already-grouped photos out
+of a later rule, and silent zeros on a miss. Read `sync/bulk.py` and the
+Groups tab in `modes/sync/__init__.py`, and PROJECT-PLAN §5 items 21 and 24.
+Work in `desktop/`. Start with `git pull`. Run before George assigns anything.
+
+### A. The Groups tab
+1. **A people picker: two lists side by side** (George's design,
+   2026-11-05). The left list holds every live person, sorted by display
+   name, with a search box above it to narrow; each row shows the name, its
+   nicknames, and how many photos carry that person's tagged face, and
+   identically named people (the father/son case, #2608) are told apart by
+   the id on the row. **Double-click moves a name to the right list;
+   double-click in the right list sends it back.** The right list is the
+   rule: Assign takes every photo with a live, undisputed face of ANY person
+   in the right list — the same face clause `resolve_photo_ids` already
+   uses. After a successful apply the right list clears, ready for the next
+   rule in the cascade; the group dropdown, "only unfiled" checkbox and
+   preview below apply to the picker exactly as to the other filters.
+2. New filter kind **unfiled** (value box disabled): the backend's existing
+   `unfiled_ids()`.
+3. **"Only unfiled" checkbox, default checked, applying to every Assign**:
+   restrict the resolved photos to those in no live group. This is what makes
+   the cascade "first rule wins" — George runs his rules in priority order.
+   Unassign ignores the checkbox.
+4. **Preview, then apply**: Assign first shows "N match the filter; M after
+   the only-unfiled restriction → add M to <group>?" with OK / Cancel. An
+   empty result says plainly "no photos match <what was searched>" — never a
+   silent 0 (item 21's lesson).
+5. `scan_batch` keeps exact match, but an all-digits value gets `Batch `
+   prefixed first, and the message says what was searched.
+6. `resolve_photo_ids` adds `is_private = false` (item 24a — `unfiled_ids`
+   beside it already has it).
+7. The `photo_group.bulk` audit row gains the filter that produced it: kind,
+   value (for people: the names given and the resolved person ids),
+   only_unfiled — so any rule can be reconstructed later.
+
+### B. Item 21 while you are in there
+The Metadata panel's batch box and the CLI `--batch` get the same all-digits
+`Batch ` prefix and a "no photos in batch '…'" message instead of an
+ordinary-looking "0 due".
+
+### C. One-line housekeeping
+`job_runs` row 48 — the metadata write killed for low memory on 2026-11-05 —
+still says `running`; mark it `failed` the way row 42 was.
+
+### Tests
+The picker lists every live person with a photo count and the search box
+narrows it; identically named people are distinguishable; double-click moves
+a name both ways; the rule matches photos of any person in the right list and
+skips disputed and deleted faces; the right list clears after an apply; only-
+unfiled restricts an Assign and leaves Unassign alone; private photos never
+resolve (24a); a bare batch number matches its batch; the unfiled kind equals
+`unfiled_ids()`; preview counts equal what apply then does; the audit carries
+the filter.
+
+### Verification, then stop
+1. `pytest` green.
+2. On the live DB, previews only — assign nothing: paste the counts for one
+   real people rule George can sanity-check (two or three well-tagged people in the right list),
+   the unfiled count, and a bare-number batch.
+3. One tiny round trip: assign a single photo to Clay Family through the new
+   preview, show the `photo_groups` row and the audit row, then Unassign it
+   (before any push, so no file is uploaded).
+4. `PROJECT-PLAN.md` (§5 items 21 and 24 closed, Progress entry), `CLAUDE.md`
+   (Groups tab section), commit: `Phase 9 fix-up 3: people-cascade bulk
+   assign`.
+
+This fix-up is pre-approved — **GO** — but if anything above does not match
+the code's reality, append questions under `### Questions (fix-up 3)` here
+and stop instead.
+
+## Phase 9 fix-up 4 — Sync tab: one Pull button, plain results (2026-11-10)
+
+**DEFERRED to Phase 16 (George, 2026-11-10) — do not build this as a fix-up.** George wants the Pull rework done inside the full desktop UI rework rather than piecemeal. The text below stays as the spec and is collected in `prompts/phase-16-desktop-ui.md`. Phase 9 fix-up 3 above is still live and runs next.
+
+George's verdict on the Pull tab, after the Phase 13 fix-up 2 live loop: the
+UI is horrible. He accepted a description on the site, went to Sync → Pull,
+pressed **Pull approved contributions** (the button for new uploads) and got
+`done: {'contributions': 0, 'files': 0}`. That was true, but useless: the
+accept he was waiting for comes down through a *different* button,
+**Pull confirmed values**, which Claude Code then ran and which applied 8
+facts. Two faults: (1) three pull buttons whose names do not say what
+George is waiting for, so he has to know the sync internals to pick one;
+(2) results printed as raw Python dicts (`_on_job_finished` appends
+`f"done: {result}"`, and the status line says the same). Read the Pull tab
+and `_on_job_finished` in `modes/sync/__init__.py`, and `pull_groups`,
+`pull_confirmed`, `pull_contributions` in `modes/sync/pull.py`. Work in
+`desktop/`. Start with `git pull`. Desktop only — no web change, no deploy.
+
+### A. One button
+1. **"Pull from the site"** replaces the three as the main action. It runs
+   the same sequence a push begins with, plus contributions: `pull_groups`,
+   then `pull_confirmed` (which already runs `pull_web_origin` and
+   `pull_web_edits` first), then `pull_contributions` when a `|contrib` root
+   is configured. One job slot, same `_run_worker`, same
+   `with_metadata_due` count at the end.
+2. The three single-purpose buttons move under a collapsed **Advanced**
+   section on the same tab (they are still useful when one stage fails), and
+   their labels say what they bring: *Groups and memberships*, *Accepted
+   suggestions and edits*, *New uploads (contributions)*.
+3. A stage that raises does not stop the others (the push's
+   `failed_stages` rule): the summary names what failed and why, the rest
+   still run.
+
+### B. Plain results
+1. **No dict reaches the screen.** `_on_job_finished` / the status line
+   render a sentence per job type; the raw dict may go to the log file.
+2. For a pull, the sentence says what came down **by kind**, e.g.
+   *"Brought down 8 changes from the site: 1 description, 6 person tags,
+   1 place. No new uploads. 4 photos need their metadata re-written."*
+   with zeros said plainly (*"Nothing new on the site."*). That needs
+   `pull_confirmed` to return a per-action breakdown instead of one int
+   (a `Counter` keyed by audit action, mapped to words: `photo.description.set`
+   / `.edit` → description, `face.assign` → person tag, `photo.place.set` →
+   place, `photo.capture_date.set` / `.unconfirm` → date, …), plus the
+   counts `pull_web_origin` and `pull_web_edits` already compute. Keep the
+   int available to existing callers (`run_push`, tests) or update them.
+3. The existing **Write metadata for N changed photos** button stays where
+   it is; the sentence ends by pointing at it when N > 0. **It never just
+   disappears**: today `_show_metadata_due` hides the button at 0, and George
+   went looking for it (2026-11-10) with no way to tell "nothing to do" from
+   "broken". At 0 the line says *"All photo files are up to date."*; it also
+   shows on opening the Sync mode (the due count is 1.3 s, off the GUI thread
+   as now), not only after a pull or push.
+4. Push gets the same treatment: *"Sent 13,294 photos' details and 5 files
+   (8.7 MB). Pulled first: 9 changes (…)."* instead of `done: {...}`.
+
+### C. Housekeeping
+Phase 9 fix-up 3's item C (`job_runs` 48 → `failed`) is already done
+(2026-11-10, with row 52 too); drop it from that fix-up if it has not run.
+
+### Tests
+One button runs all three stages in order and a failing stage does not stop
+the rest; the summary sentence for: nothing new, a mixed batch (description +
+person tags + place), a failed stage, new contributions; no `{` / `}` dict
+text in the status line or log widget after any job; `pull_confirmed`'s
+breakdown matches the audit actions applied; the metadata-due sentence
+appears when the pull made photos due. GUI tests follow the existing
+`@Slot` / job-slot rules (CLAUDE.md, Phase 7 "Two UI rules").
+
+### Verification, then stop
+1. `pytest` green.
+2. On the live site: George makes one small change (accept a suggestion or
+   edit a description), then presses **Pull from the site** — paste the
+   sentence it shows. Then a second press — paste "Nothing new on the site."
+3. `CLAUDE.md` (Sync tab), `PROJECT-PLAN.md` (Progress entry), commit:
+   `Phase 9 fix-up 4: one Pull button, plain results`.
+
+**Not yet approved** — George reviews this with Cowork and adds GO.

@@ -31,3 +31,6 @@ inference/logs/
 # Claude local settings
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# Chat downloads saved into the repo folder (family photos, never committed)
+Claude outputs/
