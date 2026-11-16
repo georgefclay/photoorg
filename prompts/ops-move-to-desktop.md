@@ -123,6 +123,83 @@ no Code session mid-fix-up, app closed.
 - **A5.** Task Scheduler (non-Microsoft tasks), both Startup folders and
   HKCU Run: nothing references the project.
 
+### Phase B — desktop (`DESKTOP-2DP4KF5`), 2026-11-16
+- **B1.** Done by copy, not clone (2026-11-15 PM, robocopy over RDP from
+  `\\tsclient\C\Programming\Photos`, excluding `node_modules`, `.venv`,
+  `__pycache__`, build output; `.git`, `GC.md` and the three `.env` files came
+  across). The SSH key came across but not the `github-photoarchive` alias, so
+  the `Host` block was added to `~/.ssh/config` (backup `config.bak-20261116`).
+  `git fetch` → the laptop's A1 commits; `git diff --ignore-cr-at-eol
+  origin/main` was empty for tracked files and the two untracked prompts
+  matched origin apart from this note, so `git reset --hard origin/main`
+  (`946dfdd`). `GC.md` and all `.env` files are ignored.
+- **B2.** The desktop runs **Postgres 18.3**, not 16 (the dump is 16.11;
+  `pg_restore` 18 reads it). No `photo_user` existed: created as `postgres`
+  (login, no CREATEDB, password per `GC.md`), then `photoorg`, `photoorg_web`,
+  `photoorg_test` owned by it. `pg_restore --exit-on-error` exit 0 in 21 s.
+  **Every count matches A2's dump-time list exactly** (photos 14,470, live
+  keep/private 12,690, photo_masters 14,570, photo_backs 850, faces 23,464,
+  people 118, person_name_variants 0, suggestions 34,901, albums 7,
+  album_photos 258, places 3, place_aliases 0, photo_places 3, photo_groups
+  143, audit_log 129,078, job_runs 55); head
+  `1793369363869_phase-12-download-export`; 215 MB (no bloat after restore);
+  system_identifier **7618623477443291636**. `migrate:up`: "No migrations to
+  run!".
+- **B3.** `photoorg_web`: GC.md procedure with `DATABASE_URL` and
+  `PHOTOORG_DB_ROLE=web` inline — 35 migrations, second run a no-op, 2,827
+  nicknames, `node tools/id-floor.js` OK on all seven sequences.
+  `photoorg_test`: `npm run test:setup`. Local web `PHOTO_DIR` is
+  `D:\Photos-web-local` (moved off C: long ago, per GC.md), so it travelled on
+  D: with its subfolders; nothing to recreate on C:.
+- **B4.** **Python was not installed** (only the Store stub) and **neither was
+  exiftool**: `winget install Python.Python.3.12 --scope user` (3.12.10) and
+  `winget install OliverBetz.ExifTool --version 13.59`, which lands exactly at
+  `desktop/.env`'s `EXIFTOOL_PATH`. `desktop\.venv` + `pip install -e .[dev]`;
+  `npm ci` in `shared/` and `web/`.
+- **B5.** `check_working_files --dry-run` (78 s): 12,690 live photos and 850
+  backs `already_ok`, every post-condition 0 (247 bare pointers on
+  soft-deleted photos, unresolved as designed). **ACLs: every deny on D: named
+  the laptop's SID (`S-1-5-21-2069390313-…-1001`), so on this machine nothing
+  was denied — not just `D:\Contributed`, the masters too.** Re-applied the
+  documented denies for `DESKTOP-2DP4KF5\George` (no elevation needed):
+  `D:\Photos` and `D:\Scanned Photos` `(OI)(CI)(WD,AD,DC)`, `D:\Contributed`
+  and `D:\Contributed\georgefclay_gmail.com` `(WD,DC)`,
+  `…\georgefclay_gmail.com\1` `(OI)(CI)(WD,AD,DC)` — each now mirrors the
+  laptop entry beside it (left in place; harmless). `run_masters_guard`: all
+  three roots and their sampled subfolders read-only; a probe file in
+  `_incoming/` writes and deletes.
+- **B6.** First desktop run: 288 passed then
+  `test_a_sixteen_bit_greyscale_tiff_stays_sixteen_bit` failed — the fresh
+  venv had **Pillow 13.0.0**, which refuses `fromarray(mode="I;16")`
+  (`cleanup/render.py` `_save`; a real 16-bit cleanup accept would fail too).
+  Pinned the venv to 12.3.0 and `pyproject.toml` to `Pillow<13`
+  (PROJECT-PLAN §5 item 27). Then **desktop 784 passed, 1 skipped**
+  (8.5 min); **web 256/256** (2.6 min), run after, never together.
+- **B7.** `INFERENCE_URL` is `http://192.168.50.219:8500` (an IP, so nothing
+  to resolve); `/health` → `ok`, all five batch jobs completed, inboxes empty,
+  blackout inactive.
+- **B8.** Pull contributions: 0 / 0. `/sync/status` before: web DB
+  `photoorg` / 7648012335739445998 ≠ ours, `id_floor.ok` true — the
+  shared-DB guard passes. `tools/run_push.py` (pulls first): exit 0, **0
+  failed stages**, 13,294 photos upserted, **0 files**, 222 s; per table
+  album_photos 253, albums 6, faces 23,464, people 118, photo_backs 845,
+  photo_groups 4, photo_masters 13,537, photo_places 3, suggestions 34,849,
+  the rest 0 — identical to A2. `/sync/status` after: identical to A2's. The
+  cursors in `D:\PhotoArchive\sync-state\sync_state.json` travelled: no
+  re-delivery.
+- **B9.** `run-desktop.bat` opens ("Photo Archive" window; log: masters guard
+  read-only on all three roots, `crash.log` empty). Metadata `count_due`:
+  **4 due, 4 in a group** — the "Testing 2" photos from A2's pull, as A2
+  said; the write + push is still to do. **George to eyeball the Sync tab's
+  group list** (left open).
+- **B10.** **Not done by Claude:** the read-only `ssh … git log -1` to the VM
+  was refused by Claude Code's permission classifier (as GC.md already
+  records for remote writes). George: `! ssh -i ~/.ssh/Tronkits.pem
+  ubuntu@44.255.253.62 'cd ~/photoorg && git log -1 --oneline'`.
+- **B11.** PROJECT-PLAN Progress 2026-11-16 + §5 item 27; GC.md machine notes
+  (desktop PC entry, laptop retired); committed `Ops: development moved to the
+  desktop`.
+
 This runbook is pre-approved — **GO** for each phase on its machine — but if
 anything does not match reality, append questions under `### Questions` here
 and stop instead.
