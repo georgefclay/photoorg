@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import numpy as np
 import piexif
 import pytest
 from PIL import Image, ImageOps
@@ -163,12 +164,10 @@ def test_face_writer_stores_bbox_in_display_frame_for_portrait_phone_photo(phase
         int(bbox["x"]), int(bbox["y"]),
         int(bbox["x"] + bbox["w"]), int(bbox["y"] + bbox["h"]),
     ))
-    red_pixels = 0
-    total = 0
-    for pixel in crop.getdata():
-        total += 1
-        if pixel[0] > 200 and pixel[1] < 40:
-            red_pixels += 1
+    # numpy rather than Image.getdata(), which Pillow 14 removes.
+    px = np.asarray(crop.convert("RGB")).reshape(-1, 3)
+    total = len(px)
+    red_pixels = int(((px[:, 0] > 200) & (px[:, 1] < 40)).sum())
     assert red_pixels == total, (
         f"bbox does not land squarely on red patch: "
         f"{red_pixels}/{total} red pixels"

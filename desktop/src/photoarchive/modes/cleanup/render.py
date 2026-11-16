@@ -174,8 +174,20 @@ def default_ticked(
 # --------------------------------------------------------------------------
 
 def _save(img_arr: np.ndarray, out_path: Path, *, mime: str, mode: str) -> None:
+    """Write the render. Pillow infers the mode from the array's dtype and
+    shape; `mode` is what we expect it to infer, and a mismatch raises.
+
+    Passing `mode=` to `fromarray` was deprecated in Pillow 12 and refused
+    outright for uint16 in 13 ("Invalid mode for data type"), which broke
+    every 16-bit greyscale TIFF accept. Inference gives `I;16` / `L` / `RGB`
+    on both, and the 16-bit round trip stays bit-exact.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    im = Image.fromarray(img_arr, mode=mode)
+    im = Image.fromarray(img_arr)
+    if im.mode != mode:
+        raise ValueError(
+            f"render produced Pillow mode {im.mode!r}, expected {mode!r} "
+            f"(array {img_arr.dtype} {img_arr.shape})")
     if mime == "image/tiff":
         im.save(out_path, format="TIFF", compression="tiff_lzw")
     else:
@@ -285,8 +297,7 @@ def render_full(
     phash = dhash = None
     thumb_bytes = None
     if want_hashes:
-        preview = Image.fromarray(ops.as_uint8(out),
-                                  mode="L" if out.ndim == 2 else "RGB")
+        preview = Image.fromarray(ops.as_uint8(out))
         try:
             phash, dhash = perceptual_hashes(preview)
         except Exception as e:  # pragma: no cover — imagehash is robust
@@ -334,7 +345,7 @@ def render_preview(
     u8 = ops.as_uint8(out)
     if u8 is not out:
         del out
-    im = Image.fromarray(u8, mode="L" if u8.ndim == 2 else "RGB").convert("RGB")
+    im = Image.fromarray(u8).convert("RGB")
     if max(im.size) > edge:
         im.thumbnail((edge, edge), Image.LANCZOS)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -411,4 +422,4 @@ def crop_at_full_res(
     del arr
     u8 = ops.as_uint8(out)
     del out
-    return Image.fromarray(u8, mode="L" if u8.ndim == 2 else "RGB").convert("RGB")
+    return Image.fromarray(u8).convert("RGB")

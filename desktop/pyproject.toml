@@ -9,10 +9,7 @@ description = "Family photo archive desktop app (ingest, triage, dedupe, cleanup
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "PySide6",
-  # Pillow 13 refuses fromarray(mode="I;16") on a uint16 greyscale array,
-  # which is how Cleanup saves 16-bit TIFFs (render._save). PROJECT-PLAN §5
-  # item 27 — lift the cap once render.py handles 13.
-  "Pillow<13",
+  "Pillow",
   "pillow-heif",
   "imagehash",
   "psycopg[binary,pool]",
