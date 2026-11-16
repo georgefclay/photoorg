@@ -192,10 +192,12 @@ no Code session mid-fix-up, app closed.
   **4 due, 4 in a group** — the "Testing 2" photos from A2's pull, as A2
   said; the write + push is still to do. **George to eyeball the Sync tab's
   group list** (left open).
-- **B10.** **Not done by Claude:** the read-only `ssh … git log -1` to the VM
-  was refused by Claude Code's permission classifier (as GC.md already
-  records for remote writes). George: `! ssh -i ~/.ssh/Tronkits.pem
-  ubuntu@44.255.253.62 'cd ~/photoorg && git log -1 --oneline'`.
+- **B10.** First attempt refused by Claude Code's permission classifier;
+  re-run with George's explicit permission (`Tronkits.pem`), read-only.
+  `/home/ubuntu/photoorg` is at `3e253e2` (Phase 13 fix-up 2), 9 commits
+  behind `main`, but the only `web/`/`shared/` change since is
+  `shared/SCHEMA.md` (docs) — no deploy owed. Untracked on the VM:
+  `ops/pg_dump_photoorg.sh` (the nightly dump script, kept out of git there).
 - **B11.** PROJECT-PLAN Progress 2026-11-16 + §5 item 27; GC.md machine notes
   (desktop PC entry, laptop retired); committed `Ops: development moved to the
   desktop`.
